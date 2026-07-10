@@ -316,11 +316,13 @@ def get_all_functions_from_file(file_path):
 
 
 def write_python_code(request: str):
-    from langchain_anthropic import ChatAnthropic
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
 
-    model = ChatAnthropic(model="claude-3-5-sonnet-20240620")
+    from biomni.config import default_config
+    from biomni.llm import get_llm
+
+    model = get_llm(config=default_config)
     template = """Write some python code to solve the user's problem.
 
     Return only python code in Markdown format, e.g.:

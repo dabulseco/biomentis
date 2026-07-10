@@ -45,7 +45,9 @@ def get_llm(
         if api_key is None:
             api_key = config.api_key or "EMPTY"
 
-    # Use defaults if still not specified
+    # Use defaults if still not specified. This is only the last-resort default when
+    # get_llm is called without a config; the normal A1/react path resolves the
+    # effective default (including the local-first Ollama fallback) via BiomniConfig.
     if model is None:
         model = "claude-3-5-sonnet-20241022"
     if temperature is None:
@@ -231,9 +233,12 @@ def get_llm(
             raise ImportError(  # noqa: B904
                 "langchain-ollama package is required for Ollama models. Install with: pip install langchain-ollama"
             )
+        # Falls back to OLLAMA_HOST for consistency with the `ollama` package's own
+        # convention; needed to reach a remote daemon or an Ollama Cloud sign-in.
         return ChatOllama(
             model=model,
             temperature=temperature,
+            base_url=base_url or os.getenv("OLLAMA_HOST"),
         )
 
     elif source == "Bedrock":

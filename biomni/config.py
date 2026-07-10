@@ -80,6 +80,39 @@ class BiomniConfig:
         if env_token:
             self.protocols_io_access_token = env_token
 
+        self._resolve_local_first_default()
+
+    def _resolve_local_first_default(self):
+        """If nothing else is configured, default to a locally available Ollama model.
+
+        This only fires when llm/source/base_url/api_key are all still unset and no
+        cloud provider API key is present in the environment, so anyone with explicit
+        config or a cloud key set sees zero behavior change. A user who happens to
+        explicitly pass the same string as the class default (llm="claude-sonnet-4-5")
+        is indistinguishable from "unset" and will also see this fire; that collision
+        is accepted as an edge case.
+        """
+        if os.getenv("BIOMNI_DISABLE_LOCAL_FALLBACK", "").lower() == "true":
+            return
+        if self.llm != "claude-sonnet-4-5" or self.source is not None:
+            return
+        if self.base_url or self.api_key:
+            return
+        cloud_key_env_vars = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "AWS_REGION")
+        if any(os.getenv(var) for var in cloud_key_env_vars):
+            return
+
+        try:
+            from biomni.ollama_utils import pick_default_ollama_model
+
+            local_model = pick_default_ollama_model()
+        except Exception:
+            local_model = None
+
+        if local_model:
+            self.llm = local_model
+            self.source = "Ollama"
+
     def to_dict(self) -> dict:
         """Convert config to dictionary for easy access."""
         return {

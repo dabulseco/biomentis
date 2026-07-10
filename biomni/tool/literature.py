@@ -254,7 +254,11 @@ def advanced_web_search_claude(
         api_key = os.getenv("ANTHROPIC_API_KEY")
 
     if "claude" not in model:
-        raise ValueError("Model must be a Claude model.")
+        raise ValueError(
+            "query_scholar uses Anthropic's server-side web_search tool and requires a Claude "
+            "model + ANTHROPIC_API_KEY, regardless of the agent's configured default LLM/source "
+            f"(currently '{model}'). Set ANTHROPIC_API_KEY and pass a Claude model to use this tool."
+        )
 
     if not api_key:
         raise ValueError("Set your api_key explicitly.")

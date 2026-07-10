@@ -2,7 +2,6 @@ import contextlib
 import re
 
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
 
 
 class ToolRetriever:
@@ -88,9 +87,12 @@ IMPORTANT GUIDELINES:
 
         prompt = "\n".join(prompt_sections) + response_format
 
-        # Use the provided LLM or create a new one
+        # Use the provided LLM or create one from the configured default
         if llm is None:
-            llm = ChatOpenAI(model="gpt-4o")
+            from biomni.config import default_config
+            from biomni.llm import get_llm
+
+            llm = get_llm(config=default_config)
 
         # Invoke the LLM
         if hasattr(llm, "invoke"):

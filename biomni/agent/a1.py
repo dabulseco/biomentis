@@ -20,6 +20,7 @@ from biomni.llm import SourceType, get_llm
 from biomni.model.retriever import ToolRetriever
 from biomni.tool.support_tools import run_python_repl
 from biomni.tool.tool_registry import ToolRegistry
+from biomni.ui_core import list_available_providers, stream_agent_events
 from biomni.utils import (
     check_and_download_s3_files,
     clean_message_content,
@@ -2643,11 +2644,7 @@ Each library is listed with its description to help you understand its functiona
         except ImportError:
             raise ImportError("Gradio is not installed. Please install it with: pip install gradio") from None
 
-        import os
         from time import time
-
-        # Define supported file extensions
-        SUPPORTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".pdf")
 
         self.main_history_copy = []
 
@@ -2665,6 +2662,16 @@ Each library is listed with its description to help you understand its functiona
                     gr.update(value="Incorrect access code. Please check your access code.", visible=True),
                 )
 
+        def _history_messages_before_this_turn():
+            messages = []
+            for msg in self.main_history_copy:
+                if msg["role"] == "user":
+                    messages.append(HumanMessage(content=msg["content"]))
+                elif msg["role"] == "assistant":
+                    if msg["content"] not in ["Executor is working on it 👉"]:
+                        messages.append(AIMessage(content=msg["content"]))
+            return messages
+
         def generate_response(prompt_input, inner_history=None, main_history=None):
             if main_history is None:
                 main_history = []
@@ -2673,6 +2680,8 @@ Each library is listed with its description to help you understand its functiona
             text_input = prompt_input.get("text", "")
             files = prompt_input.get("files", [])
 
+            history_messages = _history_messages_before_this_turn()
+
             self.main_history_copy += [{"role": "user", "content": text_input}]
             main_history.append(ChatMessage(role="user", content=text_input if text_input else "[Uploaded file]"))
 
@@ -2680,267 +2689,126 @@ Each library is listed with its description to help you understand its functiona
             main_history.append(ChatMessage(role="assistant", content="Executor is working on it 👉"))
             yield inner_history, main_history
 
-            # Process uploaded files if any
-            for file_info in files:
-                file_path = file_info
-                text_input += f"\n\n User uploaded this file: {file_path}\n Please use it if needed."
+            # Keep track of the ChatMessage for the code block currently executing, so its
+            # status can be flipped from pending -> done once the matching observation arrives.
+            code_execution_messages = []
 
-            agent_messages = []
-            for msg in self.main_history_copy:
-                if msg["role"] == "user":
-                    agent_messages.append(HumanMessage(content=msg["content"]))
-                elif msg["role"] == "assistant":
-                    if msg["content"] not in ["Executor is working on it 👉"]:
-                        agent_messages.append(AIMessage(content=msg["content"]))
+            for event in stream_agent_events(self, text_input, files, history_messages, thread_id):
+                if event.type == "status":
+                    inner_history.append(ChatMessage(role="assistant", content=event.content))
+                    yield inner_history, main_history
 
-            agent_messages.append(HumanMessage(content=text_input))
-
-            # Prepare inputs for the agent
-            inputs = {"messages": agent_messages, "next_step": None}
-            config = {"recursion_limit": 500, "configurable": {"thread_id": thread_id}}
-
-            # Stream the agent's responses
-            t = time()
-            solution_found = False
-
-            # Configure the agent with tool retrieval if needed
-            if self.use_tool_retriever:
-                print("Using tool retriever...")
-                inner_history.append(
-                    ChatMessage(
-                        role="assistant",
-                        content="Retrieving relevant tools, data lake items, and libraries...",
-                    )
-                )
-                yield inner_history, main_history
-
-                try:
-                    selected_resources_names = self._prepare_resources_for_retrieval(text_input)
-                    if selected_resources_names:
-                        self.update_system_prompt_with_selected_resources(selected_resources_names)
-                except Exception as e:
-                    print(f"Warning: Tool retrieval failed: {e}")
-                    print("Continuing without tool retrieval...")
+                elif event.type == "reasoning":
                     inner_history.append(
                         ChatMessage(
                             role="assistant",
-                            content="Tool retrieval unavailable, proceeding with all tools...",
+                            content=event.content,
+                            metadata={"title": event.title, "log": "Agent's thinking process"},
                         )
                     )
                     yield inner_history, main_history
 
-            # Keep track of code execution messages
-            code_execution_messages = []
-
-            # Stream the agent's responses
-            for s in self.app.stream(inputs, stream_mode="values", config=config):
-                t_step = time() - t
-                message = s["messages"][-1]
-
-                # Skip the first message which is the input task
-                if message.content == text_input:
-                    t = time()
-                    continue
-
-                # Process the message
-                if isinstance(message.content, str):
-                    # Extract thinking/reasoning part (text before any tags)
-                    tag_positions = []
-                    for tag in ["<execute>", "<solution>", "<observation>"]:
-                        pos = message.content.find(tag)
-                        if pos != -1:
-                            tag_positions.append(pos)
-
-                    # If there are tags, extract the text before the first tag
-                    if tag_positions:
-                        first_tag_pos = min(tag_positions)
-                        thinking = message.content[:first_tag_pos].strip()
-                        if thinking:
-                            inner_history.append(
-                                ChatMessage(
-                                    role="assistant",
-                                    content=f"{thinking}",
-                                    metadata={"title": "🤔 Reasoning", "log": "Agent's thinking process"},
-                                )
-                            )
-                            yield inner_history, main_history
-
-                    # Check for solution tag
-                    solution_match = re.search(r"<solution>(.*?)</solution>", message.content, re.DOTALL)
-                    if solution_match and not solution_found:
-                        solution = solution_match.group(1).strip()
-                        main_history.append(
-                            ChatMessage(
-                                role="assistant",
-                                content=solution,
-                                metadata={"title": "✅ Answer", "log": "Final answer provided by the agent"},
-                            )
-                        )
-                        self.main_history_copy += [{"role": "assistant", "content": solution}]
-                        solution_found = True
-                        yield inner_history, main_history
-
-                    # Check for execute tag
-                    execute_match = re.search(r"<execute>(.*?)</execute>", message.content, re.DOTALL)
-                    if execute_match:
-                        code = execute_match.group(1).strip()
-                        language = "python"
-                        if code.strip().startswith("#!R"):
-                            language = "r"
-                            code = re.sub(r"^#!R", "", code, count=1).strip()
-                        elif code.strip().startswith("#!BASH") or code.strip().startswith("#!CLI"):
-                            language = "bash"
-                            code = re.sub(r"^#!BASH|^#!CLI", "", code, count=1).strip()
-
-                        code_msg = ChatMessage(
+                elif event.type == "solution":
+                    main_history.append(
+                        ChatMessage(
                             role="assistant",
-                            content=f"##### Code: \n```{language}\n{code}\n```",
+                            content=event.content,
+                            metadata={"title": event.title, "log": "Final answer provided by the agent"},
+                        )
+                    )
+                    self.main_history_copy += [{"role": "assistant", "content": event.content}]
+                    yield inner_history, main_history
+
+                elif event.type == "code":
+                    code_msg = ChatMessage(
+                        role="assistant",
+                        content=f"##### Code: \n```{event.language}\n{event.content}\n```",
+                        metadata={
+                            "title": event.title,
+                            "log": f"Executing {event.language.capitalize()} code block...",
+                            "status": "pending",
+                            "start_time": time(),
+                        },
+                    )
+                    inner_history.append(code_msg)
+                    code_execution_messages.append(code_msg)
+                    yield inner_history, main_history
+
+                elif event.type == "observation":
+                    if code_execution_messages:
+                        code_msg = code_execution_messages[-1]
+                        code_msg.metadata.update(
+                            {
+                                "status": "done",
+                                "duration": event.duration,
+                                "log": f"Code execution completed in {event.duration:.2f}s",
+                            }
+                        )
+
+                    inner_history.append(
+                        ChatMessage(
+                            role="assistant",
+                            content=f"##### Observation: \n```\n{event.content}\n```",
                             metadata={
-                                "title": "🛠️ Executing code...",
-                                "log": f"Executing {language.capitalize()} code block...",
-                                "status": "pending",
-                                "start_time": t,
+                                "status": "done",
+                                "duration": event.duration,
+                                "log": "Observation from code execution",
+                                "collapsed": event.collapsible,
+                                "collapsible": event.collapsible,
                             },
                         )
-                        inner_history.append(code_msg)
-                        code_execution_messages.append(code_msg)
-                        yield inner_history, main_history
+                    )
+                    yield inner_history, main_history
 
-                    # Check for observation
-                    observation_match = re.search(r"<observation>(.*?)</observation>", message.content, re.DOTALL)
-                    if observation_match:
-                        observation = observation_match.group(1).strip()
-
-                        # Update the status of the most recent code execution message
-                        if code_execution_messages:
-                            code_msg = code_execution_messages[-1]
-                            code_msg.metadata.update(
-                                {
-                                    "status": "done",
-                                    "duration": t_step,
-                                    "log": f"Code execution completed in {t_step:.2f}s",
-                                }
-                            )
-
-                        # Create a new message for the observation
+                elif event.type == "file":
+                    if event.file_path is None:
                         inner_history.append(
                             ChatMessage(
                                 role="assistant",
-                                content=f"##### Observation: \n```\n{observation}\n```",
-                                metadata={
-                                    "status": "done",
-                                    "duration": t_step,
-                                    "log": "Observation from code execution",
-                                    "collapsed": True,
-                                    "collapsible": True,
-                                },
+                                content="",
+                                metadata={"title": event.title, "log": "Files generated by the agent"},
                             )
                         )
-                        yield inner_history, main_history
-
-                        # Check for file paths in the observation
-                        if isinstance(observation, str) and any(ext in observation for ext in SUPPORTED_EXTENSIONS):
-                            matches = re.findall(r"(\S+?(?:\.png|\.jpg|\.jpeg|\.gif|\.bmp|\.webp|\.pdf))", observation)
-
-                            valid_matches = []
-                            for match in matches:
-                                if not (
-                                    match.startswith("Warning:") or match.startswith("Error:") or match.startswith("'")
-                                ):
-                                    if not match.startswith("."):
-                                        valid_matches.append(match)
-
-                            if valid_matches:
-                                inner_history.append(
-                                    ChatMessage(
-                                        role="assistant",
-                                        content="",
-                                        metadata={"title": "📁 Files", "log": "Files generated by the agent"},
-                                    )
-                                )
-
-                                for file_path in valid_matches:
-                                    file_path = file_path.strip("\"'").strip()
-
-                                    abs_path = None
-                                    if os.path.isabs(file_path) and os.path.exists(file_path):
-                                        abs_path = file_path
-                                    elif os.path.exists(os.path.join(os.getcwd(), file_path)):
-                                        abs_path = os.path.join(os.getcwd(), file_path)
-                                    elif (
-                                        hasattr(self, "path")
-                                        and self.path
-                                        and os.path.exists(os.path.join(self.path, file_path))
-                                    ):
-                                        abs_path = os.path.join(self.path, file_path)
-
-                                    if abs_path:
-                                        if file_path.lower().endswith(".pdf"):
-                                            inner_history.append(
-                                                ChatMessage(
-                                                    role="assistant",
-                                                    content=f"Found PDF at: {abs_path}",
-                                                    metadata={"title": "📄 PDF File"},
-                                                )
-                                            )
-                                        else:
-                                            inner_history.append(
-                                                ChatMessage(
-                                                    role="assistant",
-                                                    content=gr.Image(abs_path),
-                                                    metadata={"title": "🖼️ Image Preview"},
-                                                )
-                                            )
-
-                                yield inner_history, main_history
-
-                t = time()
-
-            # If no solution was found, add the final message
-            if not solution_found:
-                final_message = s["messages"][-1].content if s["messages"] else ""
-                solution_match = re.search(r"<solution>(.*?)</solution>", final_message, re.DOTALL)
-                if solution_match:
-                    solution = solution_match.group(1).strip()
-                    main_history.append(
-                        ChatMessage(role="assistant", content=solution, metadata={"title": "✅ Solution"})
-                    )
-                    self.main_history_copy += [{"role": "assistant", "content": solution}]
-                else:
-                    cleaned_content = re.sub(r"<execute>.*?</execute>", "", final_message, flags=re.DOTALL)
-                    cleaned_content = re.sub(r"<observation>.*?</observation>", "", cleaned_content, flags=re.DOTALL)
-                    cleaned_content = re.sub(r"\n\s*\n", "\n\n", cleaned_content)
-
-                    if cleaned_content.strip():
-                        main_history.append(
-                            ChatMessage(
-                                role="assistant", content=cleaned_content.strip(), metadata={"title": "📝 Summary"}
-                            )
+                    elif event.file_kind == "pdf":
+                        inner_history.append(
+                            ChatMessage(role="assistant", content=event.content, metadata={"title": event.title})
                         )
-                        self.main_history_copy += [{"role": "assistant", "content": cleaned_content.strip()}]
                     else:
-                        main_history.append(
+                        inner_history.append(
                             ChatMessage(
                                 role="assistant",
-                                content="Task completed. Please check the execution log for details.",
-                                metadata={"title": "📝 Summary"},
+                                content=gr.Image(event.file_path),
+                                metadata={"title": event.title},
                             )
                         )
-                        self.main_history_copy += [{"role": "assistant", "content": "Task completed."}]
+                    yield inner_history, main_history
 
-            # Add completion message
-            inner_history.append(
-                ChatMessage(
-                    role="assistant",
-                    content="👈 Returning the result to the main interface...",
-                    metadata={"title": "🔄 Complete"},
-                )
-            )
-            yield inner_history, main_history
+                elif event.type == "summary":
+                    main_history.append(
+                        ChatMessage(role="assistant", content=event.content, metadata={"title": event.title})
+                    )
+                    self.main_history_copy += [{"role": "assistant", "content": event.content}]
+                    yield inner_history, main_history
+
+                elif event.type == "complete":
+                    inner_history.append(
+                        ChatMessage(role="assistant", content=event.content, metadata={"title": event.title})
+                    )
+                    yield inner_history, main_history
 
         def like(data: gr.LikeData):
             print("User liked the response")
             print(f"Index: {data.index}, Liked: {data.liked}")
+
+        def on_model_change(selected):
+            if not selected or ": " not in selected:
+                return
+            source, model = selected.split(": ", 1)
+            try:
+                self.llm = get_llm(model, source=source, config=default_config)
+                print(f"Switched model to {source}: {model}")
+            except Exception as e:
+                print(f"Failed to switch model to {selected}: {e}")
 
         # Create the Gradio interface
         with gr.Blocks() as demo:
@@ -2962,6 +2830,19 @@ Each library is listed with its description to help you understand its functiona
 
             # Main interface
             with main_interface_container:
+                model_choices = [
+                    f"{source}: {model}"
+                    for source, models in list_available_providers().items()
+                    for model in models
+                ]
+                if model_choices:
+                    model_selector = gr.Dropdown(
+                        label="Switch model (optional)",
+                        choices=model_choices,
+                        value=None,
+                    )
+                    model_selector.change(fn=on_model_change, inputs=[model_selector], outputs=[])
+
                 with gr.Row():
                     with gr.Column(scale=1):
                         main_chatbot = gr.Chatbot(
@@ -2999,3 +2880,177 @@ Each library is listed with its description to help you understand its functiona
         # Launch
         print(f"Launching Gradio demo on {server_name}:7860")
         demo.launch(share=share, server_name=server_name)
+
+    def launch_streamlit_demo(self, thread_id=42, require_verification=False):
+        """Render a Streamlit UI for the A1 agent, sharing biomni.ui_core with the Gradio demo.
+
+        Must be called from within a script run via `streamlit run`. Because Streamlit
+        re-executes the whole script on every interaction, construct the agent once via
+        `st.cache_resource` in your entry script rather than re-instantiating A1 each rerun:
+
+        Example (streamlit_app.py):
+            >>> import streamlit as st
+            >>> from biomni.agent import A1
+            >>>
+            >>> @st.cache_resource
+            ... def get_agent():
+            ...     return A1(path="./data")
+            >>>
+            >>> get_agent().launch_streamlit_demo()
+
+        Then run: streamlit run streamlit_app.py
+
+        Args:
+            thread_id: Thread ID for the conversation
+            require_verification: If True, requires access code verification
+        """
+        try:
+            import streamlit as st
+        except ImportError:
+            raise ImportError("Streamlit is not installed. Please install it with: pip install streamlit") from None
+
+        try:
+            # Must be the first Streamlit command in the script; if the caller already
+            # issued one (e.g. a spinner from st.cache_resource around agent construction),
+            # Streamlit raises here — safe to ignore and keep whatever config is already set.
+            st.set_page_config(page_title="Biomni A1 Agent", layout="wide")
+        except Exception:
+            pass
+
+        if not hasattr(self, "main_history_copy"):
+            self.main_history_copy = []
+        if "biomni_transcript" not in st.session_state:
+            st.session_state.biomni_transcript = []  # list of {"panel": "main"|"inner", ...render fields}
+        if "biomni_verified" not in st.session_state:
+            st.session_state.biomni_verified = not require_verification
+
+        if not st.session_state.biomni_verified:
+            st.title("Biomni A1 Agent - Access Verification")
+            code = st.text_input("Access Code", type="password")
+            if st.button("Verify Access"):
+                if code == "Biomni2025":
+                    st.session_state.biomni_verified = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect access code. Please check your access code.")
+            return
+
+        st.title("Biomni A1 Agent")
+
+        provider_models = list_available_providers()
+        model_choices = [f"{source}: {model}" for source, models in provider_models.items() for model in models]
+        if model_choices:
+            selected = st.sidebar.selectbox("Switch model (optional)", options=[None, *model_choices])
+            if selected and selected != st.session_state.get("biomni_selected_model"):
+                source, model = selected.split(": ", 1)
+                try:
+                    self.llm = get_llm(model, source=source, config=default_config)
+                    st.session_state.biomni_selected_model = selected
+                    st.sidebar.success(f"Switched model to {selected}")
+                except Exception as e:
+                    st.sidebar.error(f"Failed to switch model: {e}")
+
+        uploaded_files = st.sidebar.file_uploader("Attach files (optional)", accept_multiple_files=True)
+
+        main_col, inner_col = st.columns(2)
+        main_col.subheader("Biomni A1 Agent")
+        inner_col.subheader("Biomni Executor")
+
+        def render_entry(container, entry):
+            with container.chat_message(entry.get("role", "assistant")):
+                if entry.get("title"):
+                    st.markdown(f"**{entry['title']}**")
+                if entry.get("kind") == "code":
+                    st.code(entry["content"], language=entry.get("language") or "python")
+                elif entry.get("kind") == "image":
+                    st.image(entry["file_path"])
+                elif entry.get("kind") == "observation":
+                    with st.expander("Observation", expanded=not entry.get("collapsible", False)):
+                        st.code(entry["content"])
+                elif entry.get("content"):
+                    st.markdown(entry["content"])
+
+        for entry in st.session_state.biomni_transcript:
+            render_entry(main_col if entry["panel"] == "main" else inner_col, entry)
+
+        prompt = st.chat_input("Ask something...")
+        if prompt:
+            files = []
+            saved_dir = os.path.join(self.path, "streamlit_uploads")
+            for uploaded in uploaded_files or []:
+                os.makedirs(saved_dir, exist_ok=True)
+                dest = os.path.join(saved_dir, uploaded.name)
+                with open(dest, "wb") as f:
+                    f.write(uploaded.getbuffer())
+                files.append(dest)
+
+            history_messages = []
+            for msg in self.main_history_copy:
+                if msg["role"] == "user":
+                    history_messages.append(HumanMessage(content=msg["content"]))
+                elif msg["role"] == "assistant":
+                    history_messages.append(AIMessage(content=msg["content"]))
+
+            self.main_history_copy += [{"role": "user", "content": prompt}]
+            user_entry = {"panel": "main", "role": "user", "content": prompt}
+            st.session_state.biomni_transcript.append(user_entry)
+            render_entry(main_col, user_entry)
+
+            code_execution_entries = []
+
+            for event in stream_agent_events(self, prompt, files, history_messages, thread_id):
+                entry = None
+                if event.type == "status":
+                    entry = {"panel": "inner", "role": "assistant", "content": event.content}
+                elif event.type == "reasoning":
+                    entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
+                elif event.type == "solution":
+                    entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
+                    self.main_history_copy += [{"role": "assistant", "content": event.content}]
+                elif event.type == "code":
+                    entry = {
+                        "panel": "inner",
+                        "role": "assistant",
+                        "kind": "code",
+                        "content": event.content,
+                        "language": event.language,
+                        "title": event.title,
+                    }
+                    code_execution_entries.append(entry)
+                elif event.type == "observation":
+                    if code_execution_entries:
+                        code_execution_entries[-1]["title"] = f"🛠️ Code (done in {event.duration:.2f}s)"
+                    entry = {
+                        "panel": "inner",
+                        "role": "assistant",
+                        "kind": "observation",
+                        "content": event.content,
+                        "collapsible": event.collapsible,
+                    }
+                elif event.type == "file":
+                    if event.file_path is None:
+                        entry = {"panel": "inner", "role": "assistant", "content": "", "title": event.title}
+                    elif event.file_kind == "pdf":
+                        entry = {
+                            "panel": "inner",
+                            "role": "assistant",
+                            "content": event.content,
+                            "title": event.title,
+                        }
+                    else:
+                        entry = {
+                            "panel": "inner",
+                            "role": "assistant",
+                            "kind": "image",
+                            "file_path": event.file_path,
+                            "title": event.title,
+                        }
+                elif event.type == "summary":
+                    entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
+                    self.main_history_copy += [{"role": "assistant", "content": event.content}]
+                elif event.type == "complete":
+                    entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
+
+                if entry is not None:
+                    st.session_state.biomni_transcript.append(entry)
+                    render_entry(main_col if entry["panel"] == "main" else inner_col, entry)

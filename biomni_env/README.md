@@ -1,6 +1,13 @@
 # Biomni Environment Setup
 
-This directory contains scripts and configuration files to set up a comprehensive bioinformatics environment with various tools and packages.
+> **⚠️ Legacy directory — not the recommended install path anymore.**
+> The current install is just three commands: `conda create -n biomni python=3.11`, `pip install -r requirements.txt`, `pip install -e .`. See [`../quick_start_guide.md`](../quick_start_guide.md) at the repo root.
+>
+> The conda YAMLs, the full E1 setup script, and the R/CLI tool installers in this directory are kept for reference only. They will not be kept in sync with the current `requirements.txt`.
+
+The original instructions follow for users who specifically need them.
+
+---
 
 1. Clone the repository:
    ```bash

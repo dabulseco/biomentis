@@ -7,7 +7,14 @@ from urllib.parse import urljoin
 import PyPDF2
 import requests
 from bs4 import BeautifulSoup
-from googlesearch import search
+
+# `googlesearch` is intentionally NOT imported at module level. The original
+# `googlesearch` PyPI package was renamed to `googlesearch-python` in 2024; if
+# a user installs the package under its new name the import still works, but
+# if they have neither installed, a module-level `from googlesearch import search`
+# breaks the entire literature module — taking down query_pubmed, query_arxiv,
+# and advanced_web_search_claude with it. The lazy import below only fires when
+# the search_google tool is actually called.
 
 
 def fetch_supplementary_info_from_doi(doi: str, output_dir: str = "supplementary_info"):
@@ -141,6 +148,20 @@ def query_scholar(query: str) -> str:
         return f"Error querying Google Scholar: {e}"
 
 
+def _get_ncbi_email() -> str:
+    """Resolve the user's NCBI email from config / env. NCBI requires one
+    (politely) on every Entrez request and will rate-limit requests that omit it."""
+    # Lazy import to keep this module cheap to load
+    try:
+        from biomni.config import default_config
+
+        if default_config.ncbi_email:
+            return default_config.ncbi_email
+    except Exception:
+        pass
+    return os.getenv("NCBI_EMAIL") or os.getenv("BIOMNI_NCBI_EMAIL") or "your-email@example.com"
+
+
 def query_pubmed(query: str, max_papers: int = 10, max_retries: int = 3) -> str:
     """Query PubMed for papers based on the provided search query.
 
@@ -158,7 +179,7 @@ def query_pubmed(query: str, max_papers: int = 10, max_retries: int = 3) -> str:
     from pymed import PubMed
 
     try:
-        pubmed = PubMed(tool="MyTool", email="your-email@example.com")  # Update with a valid email address
+        pubmed = PubMed(tool="Biomni", email=_get_ncbi_email())
 
         # Initial attempt
         papers = list(pubmed.query(query, max_results=max_papers))
@@ -196,13 +217,25 @@ def search_google(query: str, num_results: int = 3, language: str = "en") -> lis
         List[dict]: List of dictionaries containing search results with title and URL
 
     """
+    # Lazy import: `googlesearch` is provided by the `googlesearch-python` PyPI
+    # package (the old `googlesearch` package was renamed in 2024). If neither
+    # is installed, only this function fails — the rest of literature.py keeps
+    # working. See the module-level comment for context.
+    try:
+        from googlesearch import search as _google_search
+    except ImportError as e:
+        raise ImportError(
+            "search_google requires the 'googlesearch-python' package. "
+            "Install it with: pip install googlesearch-python"
+        ) from e
+
     try:
         results_string = ""
         search_query = f"{query}"
 
         print(f"Searching for {search_query} with {num_results} results and {language} language")
 
-        for res in search(search_query, num_results=num_results, lang=language, advanced=True):
+        for res in _google_search(search_query, num_results=num_results, lang=language, advanced=True):
             print(f"Found result: {res.title}")
             title = res.title
             url = res.url
@@ -224,6 +257,14 @@ def advanced_web_search_claude(
     Initiate an advanced web search by launching a specialized agent to collect relevant information and citations through multiple rounds of web searches for a given query.
     Craft the query carefully for the search agent to find the most relevant information.
 
+    Behavior:
+        - If ANTHROPIC_API_KEY is set in the environment, this tool uses
+          Anthropic's server-side web_search tool (the original behavior).
+        - If ANTHROPIC_API_KEY is NOT set, the function transparently falls
+          back to `search_google(query, num_results=5)` so the agent still
+          gets web results without an Anthropic key. The LLM sees a string
+          of the same shape, so the ReAct loop doesn't have to change.
+
     Parameters
     ----------
     query : str
@@ -240,28 +281,25 @@ def advanced_web_search_claude(
     """
     import random
 
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+
+    # Auto-fallback path: no Anthropic key → use search_google instead so the
+    # agent still gets web results on the Ollama default path. The LLM sees
+    # the same string shape, so the ReAct loop is unchanged.
+    if not api_key:
+        return _advanced_web_search_fallback(query)
+
+    # The "use the key for this tool even when chat is on Ollama" path is
+    # captured in reminder_consider.md — not implemented yet. When it is,
+    # this is where the cost guard will live.
     import anthropic
 
     try:
         from biomni.config import default_config
 
         model = default_config.llm
-        api_key = default_config.api_key
-        if not api_key:
-            api_key = os.getenv("ANTHROPIC_API_KEY")
     except ImportError:
         model = "claude-4-sonnet-latest"
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-
-    if "claude" not in model:
-        raise ValueError(
-            "query_scholar uses Anthropic's server-side web_search tool and requires a Claude "
-            "model + ANTHROPIC_API_KEY, regardless of the agent's configured default LLM/source "
-            f"(currently '{model}'). Set ANTHROPIC_API_KEY and pass a Claude model to use this tool."
-        )
-
-    if not api_key:
-        raise ValueError("Set your api_key explicitly.")
 
     client = anthropic.Anthropic(api_key=api_key)
     tool_def = {
@@ -302,6 +340,38 @@ def advanced_web_search_claude(
                 continue
             print(f"Error performing web search after {max_retries} attempts: {str(e)}")
             return f"Error performing web search after {max_retries} attempts: {str(e)}"
+
+
+def _advanced_web_search_fallback(query: str, num_results: int = 5) -> str:
+    """Fallback for `advanced_web_search_claude` when ANTHROPIC_API_KEY is not set.
+
+    Routes to `search_google` (free, no API key) and prepends a short note
+    so the LLM can see that this is a degraded result, not a Claude-grade
+    multi-round search. The returned string keeps the same shape as the
+    Anthropic path so the ReAct loop doesn't need to special-case it.
+
+    Future idea (see reminder_consider.md): extend this to also try
+    `query_pubmed` for biomedical queries, and respect a per-tool
+    fallback-policy config.
+    """
+    note = (
+        "[advanced_web_search_claude: ANTHROPIC_API_KEY not set — "
+        f"falling back to search_google (top {num_results} results). "
+        "Set ANTHROPIC_API_KEY to use Claude's server-side web_search tool.]\n\n"
+    )
+    try:
+        results = search_google(query, num_results=num_results, language="en")
+    except ImportError:
+        return (
+            note
+            + "search_google is unavailable: install the 'googlesearch-python' "
+            "package (pip install googlesearch-python) and retry."
+        )
+    except Exception as e:
+        return note + f"search_google failed: {e}"
+    if not results:
+        return note + "No web results returned."
+    return note + results
 
 
 def extract_url_content(url: str) -> str:

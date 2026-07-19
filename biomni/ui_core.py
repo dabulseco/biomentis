@@ -11,10 +11,14 @@ observations, generated files, the final solution) without knowing anything
 about how those events should be rendered.
 """
 
+import base64
+import html
+import mimetypes
 import os
 import re
 from collections.abc import Generator
 from dataclasses import dataclass
+from datetime import datetime
 from time import time
 from typing import Any, Literal
 
@@ -249,3 +253,169 @@ def list_available_providers() -> dict[str, list[str]]:
             providers[source] = models
 
     return providers
+
+
+# --- HTML export -------------------------------------------------------
+
+ExportEntryKind = Literal["text", "code", "observation", "image", "pdf"]
+
+
+@dataclass
+class ExportEntry:
+    """A single normalized, framework-agnostic message for HTML export."""
+
+    role: Literal["user", "assistant"]
+    kind: ExportEntryKind = "text"
+    title: str | None = None
+    content: str = ""
+    language: str | None = None
+    file_path: str | None = None
+
+
+def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
+    """Normalize a UIEvent (assistant-side) into an ExportEntry."""
+    if event.type == "file":
+        if event.file_path is None:
+            return ExportEntry(role="assistant", kind="text", title=event.title, content=event.content)
+        return ExportEntry(
+            role="assistant",
+            kind=event.file_kind or "text",
+            title=event.title,
+            content=event.content,
+            file_path=event.file_path,
+        )
+    kind: ExportEntryKind = "code" if event.type == "code" else "observation" if event.type == "observation" else "text"
+    return ExportEntry(role="assistant", kind=kind, title=event.title, content=event.content, language=event.language)
+
+
+_MODEL_NAME_ATTRS = ("model", "model_name", "model_id", "azure_deployment")
+
+
+def get_llm_display_name(llm: Any) -> str:
+    """Best-effort human-readable "provider: model" string for a LangChain chat model instance."""
+    provider = type(llm).__name__.removeprefix("Chat")
+    for attr in _MODEL_NAME_ATTRS:
+        value = getattr(llm, attr, None)
+        if value:
+            return f"{provider}: {value}"
+    return provider
+
+
+def default_downloads_dir() -> str:
+    """The directory HTML exports are saved to by default: ~/Downloads, overridable via BIOMNI_DOWNLOADS_DIR."""
+    return os.getenv("BIOMNI_DOWNLOADS_DIR") or os.path.join(os.path.expanduser("~"), "Downloads")
+
+
+def _embed_image_html(file_path: str) -> str:
+    try:
+        mime = mimetypes.guess_type(file_path)[0] or "image/png"
+        with open(file_path, "rb") as f:
+            data = base64.b64encode(f.read()).decode("ascii")
+        return f'<img src="data:{mime};base64,{data}" class="img-fluid rounded" alt="{html.escape(os.path.basename(file_path))}">'
+    except Exception:
+        return f'<div class="text-danger">Image not found: {html.escape(file_path)}</div>'
+
+
+def _render_markdown(text: str) -> str:
+    """Render markdown prose (tables, bold, lists, ...) to Bootstrap-styled HTML.
+
+    Falls back to plain escaped/pre-wrapped text if the optional `markdown`
+    package isn't installed, matching this codebase's existing lazy-import
+    pattern for optional deps (see biomni/utils.py's convert_markdown_to_pdf).
+    """
+    try:
+        import markdown as markdown_lib
+    except ImportError:
+        return f'<div style="white-space: pre-wrap;">{html.escape(text)}</div>'
+
+    rendered = markdown_lib.markdown(text, extensions=["tables", "fenced_code", "nl2br", "sane_lists"])
+    # markdown's `tables` extension emits bare <table> tags; make them Bootstrap 5
+    # tables, wrapped for horizontal scrolling on narrow viewports.
+    rendered = rendered.replace(
+        "<table>", '<div class="table-responsive"><table class="table table-striped table-bordered table-sm align-middle">'
+    )
+    rendered = rendered.replace("</table>", "</table></div>")
+    return rendered
+
+
+def _entry_body_html(entry: ExportEntry) -> str:
+    if entry.kind == "code":
+        language = entry.language or ""
+        return f'<pre class="bg-dark text-light p-3 rounded"><code class="language-{html.escape(language)}">{html.escape(entry.content)}</code></pre>'
+    if entry.kind == "observation":
+        return f'<pre class="bg-secondary-subtle p-3 rounded small text-wrap">{html.escape(entry.content)}</pre>'
+    if entry.kind == "image" and entry.file_path:
+        return _embed_image_html(entry.file_path)
+    if entry.kind == "pdf":
+        return _render_markdown(entry.content) if entry.content else ""
+    if entry.content:
+        return _render_markdown(entry.content)
+    return ""
+
+
+def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_name: str) -> str:
+    """Render a self-contained Bootstrap 5 / HTML5 page for a chat transcript.
+
+    Images are embedded as base64 data URIs so the exported file is portable;
+    Bootstrap's CSS is pulled from its CDN, so opening the file needs internet access.
+    """
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if not entries:
+        body_html = '<p class="text-muted fst-italic">No messages yet.</p>'
+    else:
+        cards = []
+        for entry in entries:
+            is_user = entry.role == "user"
+            bubble_class = "bg-primary text-white" if is_user else "bg-white"
+            align_class = "ms-auto" if is_user else "me-auto"
+            title_html = (
+                f'<div class="fw-semibold small mb-1">{html.escape(entry.title)}</div>' if entry.title else ""
+            )
+            body = _entry_body_html(entry)
+            cards.append(f"""
+      <div class="d-flex mb-3 {align_class}" style="max-width: 85%;">
+        <div class="card {bubble_class} shadow-sm w-100">
+          <div class="card-body">
+            <div class="text-uppercase text-muted small mb-1">{html.escape(entry.role)}</div>
+            {title_html}
+            {body}
+          </div>
+        </div>
+      </div>""")
+        body_html = "".join(cards)
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(panel_title)}</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-body-tertiary">
+<div class="container py-4">
+  <h1 class="mb-1">{html.escape(panel_title)}</h1>
+  <p class="text-muted">
+    Generated {html.escape(generated_at)} &middot; LLM used for this analysis: <strong>{html.escape(model_name)}</strong>
+  </p>
+  <hr>
+  <div class="d-flex flex-column">
+    {body_html}
+  </div>
+</div>
+</body>
+</html>
+"""
+
+
+def save_html_export(html_doc: str, filename_prefix: str, downloads_dir: str | None = None) -> str:
+    """Write an exported HTML transcript to disk, returning the absolute path written."""
+    target_dir = downloads_dir or default_downloads_dir()
+    os.makedirs(target_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"biomni_{filename_prefix}_{timestamp}.html"
+    path = os.path.join(target_dir, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html_doc)
+    return path

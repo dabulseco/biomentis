@@ -1,5 +1,7 @@
 # Known Package Conflicts in Biomni
 
+> **Note:** Biomni now installs via `pip install -r requirements.txt` (see [`../quick_start_guide.md`](../quick_start_guide.md)). The packages listed below are still excluded from the default install for the compatibility reasons given, and must be installed manually if you need them.
+
 This file lists Python packages that are known to have dependency conflicts with the default Biomni environment. These packages are not installed by default. If you require their functionality, you must install them manually and may need to uncomment relevant code in the codebase.
 
 ## Packages

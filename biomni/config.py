@@ -33,7 +33,13 @@ class BiomniConfig:
     timeout_seconds: int = 600
 
     # LLM settings (API keys still from environment)
-    llm: str = "claude-sonnet-4-5"
+    #
+    # llm="auto" is the sentinel for "no preference — pick the best local option".
+    # _resolve_local_first_default() below turns this into a real Ollama model
+    # name when a local daemon is running. To force a specific cloud model
+    # (Anthropic, OpenAI, ...) just set BIOMNI_LLM=... and BIOMNI_SOURCE=... in
+    # your .env — the local-first path will then short-circuit.
+    llm: str = "auto"
     temperature: float = 0.7
 
     # Tool settings
@@ -51,6 +57,12 @@ class BiomniConfig:
 
     # Third-party integrations
     protocols_io_access_token: str | None = None
+
+    # NCBI / Entrez
+    # NCBI requires (politely) an email address on every Entrez request and
+    # will rate-limit you if you don't provide one. Set via the NCBI_EMAIL
+    # env var or by passing ncbi_email= when constructing BiomniConfig.
+    ncbi_email: str | None = None
 
     def __post_init__(self):
         """Load any environment variable overrides if they exist."""
@@ -80,28 +92,43 @@ class BiomniConfig:
         if env_token:
             self.protocols_io_access_token = env_token
 
+        # NCBI / Entrez email (NCBI_EMAIL is the canonical name; BIOMNI_NCBI_EMAIL
+        # is accepted as a Biomni-namespaced alternative for consistency with
+        # other BIOMNI_* env vars in this file).
+        if os.getenv("BIOMNI_NCBI_EMAIL"):
+            self.ncbi_email = os.getenv("BIOMNI_NCBI_EMAIL")
+        elif os.getenv("NCBI_EMAIL"):
+            self.ncbi_email = os.getenv("NCBI_EMAIL")
+
         self._resolve_local_first_default()
 
     def _resolve_local_first_default(self):
-        """If nothing else is configured, default to a locally available Ollama model.
+        """Default to a locally-available Ollama model.
 
-        This only fires when llm/source/base_url/api_key are all still unset and no
-        cloud provider API key is present in the environment, so anyone with explicit
-        config or a cloud key set sees zero behavior change. A user who happens to
-        explicitly pass the same string as the class default (llm="claude-sonnet-4-5")
-        is indistinguishable from "unset" and will also see this fire; that collision
-        is accepted as an edge case.
+        Resolution order:
+          1. If BIOMNI_DISABLE_LOCAL_FALLBACK=true, do nothing (user wants a hard failure
+             when no Ollama is running).
+          2. If llm is anything other than the "auto" sentinel, the user has already
+             chosen — leave it alone.
+          3. If source / base_url / api_key is explicitly set, the user has chosen — leave it.
+          4. Otherwise, try the local Ollama daemon. If at least one model is installed,
+             pick the first one (the same model the Streamlit dropdown will show as
+             index=0). If no Ollama daemon is reachable, leave llm="auto" so the caller
+             gets a clear failure rather than a silent cloud default.
+
+        Note: this function intentionally does NOT auto-pick a cloud model when a cloud
+        API key is present. To use Anthropic / OpenAI / etc., set BIOMNI_LLM and
+        BIOMNI_SOURCE explicitly — or pick the model in the UI dropdown.
         """
         if os.getenv("BIOMNI_DISABLE_LOCAL_FALLBACK", "").lower() == "true":
             return
-        if self.llm != "claude-sonnet-4-5" or self.source is not None:
+        if self.llm != "auto" or self.source is not None:
             return
         if self.base_url or self.api_key:
             return
-        cloud_key_env_vars = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "AWS_REGION")
-        if any(os.getenv(var) for var in cloud_key_env_vars):
-            return
 
+        # No cloud auto-defaults. The UI dropdown is the source of truth; this
+        # resolver only handles the no-UI / programmatic case.
         try:
             from biomni.ollama_utils import pick_default_ollama_model
 
@@ -125,6 +152,7 @@ class BiomniConfig:
             "base_url": self.base_url,
             "api_key": self.api_key,
             "source": self.source,
+            "ncbi_email": self.ncbi_email,
         }
 
 

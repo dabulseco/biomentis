@@ -1,0 +1,58 @@
+# Biomni runtime dependencies.
+# Install with: pip install -r requirements.txt
+#
+# Pinned to the versions that have been validated with this codebase.
+# If you need additional providers (Gemini, Groq, Bedrock) or the Gradio
+# UI, see requirements-optional.txt.
+
+# --- Core scientific stack ---
+numpy==2.1
+pandas
+matplotlib
+scipy
+statsmodels
+scikit-learn
+seaborn
+networkx
+
+# --- LangChain / agent runtime ---
+pydantic
+langchain
+langgraph==0.3.18
+langchain-openai
+langchain-anthropic
+langchain-ollama
+langchain-community
+
+# --- LLM provider SDKs ---
+openai
+ollama
+
+# --- Agent glue ---
+tooluniverse
+mcp
+python-dotenv
+markdown
+tqdm
+requests
+beautifulsoup4
+lxml
+pyyaml
+# `search_google` (biomni/tool/literature.py) needs this. The old `googlesearch`
+# PyPI package was renamed to `googlesearch-python` in 2024 — install under the
+# new name. The import is lazy, so the rest of the literature module works
+# even if you skip this.
+googlesearch-python
+
+# --- Optional-but-recommended for retrieval / embedding helpers ---
+transformers
+sentencepiece
+
+# --- Default UI ---
+streamlit>=1.30
+
+# --- Notebook + dev ---
+jupyter
+notebook
+ipykernel
+pytest

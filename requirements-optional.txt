@@ -1,0 +1,21 @@
+# Optional Biomni extras.
+# Install on top of requirements.txt only if you need them:
+#   pip install -r requirements-optional.txt
+#
+# These are intentionally kept out of the default install because they
+# either pull in heavy system dependencies (weasyprint) or are provider
+# SDKs with conflicting transitive deps (langchain-aws, etc.).
+
+# --- Alternate LLM providers (default install only covers OpenAI / Anthropic / Ollama) ---
+langchain-google-genai   # Google Gemini
+langchain-groq           # Groq
+langchain-aws            # AWS Bedrock
+
+# --- Alternate UI (Streamlit is the default in streamlit_app.py) ---
+gradio>=5.0,<6.0
+
+# --- PDF export for save_conversation_history() ---
+# Pick one of the three; weasyprint gives the best layout.
+weasyprint
+# markdown2pdf   # uncomment if you prefer the Rust-based converter
+# pandoc         # uncomment to use the Pandoc fallback

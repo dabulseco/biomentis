@@ -49,52 +49,48 @@ def get_llm(
     # get_llm is called without a config; the normal A1/react path resolves the
     # effective default (including the local-first Ollama fallback) via BiomniConfig.
     if model is None:
-        model = "claude-3-5-sonnet-20241022"
+        # "auto" is a sentinel — BiomniConfig resolves it to a local Ollama model
+        # when one is available. The auto-detect block below will see "auto" and
+        # fall through to the Ollama branch (no "/" or known-cloud prefix).
+        model = "auto"
     if temperature is None:
         temperature = 0.7
     if api_key is None:
         api_key = "EMPTY"
-    # Auto-detect source from model name if not specified
+    # Auto-detect source from model name if not specified.
+    # Order matters: explicit cloud-prefix names route to their cloud, anything
+    # else defaults to Ollama so a fresh install with no API keys still works.
     if source is None:
         env_source = os.getenv("LLM_SOURCE")
         if env_source in ALLOWED_SOURCES:
             source = env_source
+        elif model[:7] == "claude-" and os.getenv("ANTHROPIC_API_KEY"):
+            # Require the key to be present — otherwise an explicit "claude-..."
+            # model name without a key would produce a confusing auth error
+            # when Ollama would have worked fine.
+            source = "Anthropic"
+        elif model[:7] == "gpt-oss":
+            source = "Ollama"
+        elif model[:4] == "gpt-" and os.getenv("OPENAI_API_KEY"):
+            source = "OpenAI"
+        elif model.startswith("azure-"):
+            source = "AzureOpenAI"
+        elif model[:7] == "gemini-" and os.getenv("GEMINI_API_KEY"):
+            source = "Gemini"
+        elif "groq" in model.lower() and os.getenv("GROQ_API_KEY"):
+            source = "Groq"
+        elif model.startswith(
+            ("anthropic.claude-", "amazon.titan-", "meta.llama-", "mistral.", "cohere.", "ai21.", "us.")
+        ):
+            source = "Bedrock"
+        elif base_url is not None:
+            source = "Custom"
         else:
-            if model[:7] == "claude-":
-                source = "Anthropic"
-            elif model[:7] == "gpt-oss":
-                source = "Ollama"
-            elif model[:4] == "gpt-":
-                source = "OpenAI"
-            elif model.startswith("azure-"):
-                source = "AzureOpenAI"
-            elif model[:7] == "gemini-":
-                source = "Gemini"
-            elif "groq" in model.lower():
-                source = "Groq"
-            elif base_url is not None:
-                source = "Custom"
-            elif "/" in model or any(
-                name in model.lower()
-                for name in [
-                    "llama",
-                    "mistral",
-                    "qwen",
-                    "gemma",
-                    "phi",
-                    "dolphin",
-                    "orca",
-                    "vicuna",
-                    "deepseek",
-                ]
-            ):
-                source = "Ollama"
-            elif model.startswith(
-                ("anthropic.claude-", "amazon.titan-", "meta.llama-", "mistral.", "cohere.", "ai21.", "us.")
-            ):
-                source = "Bedrock"
-            else:
-                raise ValueError("Unable to determine model source. Please specify 'source' parameter.")
+            # Local-first default: anything that doesn't explicitly name a
+            # cloud provider is assumed to be a local Ollama model (matches
+            # Ollama's own naming conventions: "llama3.1", "qwen2.5:14b",
+            # "hf.co/user/model", etc.). Requires `ollama serve` to be running.
+            source = "Ollama"
 
     # Create appropriate model based on source
     if source == "OpenAI":

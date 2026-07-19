@@ -20,7 +20,15 @@ from biomni.llm import SourceType, get_llm
 from biomni.model.retriever import ToolRetriever
 from biomni.tool.support_tools import run_python_repl
 from biomni.tool.tool_registry import ToolRegistry
-from biomni.ui_core import list_available_providers, stream_agent_events
+from biomni.ui_core import (
+    ExportEntry,
+    get_llm_display_name,
+    list_available_providers,
+    render_transcript_html,
+    save_html_export,
+    stream_agent_events,
+    ui_event_to_export_entry,
+)
 from biomni.utils import (
     check_and_download_s3_files,
     clean_message_content,
@@ -2647,6 +2655,8 @@ Each library is listed with its description to help you understand its functiona
         from time import time
 
         self.main_history_copy = []
+        self.main_export_entries: list[ExportEntry] = []
+        self.inner_export_entries: list[ExportEntry] = []
 
         # Available access codes (if verification is required)
         available_access_codes = ["Biomni2025"]
@@ -2684,6 +2694,9 @@ Each library is listed with its description to help you understand its functiona
 
             self.main_history_copy += [{"role": "user", "content": text_input}]
             main_history.append(ChatMessage(role="user", content=text_input if text_input else "[Uploaded file]"))
+            self.main_export_entries.append(
+                ExportEntry(role="user", content=text_input if text_input else "[Uploaded file]")
+            )
 
             # Add "Executor is working on it" message
             main_history.append(ChatMessage(role="assistant", content="Executor is working on it 👉"))
@@ -2694,6 +2707,9 @@ Each library is listed with its description to help you understand its functiona
             code_execution_messages = []
 
             for event in stream_agent_events(self, text_input, files, history_messages, thread_id):
+                export_target = self.main_export_entries if event.channel == "main" else self.inner_export_entries
+                export_target.append(ui_event_to_export_entry(event))
+
                 if event.type == "status":
                     inner_history.append(ChatMessage(role="assistant", content=event.content))
                     yield inner_history, main_history
@@ -2810,6 +2826,18 @@ Each library is listed with its description to help you understand its functiona
             except Exception as e:
                 print(f"Failed to switch model to {selected}: {e}")
 
+        def export_panel_html(panel):
+            entries = self.main_export_entries if panel == "main" else self.inner_export_entries
+            panel_title = (
+                "Biomni A1 Agent — Main Output" if panel == "main" else "Biomni Executor — Reasoning Log"
+            )
+            html_doc = render_transcript_html(entries, panel_title, get_llm_display_name(self.llm))
+            try:
+                path = save_html_export(html_doc, panel)
+                gr.Info(f"Saved {panel} panel to {path}")
+            except Exception as e:
+                gr.Warning(f"Failed to export {panel} panel: {e}")
+
         # Create the Gradio interface
         with gr.Blocks() as demo:
             # Verification page (if enabled)
@@ -2852,6 +2880,8 @@ Each library is listed with its description to help you understand its functiona
                             show_copy_button=True,
                             show_share_button=True,
                         )
+                        export_main_btn = gr.Button("📥 Export to HTML", size="sm")
+                        export_main_btn.click(fn=lambda: export_panel_html("main"), inputs=[], outputs=[])
                     with gr.Column(scale=1):
                         innerloop_chatbot = gr.Chatbot(
                             label="Biomni Executor",
@@ -2860,6 +2890,8 @@ Each library is listed with its description to help you understand its functiona
                             show_copy_button=True,
                             show_share_button=True,
                         )
+                        export_inner_btn = gr.Button("📥 Export to HTML", size="sm")
+                        export_inner_btn.click(fn=lambda: export_panel_html("inner"), inputs=[], outputs=[])
 
                 with gr.Row():
                     prompt_input = gr.MultimodalTextbox(
@@ -2937,24 +2969,62 @@ Each library is listed with its description to help you understand its functiona
 
         st.title("Biomni A1 Agent")
 
-        provider_models = list_available_providers()
-        model_choices = [f"{source}: {model}" for source, models in provider_models.items() for model in models]
-        if model_choices:
-            selected = st.sidebar.selectbox("Switch model (optional)", options=[None, *model_choices])
-            if selected and selected != st.session_state.get("biomni_selected_model"):
-                source, model = selected.split(": ", 1)
-                try:
-                    self.llm = get_llm(model, source=source, config=default_config)
-                    st.session_state.biomni_selected_model = selected
-                    st.sidebar.success(f"Switched model to {selected}")
-                except Exception as e:
-                    st.sidebar.error(f"Failed to switch model: {e}")
+        # If the caller (e.g. streamlit_app.py) already wired up a model picker
+        # and set agent.llm to the user's selection, skip the in-method picker
+        # to avoid two dropdowns in the sidebar.
+        if not st.session_state.get("biomni_agent_key"):
+            provider_models = list_available_providers()
+            model_choices = [f"{source}: {model}" for source, models in provider_models.items() for model in models]
+            if model_choices:
+                selected = st.sidebar.selectbox("Switch model (optional)", options=[None, *model_choices])
+                if selected and selected != st.session_state.get("biomni_selected_model"):
+                    source, model = selected.split(": ", 1)
+                    try:
+                        self.llm = get_llm(model, source=source, config=default_config)
+                        st.session_state.biomni_selected_model = selected
+                        st.sidebar.success(f"Switched model to {selected}")
+                    except Exception as e:
+                        st.sidebar.error(f"Failed to switch model: {e}")
 
         uploaded_files = st.sidebar.file_uploader("Attach files (optional)", accept_multiple_files=True)
 
         main_col, inner_col = st.columns(2)
         main_col.subheader("Biomni A1 Agent")
         inner_col.subheader("Biomni Executor")
+
+        def export_entries(panel):
+            return [
+                ExportEntry(
+                    role=e.get("role", "assistant"),
+                    kind=e.get("kind", "text"),
+                    title=e.get("title"),
+                    content=e.get("content", ""),
+                    language=e.get("language"),
+                    file_path=e.get("file_path"),
+                )
+                for e in st.session_state.biomni_transcript
+                if e["panel"] == panel
+            ]
+
+        if main_col.button("📥 Export to HTML", key="export_main_html"):
+            html_doc = render_transcript_html(
+                export_entries("main"), "Biomni A1 Agent — Main Output", get_llm_display_name(self.llm)
+            )
+            try:
+                path = save_html_export(html_doc, "main")
+                main_col.success(f"Saved to {path}")
+            except Exception as e:
+                main_col.error(f"Failed to export: {e}")
+
+        if inner_col.button("📥 Export to HTML", key="export_inner_html"):
+            html_doc = render_transcript_html(
+                export_entries("inner"), "Biomni Executor — Reasoning Log", get_llm_display_name(self.llm)
+            )
+            try:
+                path = save_html_export(html_doc, "inner")
+                inner_col.success(f"Saved to {path}")
+            except Exception as e:
+                inner_col.error(f"Failed to export: {e}")
 
         def render_entry(container, entry):
             with container.chat_message(entry.get("role", "assistant")):
@@ -2973,7 +3043,27 @@ Each library is listed with its description to help you understand its functiona
         for entry in st.session_state.biomni_transcript:
             render_entry(main_col if entry["panel"] == "main" else inner_col, entry)
 
-        prompt = st.chat_input("Ask something...")
+        # Multi-line prompt input. st.chat_input is hard-coded to a single
+        # line by Streamlit, so we replace it with a text area + Send button
+        # so users can paste long prompts without truncation. Submit is via
+        # the Send button or Ctrl+Enter / Cmd+Enter inside the text area.
+        st.session_state.setdefault("biomni_prompt_draft", "")
+        with st.form(key="biomni_prompt_form", clear_on_submit=True):
+            prompt_text = st.text_area(
+                "Ask something...",
+                value=st.session_state.biomni_prompt_draft,
+                key="biomni_prompt_textarea",
+                height=140,
+                label_visibility="visible",
+                placeholder=(
+                    "Type or paste a biomedical task here. Submit with the "
+                    "Send button or Ctrl+Enter / Cmd+Enter."
+                ),
+            )
+            submitted = st.form_submit_button("Send", use_container_width=False)
+        prompt = prompt_text.strip() if submitted else ""
+        st.session_state.biomni_prompt_draft = "" if submitted else prompt_text
+
         if prompt:
             files = []
             saved_dir = os.path.join(self.path, "streamlit_uploads")

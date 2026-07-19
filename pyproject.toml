@@ -13,15 +13,25 @@ authors = [
     {name = "Biomni Team", email = "kexinh@cs.stanford.edu"}
 ]
 requires-python = ">=3.11"
-dependencies = ["pydantic", "langchain", "python-dotenv", "ollama"]
+dependencies = [
+    "pydantic",
+    "langchain",
+    "langgraph==0.3.18",
+    "langchain-openai",
+    "langchain-anthropic",
+    "langchain-ollama",
+    "langchain-community",
+    "openai",
+    "ollama",
+    "tooluniverse",
+    "mcp",
+    "python-dotenv",
+    "markdown",
+]
 
 [project.urls]
 Homepage = "https://github.com/snap-stanford/biomni"
 Repository = "https://github.com/snap-stanford/biomni"
-
-[project.optional-dependencies]
-gradio = ["gradio>=5.0,<6.0"]
-streamlit = ["streamlit>=1.30"]
 
 [tool.setuptools]
 include-package-data = true

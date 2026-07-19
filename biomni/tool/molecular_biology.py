@@ -255,7 +255,9 @@ def get_gene_coding_sequence(gene_name: str, organism: str, email: str = None) -
     Args:
         gene_name: Name of the gene
         organism: Name of the organism
-        email: Email address for NCBI Entrez (recommended)
+        email: Email address for NCBI Entrez (recommended). If omitted, the
+            value is read from `BiomniConfig.ncbi_email`, which in turn reads
+            the `NCBI_EMAIL` or `BIOMNI_NCBI_EMAIL` environment variable.
 
     Returns:
         List of dictionaries containing:
@@ -263,6 +265,17 @@ def get_gene_coding_sequence(gene_name: str, organism: str, email: str = None) -
             - sequence: Coding sequence of the gene
 
     """
+    # Resolve email in this order: explicit arg > config field > env var.
+    if not email:
+        try:
+            from biomni.config import default_config
+
+            if default_config.ncbi_email:
+                email = default_config.ncbi_email
+        except Exception:
+            pass
+    if not email:
+        email = os.getenv("NCBI_EMAIL") or os.getenv("BIOMNI_NCBI_EMAIL")
     if email:
         Entrez.email = email
 

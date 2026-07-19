@@ -34,98 +34,58 @@ Biomni is a general-purpose biomedical AI agent designed to autonomously execute
 
 ### Installation
 
-Our software environment is massive and we provide a single setup.sh script to setup.
-Follow this [file](biomni_env/README.md) to setup the env first.
-
-Then activate the environment E1:
+Biomni installs in three commands. By default it uses a **local Ollama model** — no API key required.
 
 ```bash
-conda activate biomni_e1
+# 1. Create a fresh conda env with Python 3.11
+conda create -n biomni python=3.11 -y
+conda activate biomni
+
+# 2. Install pinned runtime dependencies
+pip install -r requirements.txt
+
+# 3. Install Biomni itself (editable so local changes take effect)
+pip install -e .
 ```
 
-then install the biomni official pip package:
+**Set up Ollama (the default LLM):**
 
 ```bash
-pip install biomni --upgrade
+# macOS
+brew install ollama
+ollama serve &
+ollama pull qwen2.5:14b    # or llama3.1:8b, deepseek-r1:14b, etc.
 ```
 
-For the latest update, install from the github source version, or do:
+Now launch the UI:
 
 ```bash
-pip install git+https://github.com/snap-stanford/Biomni.git@main
+streamlit run streamlit_app.py
+# Opens at http://localhost:8501
 ```
 
-Lastly, configure your API keys using one of the following methods:
+The active model is shown in the sidebar. The first time you `go()` the agent will look up your local Ollama model and use it for reasoning. If you have no Ollama daemon running, the UI will start but the first `go()` call will fail loudly — that's the signal to start `ollama serve`.
 
-<details>
-<summary>Click to expand</summary>
-
-#### Option 1: Using .env file (Recommended)
-
-Create a `.env` file in your project directory:
+**To use a cloud provider instead** (Anthropic, OpenAI, etc.), copy and edit `.env`:
 
 ```bash
-# Copy the example file
 cp .env.example .env
-
-# Edit the .env file with your actual API keys
 ```
 
-Your `.env` file should look like:
+Then uncomment the matching block in `.env` and set the model. Example for Anthropic:
 
 ```env
-# Required: Anthropic API Key for Claude models
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
-
-# Optional: OpenAI API Key (if using OpenAI models)
-OPENAI_API_KEY=your_openai_api_key_here
-
-# Optional: Azure OpenAI API Key (if using Azure OpenAI models)
-OPENAI_API_KEY=your_azure_openai_api_key
-OPENAI_ENDPOINT=https://your-resource-name.openai.azure.com/
-
-# Optional: AI Studio Gemini API Key (if using Gemini models)
-GEMINI_API_KEY=your_gemini_api_key_here
-
-# Optional: groq API Key (if using groq as model provider)
-GROQ_API_KEY=your_groq_api_key_here
-
-# Optional: Set the source of your LLM for example:
-#"OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "Gemini", "Bedrock", "Groq", "Custom"
-LLM_SOURCE=your_LLM_source_here
-
-# Optional: AWS Bedrock Configuration (if using AWS Bedrock models)
-AWS_BEARER_TOKEN_BEDROCK=your_bedrock_api_key_here
-AWS_REGION=us-east-1
-
-# Optional: Custom model serving configuration
-# CUSTOM_MODEL_BASE_URL=http://localhost:8000/v1
-# CUSTOM_MODEL_API_KEY=your_custom_api_key_here
-
-# Optional: Biomni data path (defaults to ./data)
-# BIOMNI_DATA_PATH=/path/to/your/data
-
-# Optional: Timeout settings (defaults to 600 seconds)
-# BIOMNI_TIMEOUT_SECONDS=600
+ANTHROPIC_API_KEY=sk-ant-...
+BIOMNI_LLM=claude-sonnet-4-5
+BIOMNI_SOURCE=Anthropic
+BIOMNI_DISABLE_LOCAL_FALLBACK=true
 ```
 
-#### Option 2: Using shell environment variables
+> The `BIOMNI_DISABLE_LOCAL_FALLBACK=true` line matters: without it, if you also have `ollama serve` running, Biomni's local-first default may still try to pick an Ollama model first. Setting this flag forces Biomni to respect your explicit cloud choice.
 
-Alternatively, configure your API keys in bash profile `~/.bashrc`:
+For optional extras (Gemini / Groq / Bedrock providers, the Gradio UI, PDF export), see [`requirements-optional.txt`](./requirements-optional.txt). For other LLM/UI tweaks (data path, timeouts, NCBI email for PubMed tools), see [docs/configuration.md](./docs/configuration.md).
 
-```bash
-export ANTHROPIC_API_KEY="YOUR_API_KEY"
-export OPENAI_API_KEY="YOUR_API_KEY" # optional if you just use Claude
-export OPENAI_ENDPOINT="https://your-resource-name.openai.azure.com/" # optional unless you are using Azure
-export AWS_BEARER_TOKEN_BEDROCK="YOUR_BEDROCK_API_KEY" # optional for AWS Bedrock models
-export AWS_REGION="us-east-1" # optional, defaults to us-east-1 for Bedrock
-export GEMINI_API_KEY="YOUR_GEMINI_API_KEY" #optional if you want to use a gemini model
-export GROQ_API_KEY="YOUR_GROQ_API_KEY" # Optional: set this to use models served by Groq
-export LLM_SOURCE="Groq" # Optional: set this to use models served by Groq
-
-
-```
-</details>
+If you prefer shell environment variables over a `.env` file, the same settings work as `export ANTHROPIC_API_KEY=...` / `export BIOMNI_LLM=...` in `~/.zshrc` or `~/.bashrc`.
 
 
 #### ⚠️ Known Package Conflicts
@@ -134,13 +94,16 @@ Some Python packages are not installed by default in the Biomni environment due 
 
 ### Basic Usage
 
-Once inside the environment, you can start using Biomni:
+Once inside the environment, you can start using Biomni. With the default Ollama setup, you can omit the `llm` arg entirely and let `default_config` pick the local model:
 
 ```python
 from biomni.agent import A1
 
-# Initialize the agent with data path, Data lake will be automatically downloaded on first run (~11GB)
-agent = A1(path='./data', llm='claude-sonnet-4-20250514')
+# No llm= needed — BiomniConfig picks the first available local Ollama model
+agent = A1(path='./data')
+
+# Or, explicitly request a specific model (Anthropic, OpenAI, custom):
+# agent = A1(path='./data', llm='claude-sonnet-4-5', source='Anthropic')
 
 # Execute biomedical tasks using natural language
 agent.go("Plan a CRISPR screen to identify genes that regulate T cell exhaustion, generate 32 genes that maximize the perturbation effect.")
@@ -154,7 +117,7 @@ By default, Biomni automatically downloads the datalake files (~11GB) when you c
 
 ```python
 # Skip automatic datalake download (faster initialization)
-agent = A1(path='./data', llm='claude-sonnet-4-20250514', expected_data_lake_files = [])
+agent = A1(path='./data', expected_data_lake_files=[])
 ```
 
 This is useful for:
@@ -163,30 +126,41 @@ This is useful for:
 - Cases where you only need specific tools that don't require datalake files
 If you plan on using Azure for your model, always prefix the model name with azure- (e.g. llm='azure-gpt-4o').
 
-### Gradio Interface
+### Streamlit Interface
 
-Launch an interactive web UI for Biomni:
+Launch the default web UI (Streamlit) from the repo root:
+
+```bash
+conda activate biomni
+streamlit run streamlit_app.py
+# Opens at http://localhost:8501
+```
+
+The launcher is a tiny script that caches an `A1` agent and calls `agent.launch_streamlit_demo()`. The currently-active model is shown in the sidebar — it will be your local Ollama model by default, or whatever you configured in `.env`. To customize the data path, model, or which files are auto-downloaded, edit `streamlit_app.py` or write your own launcher.
+
+**Note:** Streamlit is included in the default `requirements.txt`. No extra install step is required.
+
+#### Optional: Gradio Interface
+
+If you prefer Gradio, install it from `requirements-optional.txt` first:
+
+```bash
+pip install -r requirements-optional.txt   # installs gradio and friends
+```
+
+Then from a Python REPL or notebook:
 
 ```python
 from biomni.agent import A1
 
-agent = A1(path='./data', llm='claude-sonnet-4-20250514')
-agent.launch_gradio_demo()
+agent = A1(path="./data")     # uses default Ollama model
+agent.launch_gradio_demo()    # default at http://localhost:7860
 ```
 
-**Installation:**
-```bash
-pip install "gradio>=5.0,<6.0"
-```
-
-**Note:** Biomni's Gradio interface currently requires Gradio 5.x due to API changes in Gradio 6.0. If you have Gradio 6.x installed, you may need to downgrade.
-
-**Options:**
-- `share=True` - Create a public shareable link
-- `server_name="127.0.0.1"` - Localhost only (default: "0.0.0.0")
-- `require_verification=True` - Require access code (default code: "Biomni2025")
-
-The interface will be available at `http://localhost:7860`
+Useful flags:
+- `share=True` — create a public Gradio link
+- `server_name="127.0.0.1"` — local-only
+- `require_verification=True` — gate the UI behind a code (default `Biomni2025`)
 
 ### Configuration Management
 
@@ -197,7 +171,8 @@ from biomni.config import default_config
 from biomni.agent import A1
 
 # RECOMMENDED: Modify global defaults for consistency
-default_config.llm = "gpt-4"
+default_config.llm = "gpt-4"           # overrides the local-first default
+default_config.source = "OpenAI"        # tells Biomni to use OpenAI
 default_config.timeout_seconds = 1200
 
 # All agents AND database queries use these defaults
@@ -205,6 +180,23 @@ agent = A1()  # Everything uses gpt-4, 1200s timeout
 ```
 
 **Note**: Direct parameters to `A1()` only affect that agent's reasoning, not database queries. For consistent configuration across all operations, use `default_config` or environment variables.
+
+#### NCBI / Entrez email (PubMed tools)
+
+NCBI asks politely for an email on every Entrez request and will rate-limit requests that don't provide one. The bare-minimum placeholder `your-email@example.com` works but you'll hit throttling faster. Set a real address via `.env`:
+
+```env
+NCBI_EMAIL=you@example.com
+```
+
+Or programmatically:
+
+```python
+from biomni.config import default_config
+default_config.ncbi_email = "you@example.com"
+```
+
+`query_pubmed`, `get_gene_coding_sequence`, and the rest of the literature / molecular-biology tools will pick this up automatically. The resolution order is: explicit function argument → `default_config.ncbi_email` → `NCBI_EMAIL` (or `BIOMNI_NCBI_EMAIL`) env var → placeholder.
 
 For detailed configuration options, see the **[Configuration Guide](docs/configuration.md)**.
 
@@ -215,8 +207,8 @@ Generate PDF reports of execution traces:
 ```python
 from biomni.agent import A1
 
-# Initialize agent
-agent = A1(path='./data', llm='claude-sonnet-4-20250514')
+# Initialize agent (uses your default Ollama model, or pass llm= explicitly)
+agent = A1(path='./data')
 
 # Run your task
 agent.go("Your biomedical task here")
@@ -405,6 +397,20 @@ Experience Biomni through our no-code web interface at **[biomni.stanford.edu](h
 - Security warning: Currently, Biomni executes LLM-generated code with full system privileges. If you want to use it in production, please use in isolated/sandboxed environments. The agent can access files, network, and system commands. Be careful with sensitive data or credentials.
 - This release was frozen as of April 15 2025, so it differs from the current web platform.
 - Biomni itself is Apache 2.0-licensed, but certain integrated tools, databases, or software may carry more restrictive commercial licenses. Review each component carefully before any commercial use.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `ModuleNotFoundError: biomni` | You forgot to `conda activate biomni`, or didn't `pip install -e .` / `pip install biomni`. |
+| `ModuleNotFoundError: No module named 'googlesearch'` when the agent calls `search_google` | Install the renamed package: `pip install googlesearch-python`. The literature module loads even if it's missing — only `search_google` itself fails. |
+| UI opens but every prompt errors with auth | `.env` has a cloud key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) but the matching `BIOMNI_LLM` / `BIOMNI_SOURCE` is missing or wrong. Either remove the cloud key (revert to Ollama default) or set the matching pair plus `BIOMNI_DISABLE_LOCAL_FALLBACK=true`. |
+| Agent tries Anthropic but I want Ollama | Make sure no `ANTHROPIC_API_KEY` (or other cloud key) is in your shell env or `.env`. The local-first fallback in `biomni/config.py` short-circuits only when the user hasn't chosen a cloud model. |
+| Agent tries Ollama but I want Anthropic | Uncomment `ANTHROPIC_API_KEY` in `.env` and add `BIOMNI_LLM=claude-sonnet-4-5` + `BIOMNI_SOURCE=Anthropic` + `BIOMNI_DISABLE_LOCAL_FALLBACK=true`. |
+| `Connection refused` on `localhost:11434` | `ollama serve` isn't running, or it crashed. Restart it. |
+| "No models available" / `ollama list` is empty | `ollama pull qwen2.5:14b` (or any other model). |
+| PubMed / NCBI tools throttled or rejected | NCBI asks for an email on every Entrez request. Set `NCBI_EMAIL=you@example.com` in `.env` (or pass `ncbi_email=` to `BiomniConfig()`). |
+| First run hangs for hours | It's downloading the 11 GB data lake. Set `expected_data_lake_files=[]` to skip. |
 
 ## Cite Us
 

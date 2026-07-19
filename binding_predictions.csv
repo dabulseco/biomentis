@@ -1,0 +1,4 @@
+name,target,total_score,predicted_dG,CDR3_length,stability,solubility,aromatic,charge
+CHIKV-Nb1,Domain_B_arch2 (195-219),0.93,-14.5,1.0,0.8,1.0,1.0,0.8
+CHIKV-Nb2,Domain_A_lateral (60-99),0.94,-14.6,0.8,1.0,1.0,1.0,1.0
+CHIKV-Nb3,Domain_A_central (120-149),0.98,-14.9,1.0,1.0,1.0,1.0,0.8

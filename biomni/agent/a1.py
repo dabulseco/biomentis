@@ -2967,6 +2967,19 @@ Each library is listed with its description to help you understand its functiona
                     st.error("Incorrect access code. Please check your access code.")
             return
 
+        # Header banner — logo across the top of the main view (not the sidebar).
+        # The file lives at repo_root/figs/biomni_logo.png; resolve relative to
+        # this source file so it works regardless of CWD when streamlit is run.
+        _logo_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "figs",
+            "biomni_logo.png",
+        )
+        if os.path.exists(_logo_path):
+            _, _logo_col, _ = st.columns([1, 2, 1])
+            with _logo_col:
+                st.image(_logo_path, width=300)
+
         st.title("Biomni A1 Agent")
 
         # If the caller (e.g. streamlit_app.py) already wired up a model picker

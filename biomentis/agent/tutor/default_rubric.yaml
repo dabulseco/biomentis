@@ -1,0 +1,32 @@
+# Default discipline-agnostic starter rubric.
+#
+# These objectives are intentionally generic so the same engine works for
+# any biomedical task. A teacher uploads a more specific YAML to overlay
+# this one — `Rubric.from_yaml(path)` fully replaces, not merges, so a
+# teacher who wants their own set doesn't see the defaults.
+
+objectives:
+  - id: GEN1
+    description: "Identify the question being asked and the relevant biological / chemical context."
+    bloom_level: Understand
+    dok_level: 1
+
+  - id: GEN2
+    description: "Locate the right database, tool, or method for the question."
+    bloom_level: Apply
+    dok_level: 2
+
+  - id: GEN3
+    description: "Interpret intermediate outputs (alignments, scores, plots) and identify what is biologically meaningful."
+    bloom_level: Analyze
+    dok_level: 2
+
+  - id: GEN4
+    description: "Compare alternative approaches and justify the choice made (e.g. tool, parameter, model)."
+    bloom_level: Evaluate
+    dok_level: 3
+
+  - id: GEN5
+    description: "Synthesize a final answer that addresses the original question, with appropriate caveats and next-step suggestions."
+    bloom_level: Create
+    dok_level: 3

@@ -3,14 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "biomni"
+name = "biomentis"
 dynamic = ["version"]
-description = "Biomni"
+description = "Biomentis — a general-purpose biomedical AI agent"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [
-    {name = "Biomni Team", email = "kexinh@cs.stanford.edu"}
+    {name = "Biomentis", email = "dabulseco@users.noreply.github.com"}
 ]
 requires-python = ">=3.11"
 dependencies = [
@@ -30,14 +30,14 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/snap-stanford/biomni"
-Repository = "https://github.com/snap-stanford/biomni"
+Homepage = "https://github.com/dabulseco/biomentis"
+Repository = "https://github.com/dabulseco/biomentis"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.dynamic]
-version = {attr = "biomni.version.__version__"}
+version = {attr = "biomentis.version.__version__"}
 
 [tool.setuptools.packages.find]
 exclude = ["test*", "tutorials*"]

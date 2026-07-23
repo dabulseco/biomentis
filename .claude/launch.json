@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "streamlit-demo",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "BIOMNI_DOWNLOADS_DIR=/tmp/biomni_export_test_downloads streamlit run streamlit_app.py --server.headless true --server.port $PORT"],
+      "port": 8501,
+      "autoPort": true
+    },
+    {
+      "name": "gradio-demo",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "BIOMNI_DOWNLOADS_DIR=/tmp/biomni_export_test_downloads python3 -c \"from biomni.agent import A1; A1(path='./data', use_tool_retriever=False, expected_data_lake_files=[]).launch_gradio_demo(server_name='127.0.0.1')\""],
+      "port": 7860
+    }
+  ]
+}

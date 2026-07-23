@@ -158,7 +158,7 @@ jupyter lab   # or: jupyter notebook
 ```
 
 ```python
-from biomni.agent import A1
+from biomentis.agent import A1
 
 agent = A1(path="./data", llm="claude-sonnet-4-20250514")
 agent.go("Plan a CRISPR screen to identify genes that regulate T cell exhaustion.")
@@ -174,7 +174,7 @@ agent.go("Plan a CRISPR screen to identify genes that regulate T cell exhaustion
 If you installed the optional extras and prefer Gradio, run from a Python REPL:
 
 ```python
-from biomni.agent import A1
+from biomentis.agent import A1
 agent = A1(path="./data", llm="claude-sonnet-4-20250514")
 agent.launch_gradio_demo()        # default at http://localhost:7860
 ```
@@ -224,7 +224,7 @@ If a tool you need isn't built in:
 ollama pull llama3.1:70b
 
 # 2. In Python
-from biomni.agent import A1
+from biomentis.agent import A1
 agent = A1(
     path="./data",
     llm="llama3.1:70b",

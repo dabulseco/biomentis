@@ -1,4 +1,4 @@
-biomni API Reference
+biomentis API Reference
 ====================
 
 .. toctree::

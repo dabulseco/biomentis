@@ -1,4 +1,0 @@
-name,target,ECSA_dG,Asian_dG,WestAfrican_dG,mean_dG,std_dG,max_shift,cross_reactivity,cross_reactivity_score
-CHIKV-Nb1,Domain_B_arch2 (195-219),-14.5,-14.0,-13.5,-14.0,0.41,1.0,Excellent,1.0
-CHIKV-Nb2,Domain_A_lateral (60-99),-14.6,-14.1,-12.1,-13.6,1.08,2.5,Moderate,0.6
-CHIKV-Nb3,Domain_A_central (120-149),-14.9,-14.9,-14.4,-14.7,0.24,0.5,Excellent,1.0

@@ -1,6 +1,0 @@
-epitope,description,total_residues,surface_exposed,surface_fraction,known_mabs,residue_range
-Domain_B_arch2,E2 Domain B arch 2 - fusion loop proximal,25,15,0.6,"CHK-9, CHK-102",195-219
-Domain_A_lateral,E2 Domain A lateral ridge - cross-reactive epitope,40,20,0.5,"CHK-124, CHK-263",60-99
-Domain_A_central,E2 Domain A central - conserved beta-sheet region,30,14,0.4666666666666667,"5F10, 8B10",120-149
-Domain_B_arch1,"E2 Domain B arch 1 - receptor binding region, target of neutralizing mAbs",25,10,0.4,"CHK-152, CHK-166, C9, 3E7b",170-194
-Fusion_loop_proximal,Region near E1 fusion loop interface - highly conserved,30,10,0.3333333333333333,CHK-11,230-259

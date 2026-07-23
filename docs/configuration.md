@@ -1,14 +1,14 @@
-# Biomni Configuration Guide
+# Biomentis Configuration Guide
 
-> **Default = local Ollama.** If you have `ollama serve` running with at least one model pulled, Biomni picks that automatically — no API key, no env var, no `.env` file needed. The settings below only matter when you want to override the default (switch to a cloud provider, tune timeouts, point at a different data path, etc.).
+> **Default = local Ollama.** If you have `ollama serve` running with at least one model pulled, Biomentis picks that automatically — no API key, no env var, no `.env` file needed. The settings below only matter when you want to override the default (switch to a cloud provider, tune timeouts, point at a different data path, etc.).
 
 ## Quick Start
 
 **Recommended approach**: Use environment variables or modify `default_config` for consistent behavior across your entire application.
 
 ```python
-from biomni.config import default_config
-from biomni.agent import A1
+from biomentis.config import default_config
+from biomentis.agent import A1
 
 # Option 1: Modify global defaults (affects everything)
 default_config.llm = "qwen2.5:14b"            # or any specific Ollama model name
@@ -40,7 +40,7 @@ Create a `.env` file in your project. **Leave the cloud-key lines commented out*
 # Azure OpenAI
 # OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 
-# Biomni Settings
+# Biomentis Settings
 BIOMNI_LLM=qwen2.5:14b                  # default: "auto" (picks first local Ollama model)
 BIOMNI_SOURCE=Ollama                    # default: auto-detected from model name
 BIOMNI_DISABLE_LOCAL_FALLBACK=false     # default: false; set true to force a cloud provider
@@ -51,7 +51,7 @@ BIOMNI_TIMEOUT_SECONDS=1200             # default: 600
 ### 2. Runtime Configuration (Recommended for Scripts)
 
 ```python
-from biomni.config import default_config
+from biomentis.config import default_config
 
 # Changes apply to all agents and database queries
 default_config.llm = "gpt-4"
@@ -110,7 +110,7 @@ AWS_REGION=us-east-1
 # Azure OpenAI
 OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 
-# --- Biomni Settings ---
+# --- Biomentis Settings ---
 BIOMNI_PATH=/path/to/data                   # default: ./data
 BIOMNI_TIMEOUT_SECONDS=1200                 # default: 600
 BIOMNI_LLM=model_name                       # default: "auto" (picks first local Ollama model)
@@ -127,7 +127,7 @@ OLLAMA_HOST=http://localhost:11434          # default; only set if Ollama is els
 ### Python Configuration
 
 ```python
-from biomni.config import default_config
+from biomentis.config import default_config
 
 # All available settings
 default_config.path = "./data"

@@ -38,11 +38,16 @@ requests
 beautifulsoup4
 lxml
 pyyaml
-# `search_google` (biomni/tool/literature.py) needs this. The old `googlesearch`
+# `search_google` (biomentis/tool/literature.py) needs this. The old `googlesearch`
 # PyPI package was renamed to `googlesearch-python` in 2024 — install under the
 # new name. The import is lazy, so the rest of the literature module works
 # even if you skip this.
 googlesearch-python
+
+# `query_pubmed` (biomentis/tool/literature.py) needs this. Pinned to match
+# the conda env file (biomentis_env/bio_env.yml). Import is lazy, so the
+# rest of the literature module works even if you skip this.
+pymed==0.8.9
 
 # --- Optional-but-recommended for retrieval / embedding helpers ---
 transformers
@@ -50,6 +55,17 @@ sentencepiece
 
 # --- Default UI ---
 streamlit>=1.30
+
+# --- Tutor layer (optional) ---
+# The instructional layer (`biomentis.agent.tutor`) is opt-in. Each of these is
+# only imported when the tutor sidebar is actually used, so missing deps
+# don't break a research-only deployment.
+pypdf
+python-pptx
+python-docx
+tiktoken
+chromadb
+sentence-transformers
 
 # --- Notebook + dev ---
 jupyter

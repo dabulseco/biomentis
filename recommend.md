@@ -9,9 +9,9 @@ These four files are the pre-`A1` ReAct agent. `A1` does the ReAct work directly
 - `biomni/agent/react.py`
 - `biomni/agent/qa_llm.py`
 - `biomni/agent/function_generator.py`
-- `biomni/agent/env_collection.py` ← **already broken**: it does `from biomni.agent.base_agent import base_agent`, but no such module exists. The file can't even be imported.
+- `biomni/agent/env_collection.py` ← **already broken**: it does `from biomentis.agent.base_agent import base_agent`, but no such module exists. The file can't even be imported.
 
-**Before deleting**, confirm with `grep -rn "from biomni.agent.react\|from biomni.agent.qa_llm\|from biomni.agent.function_generator\|from biomni.agent.env_collection" .` that nothing outside `biorxiv_scripts/` uses them.
+**Before deleting**, confirm with `grep -rn "from biomentis.agent.react\|from biomentis.agent.qa_llm\|from biomentis.agent.function_generator\|from biomentis.agent.env_collection" .` that nothing outside `biorxiv_scripts/` uses them.
 
 ## 2. Delete or quarantine `biomni/biorxiv_scripts/`
 
@@ -54,7 +54,7 @@ Pick one:
 The file currently just re-exports `get_tool_decorated_functions` and is never triggered — the live app imports `biomni.tool.support_tools` and `biomni.tool.tool_registry` directly, and `read_module2api` imports `biomni.tool.tool_description.*` directly.
 
 Two options:
-- **Make it real**: have `tool/__init__.py` auto-discover all `@register_tool`-decorated functions from every `biomni/tool/*.py` module and re-export them, so `from biomni.tool import analyze_data` actually works (right now it doesn't).
+- **Make it real**: have `tool/__init__.py` auto-discover all `@register_tool`-decorated functions from every `biomni/tool/*.py` module and re-export them, so `from biomentis.tool import analyze_data` actually works (right now it doesn't).
 - **Delete it** if the user-facing entry is `A1.go("…")` and the tool API is internal.
 
 ## 6. Decide on `task/`, `eval/`, `biorxiv_scripts/`

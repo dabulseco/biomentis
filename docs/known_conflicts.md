@@ -1,8 +1,8 @@
-# Known Package Conflicts in Biomni
+# Known Package Conflicts in Biomentis
 
-> **Note:** Biomni now installs via `pip install -r requirements.txt` (see [`../quick_start_guide.md`](../quick_start_guide.md)). The packages listed below are still excluded from the default install for the compatibility reasons given, and must be installed manually if you need them.
+> **Note:** Biomentis now installs via `pip install -r requirements.txt` (see [`../quick_start_guide.md`](../quick_start_guide.md)). The packages listed below are still excluded from the default install for the compatibility reasons given, and must be installed manually if you need them.
 
-This file lists Python packages that are known to have dependency conflicts with the default Biomni environment. These packages are not installed by default. If you require their functionality, you must install them manually and may need to uncomment relevant code in the codebase.
+This file lists Python packages that are known to have dependency conflicts with the default Biomentis environment. These packages are not installed by default. If you require their functionality, you must install them manually and may need to uncomment relevant code in the codebase.
 
 ## Packages
 
@@ -18,7 +18,7 @@ This file lists Python packages that are known to have dependency conflicts with
 ### 3. cnvkit
 - **Environment Requirement**: Requires Python 3.10 environment (`bio_env_py310.yml`)
 - **Function**: Supports the `analyze_copy_number_purity_ploidy_and_focal_events` function
-- **Why Separate Environment**: cnvkit has strict dependency requirements that conflict with newer Python versions and other packages in the main Biomni environment. Python 3.10 provides the optimal compatibility for cnvkit and its dependencies, ensuring reliable copy number variation analysis, purity estimation, ploidy detection, and focal event identification.
+- **Why Separate Environment**: cnvkit has strict dependency requirements that conflict with newer Python versions and other packages in the main Biomentis environment. Python 3.10 provides the optimal compatibility for cnvkit and its dependencies, ensuring reliable copy number variation analysis, purity estimation, ploidy detection, and focal event identification.
 - **Installation**: Use `conda env create -f bio_env_py310.yml` to create the dedicated environment
 
 ### 4. panhumanpy
@@ -28,7 +28,7 @@ This file lists Python packages that are known to have dependency conflicts with
   - TensorFlow 2.17 (specific version)
   - scikit-learn 1.6.0 (specific version)
   - Python >=3.9 but optimized for Python 3.12
-  - These version constraints conflict with the main Biomni environment and other packages
+  - These version constraints conflict with the main Biomentis environment and other packages
 - **Installation**: Install in a separate conda environment with the exact versions specified in the package requirements
 
 ---

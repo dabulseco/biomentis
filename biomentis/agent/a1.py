@@ -23,6 +23,7 @@ from langgraph.graph import END, START, StateGraph
 # `biomentis.ui_tutor.install_renderers()` when the tutor sidebar is rendered.
 _RENDER_INSTRUCTION_CARD: Callable[..., None] | None = None
 _RENDER_PAUSE_GATE: Callable[..., None] | None = None
+_RENDER_ROADMAP_CARD: Callable[..., None] | None = None
 
 from biomentis.config import default_config
 from biomentis.know_how import KnowHowLoader
@@ -71,6 +72,44 @@ if os.path.exists(".env"):
 class AgentState(TypedDict):
     messages: list[BaseMessage]
     next_step: str | None
+
+
+def _invoke_llm_with_retry(llm, messages, max_retries: int = 3, base_delay: float = 2.0):
+    """Invoke `llm` with a bounded retry for transient connection errors.
+
+    Motivation: a cloud-signed-in Ollama model (`ollama signin`) routes
+    through the local daemon's own connection to Ollama's cloud backend.
+    When the agent sits idle for a while (e.g. a tutor-mode walkthrough
+    paused on a step while the student reads and asks questions), that
+    connection can go stale and the next call fails with something like
+    "net/http: TLS handshake timeout" / 502 — not a bug in this code, but
+    the daemon's own reconnect. One retry almost always succeeds, because
+    the retry's job is just forcing a fresh connection, not "waiting out"
+    anything — it works the same whether the preceding idle gap was 5
+    seconds or 50 minutes.
+
+    This is NOT a fix for a genuine, sustained outage — after
+    `max_retries` attempts it re-raises the last error so the caller's
+    normal error handling (or lack thereof) takes over. A fully local
+    model (no `-cloud` suffix, no `ollama signin` involved) has no cloud
+    hop to go stale in the first place and never needs this.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return llm.invoke(messages)
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries:
+                delay = base_delay * (2 ** (attempt - 1))
+                print(
+                    f"LLM invoke failed (attempt {attempt}/{max_retries}): {e!r} "
+                    f"— retrying in {delay:.0f}s"
+                )
+                time.sleep(delay)
+            else:
+                print(f"LLM invoke failed after {max_retries} attempts: {e!r}")
+    raise last_exc
 
 
 class A1:
@@ -1321,6 +1360,15 @@ Each library is listed with its description to help you understand its functiona
         """
         # Store self_critic for later use
         self.self_critic = self_critic
+        # `go`/`go_stream` reset this per call, but callers that drive the
+        # graph directly (e.g. the Streamlit UI's stream_agent_events,
+        # which invokes `self.app.stream` without going through either
+        # method) never would otherwise, leaving the attribute unset the
+        # first time `execute_self_critic` reads it. `configure()` runs on
+        # every such caller's turn (the Streamlit app re-threads critic
+        # priorities before each query), so resetting here also gives the
+        # same "one self-critic pass per task" semantics as `go`/`go_stream`.
+        self.critic_count = 0
 
         # Get data lake content
         data_lake_path = self.path + "/data_lake"
@@ -1422,7 +1470,7 @@ Each library is listed with its description to help you understand its functiona
                 system_prompt += "\n\nIMPORTANT FOR GPT MODELS: You MUST use XML tags <execute> or <solution> in EVERY response. Do not use markdown code blocks (```) - use <execute> tags instead."
 
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
-            response = self.llm.invoke(messages)
+            response = _invoke_llm_with_retry(self.llm, messages)
 
             # Normalize Responses API content blocks (list of dicts) into a plain string
             content = response.content
@@ -1616,14 +1664,14 @@ Each library is listed with its description to help you understand its functiona
                 # Generate feedback based on message history
                 messages = state["messages"]
                 feedback_prompt = f"""
-                Here is a reminder of what is the user requested: {self.user_task}
+                Here is a reminder of what is the user requested: {getattr(self, "user_task", "")}
                 Examine the previous executions, reaosning, and solutions.
                 Critic harshly on what could be improved?
                 Be specific and constructive.
                 Think hard what are missing to solve the task.
                 No question asked, just feedbacks.
                 """
-                feedback = self.llm.invoke(messages + [HumanMessage(content=feedback_prompt)])
+                feedback = _invoke_llm_with_retry(self.llm, messages + [HumanMessage(content=feedback_prompt)])
 
                 # Add feedback as a new message
                 state["messages"].append(
@@ -2975,7 +3023,7 @@ Each library is listed with its description to help you understand its functiona
             # Must be the first Streamlit command in the script; if the caller already
             # issued one (e.g. a spinner from st.cache_resource around agent construction),
             # Streamlit raises here — safe to ignore and keep whatever config is already set.
-            st.set_page_config(page_title="Biomentis A1 Agent", layout="wide")
+            st.set_page_config(page_title="Biomentis AI Agent", layout="wide")
         except Exception:
             pass
 
@@ -2987,7 +3035,7 @@ Each library is listed with its description to help you understand its functiona
             st.session_state.biomni_verified = not require_verification
 
         if not st.session_state.biomni_verified:
-            st.title("Biomentis A1 Agent - Access Verification")
+            st.title("Biomentis AI Agent - Access Verification")
             code = st.text_input("Access Code", type="password")
             if st.button("Verify Access"):
                 if code == "Biomni2025":
@@ -2998,8 +3046,10 @@ Each library is listed with its description to help you understand its functiona
             return
 
         # Header logo is rendered by streamlit_app.py above the chat
-        # panel (top of page, left-justified, 450px wide).
-        st.title("Biomentis A1 Agent")
+        # panel (top of page, left-justified, 675px wide). The st.title
+        # below acts as the page-level heading for the agent's run;
+        # the logo handles the brand mark.
+        st.title("Biomentis AI Agent")
 
         # If the caller (e.g. streamlit_app.py) already wired up a model picker
         # and set agent.llm to the user's selection, skip the in-method picker
@@ -3040,9 +3090,9 @@ Each library is listed with its description to help you understand its functiona
         # identical either way, so this is a pure UX change.
         _in_run = bool(st.session_state.get("biomni_run_active"))
         _tab_labels = (
-            ["Biomentis Executor", "Biomentis A1 Agent"]
+            ["Biomentis Executor", "Biomentis AI Agent"]
             if _in_run
-            else ["Biomentis A1 Agent", "Biomentis Executor"]
+            else ["Biomentis AI Agent", "Biomentis Executor"]
         )
         _first_tab, _second_tab = st.tabs(_tab_labels)
         if _in_run:
@@ -3065,18 +3115,67 @@ Each library is listed with its description to help you understand its functiona
             inner_col.caption(f"⏱  {_elapsed:0.1f}s elapsed")
 
         def export_entries(panel):
-            return [
-                ExportEntry(
-                    role=e.get("role", "assistant"),
-                    kind=e.get("kind", "text"),
-                    title=e.get("title"),
-                    content=e.get("content", ""),
-                    language=e.get("language"),
-                    file_path=e.get("file_path"),
+            # The per-step "Ask about this step" Q&A isn't part of
+            # biomni_transcript at all — it lives in the tutor run's own
+            # state (run["step_qa"]) so it can re-render attached to that
+            # step's card across reruns. That means it's invisible to a
+            # plain transcript walk and silently missing from the export
+            # unless spliced back in here. Only "inner" (Executor) has
+            # steps, so this only applies there.
+            run = st.session_state.get("biomni_tutor_run") if panel == "inner" else None
+            step_qa = (run or {}).get("step_qa") or {}
+
+            out: list[ExportEntry] = []
+            for e in st.session_state.biomni_transcript:
+                if e["panel"] != panel:
+                    continue
+                step_id = e.get("step_id")
+                run_id = e.get("run_id")
+                out.append(
+                    ExportEntry(
+                        role=e.get("role", "assistant"),
+                        kind=e.get("kind", "text"),
+                        title=e.get("title"),
+                        content=e.get("content", ""),
+                        language=e.get("language"),
+                        file_path=e.get("file_path"),
+                        step_id=step_id,
+                        run_id=run_id,
+                    )
                 )
-                for e in st.session_state.biomni_transcript
-                if e["panel"] == panel
-            ]
+                # "paused" is the last transcript entry generated for a
+                # step, so splicing the step's Q&A in right after it
+                # keeps chronological order sensible and puts it inside
+                # the same (run_id, step_id) box as the rest of the step
+                # once render_transcript_html groups them.
+                if e.get("kind") == "paused":
+                    for turn in step_qa.get(step_id, []):
+                        out.append(
+                            ExportEntry(
+                                role="user",
+                                kind="text",
+                                content=turn.get("question", ""),
+                                step_id=step_id,
+                                run_id=run_id,
+                            )
+                        )
+                        out.append(
+                            ExportEntry(
+                                role="assistant",
+                                kind="qa",
+                                title="💬 Ask about this step",
+                                content=turn.get("answer", ""),
+                                step_id=step_id,
+                                run_id=run_id,
+                                citations=turn.get("citations") or None,
+                                bloom_level=turn.get("bloom_level"),
+                                dok_level=turn.get("dok_level"),
+                                rubric_hit=turn.get("rubric_hit") or None,
+                                confidence=turn.get("confidence"),
+                                also_consider=turn.get("also_consider") or None,
+                            )
+                        )
+            return out
 
         if main_col.button("📥 Export to HTML", key="export_main_html"):
             html_doc = render_transcript_html(
@@ -3127,12 +3226,21 @@ Each library is listed with its description to help you understand its functiona
                     elif entry.get("content"):
                         with st.expander("🎓 Teaching note", expanded=True):
                             st.markdown(entry["content"])
+                elif entry.get("kind") == "roadmap":
+                    # One-time run-level plan preview. Same rich/fallback
+                    # pattern as "instruction".
+                    card = entry.get("card")
+                    if card is not None and _RENDER_ROADMAP_CARD is not None:
+                        _RENDER_ROADMAP_CARD(container, card)
+                    elif entry.get("content"):
+                        with st.expander("🗺️ Roadmap for this task", expanded=True):
+                            st.markdown(entry["content"])
                 elif entry.get("kind") == "paused":
                     # The Continue button is wired by the tutor module if
                     # present; otherwise we render a no-op so the stream
                     # remains a transcript.
                     if _RENDER_PAUSE_GATE is not None:
-                        _RENDER_PAUSE_GATE(container, entry.get("step_id"))
+                        _RENDER_PAUSE_GATE(container, entry.get("step_id"), entry.get("run_id"))
                     else:
                         st.markdown("⏸ _(paused)_")
                 elif entry.get("kind") == "qa":
@@ -3142,8 +3250,45 @@ Each library is listed with its description to help you understand its functiona
                 elif entry.get("content"):
                     st.markdown(entry["content"])
 
+        class _StepBoxTracker:
+            """Groups consecutive inner-panel entries that share the same
+            (run_id, step_id) into one bordered container, so a step's raw
+            output, its teaching card, and its "Ask about this step" box
+            read as one visual unit instead of separate, unrelated-looking
+            chat bubbles.
+
+            Entries without a step_id — status lines, the one-time
+            roadmap, "complete", or anything in research mode (which never
+            tags events with a step at all) — render directly into the
+            panel, ungrouped, exactly as before. Crucially, they do NOT
+            close whatever step box is currently open: the roadmap event
+            in particular is yielded *between* a step's raw reasoning and
+            its own instruction card (reasoning, roadmap, instruction,
+            paused), so treating "no step_id" as "end the box" would
+            split step 1 into two boxes around the roadmap. Only a
+            different (run_id, step_id) ends the current box.
+            """
+
+            def __init__(self, inner_col):
+                self._inner_col = inner_col
+                self._box = None
+                self._key = None
+
+            def render(self, entry, render_entry_fn, main_col):
+                step_id = entry.get("step_id")
+                if entry.get("panel") == "inner" and step_id is not None:
+                    key = (entry.get("run_id"), step_id)
+                    if key != self._key:
+                        self._box = self._inner_col.container(border=True)
+                        self._box.caption(f"📍 Step {step_id}")
+                        self._key = key
+                    render_entry_fn(self._box, entry)
+                else:
+                    render_entry_fn(main_col if entry.get("panel") == "main" else self._inner_col, entry)
+
+        _replay_step_tracker = _StepBoxTracker(inner_col)
         for entry in st.session_state.biomni_transcript:
-            render_entry(main_col if entry["panel"] == "main" else inner_col, entry)
+            _replay_step_tracker.render(entry, render_entry, main_col)
 
         # Multi-line prompt input. st.chat_input is hard-coded to a single
         # line by Streamlit, so we replace it with a text area + Send button
@@ -3196,6 +3341,31 @@ Each library is listed with its description to help you understand its functiona
             except Exception:
                 pass
 
+        # Guard: a different, non-empty prompt typed into THIS box while a
+        # tutor walkthrough is still in progress used to silently cancel
+        # it and start a brand-new task (the "different prompt" check in
+        # ui_tutor.py's tutor_wrapped_stream) — a common mistake, since
+        # this box sits directly below whatever step the student is
+        # reading. Block it here instead; questions about the current
+        # walkthrough belong in the "Ask about this step" box on that
+        # step's card (or the chat panel above), not this one.
+        if prompt and _tutor_run_prompt is not None and prompt != _tutor_run_prompt and not _tutor_continue:
+            st.warning(
+                "A tutor walkthrough is still in progress. Use the "
+                "\"Ask about this step\" box on the step you're viewing "
+                "(or the chat panel above) for questions — typing a new "
+                "task here would otherwise abandon the current "
+                "walkthrough and start over."
+            )
+            if st.button("Abandon walkthrough and start this new task instead", key="biomni_abandon_tutor_run"):
+                from biomentis.ui_tutor import abandon_current_run
+
+                abandon_current_run()
+                # Fall through with `prompt` unchanged so the new task
+                # starts immediately, in this same rerun.
+            else:
+                prompt = ""
+
         if prompt or (_tutor_continue and _tutor_run_prompt is not None):
             # In tutor-resume mode, the prompt is the in-flight run's prompt.
             effective_prompt = prompt or _tutor_run_prompt or ""
@@ -3234,6 +3404,7 @@ Each library is listed with its description to help you understand its functiona
                 render_entry(main_col, user_entry)
 
             code_execution_entries = []
+            _live_step_tracker = _StepBoxTracker(inner_col)
 
             # Resolve the event source: a tutor wrapper if provided, otherwise
             # the default `stream_agent_events` (research mode). Picking this
@@ -3317,6 +3488,19 @@ Each library is listed with its description to help you understand its functiona
                         "title": event.title or "🎓 Teaching note",
                         "card": getattr(event, "card", None),
                     }
+                elif event.type == "roadmap":
+                    # One-time, run-level plan preview yielded before the
+                    # first per-step instruction card. `card` carries the
+                    # structured fields (overview/steps); same rich/fallback
+                    # rendering pattern as "instruction".
+                    entry = {
+                        "panel": "inner",
+                        "role": "assistant",
+                        "kind": "roadmap",
+                        "content": event.content,
+                        "title": event.title or "🗺️ Roadmap for this task",
+                        "card": getattr(event, "card", None),
+                    }
                 elif event.type == "paused":
                     # The tutor wrapper yields a "paused" event to halt the
                     # stream. The render loop shows a Continue button when it
@@ -3328,6 +3512,7 @@ Each library is listed with its description to help you understand its functiona
                         "content": event.content,
                         "title": event.title or "⏸ Paused",
                         "step_id": getattr(event, "step_id", None),
+                        "run_id": getattr(event, "run_id", None),
                     }
                 elif event.type == "qa":
                     entry = {
@@ -3347,5 +3532,15 @@ Each library is listed with its description to help you understand its functiona
                     }
 
                 if entry is not None:
+                    # Every instruction-bearing event is tagged with the
+                    # step it belongs to before it's yielded (see
+                    # ui_tutor.py's _advance_run_live); carry that onto
+                    # the transcript entry uniformly so the render loop
+                    # can group a step's raw output with its teaching
+                    # card and Q&A box regardless of entry kind. Absent
+                    # in research mode / non-instruction-bearing events —
+                    # those just render ungrouped, as before.
+                    entry.setdefault("step_id", getattr(event, "step_id", None))
+                    entry.setdefault("run_id", getattr(event, "run_id", None))
                     st.session_state.biomni_transcript.append(entry)
-                    render_entry(main_col if entry["panel"] == "main" else inner_col, entry)
+                    _live_step_tracker.render(entry, render_entry, main_col)

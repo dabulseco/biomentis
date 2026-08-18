@@ -1,13 +1,19 @@
 """Append-only JSONL session logger.
 
 One file per session: `data/tutor_logs/<session_id>/<session_id>.jsonl`.
-Each line is a self-contained JSON record. Five record kinds are written:
+Each line is a self-contained JSON record. Record kinds written:
 
   {"kind": "step", "event_type": "code", "step_id": 7, "bloom_target": "Apply",
    "dok_target": 2, "instruction": {...}, "kb_citations": [...]}
 
+  {"kind": "roadmap", "overview": "...", "steps": [{"title": "...", "why": "..."}]}
+
   {"kind": "qa", "question": "...", "answer": "...", "bloom_level": "Analyze",
-   "dok_level": 3, "rubric_hit": ["OBJ2"], "confidence": 0.82}
+   "dok_level": 3, "rubric_hit": ["OBJ2"], "confidence": 0.82, "step_id": 3}
+   # step_id is the step the student was paused on when they asked, or null
+
+  {"kind": "advance", "step_id": 3, "dwell_seconds": 42.1}
+   # student clicked Continue off step_id after dwell_seconds spent reading it
 
   {"kind": "kb", "action": "add", "source": "...", "chunks": 41}
 
@@ -56,10 +62,19 @@ class SessionLogger:
         with open(self.path, "r", encoding="utf-8") as f:
             records = [json.loads(line) for line in f if line.strip()]
 
+        # "advance" records (student clicked Continue) are keyed by the
+        # step_id they advanced *off of*, joined into the steps CSV below
+        # as a dwell_seconds column — how long the student spent reading
+        # that step before moving on.
+        dwell_by_step: dict[Any, float] = {}
+        for r in records:
+            if r.get("kind") == "advance":
+                dwell_by_step[r.get("step_id")] = r.get("dwell_seconds", "")
+
         steps_buf = io.StringIO()
         steps_writer = csv.writer(steps_buf)
         steps_writer.writerow(
-            ["ts", "step_id", "event_type", "bloom_target", "dok_target", "what", "why"]
+            ["ts", "step_id", "event_type", "bloom_target", "dok_target", "what", "why", "dwell_seconds"]
         )
         for r in records:
             if r.get("kind") != "step":
@@ -74,13 +89,14 @@ class SessionLogger:
                     r.get("dok_target", ""),
                     instr.get("what", ""),
                     instr.get("why", ""),
+                    dwell_by_step.get(r.get("step_id"), ""),
                 ]
             )
 
         qa_buf = io.StringIO()
         qa_writer = csv.writer(qa_buf)
         qa_writer.writerow(
-            ["ts", "question", "answer", "bloom_level", "dok_level", "rubric_hit", "confidence"]
+            ["ts", "step_id", "question", "answer", "bloom_level", "dok_level", "rubric_hit", "confidence"]
         )
         for r in records:
             if r.get("kind") != "qa":
@@ -88,6 +104,7 @@ class SessionLogger:
             qa_writer.writerow(
                 [
                     r.get("ts", ""),
+                    r.get("step_id", ""),
                     r.get("question", ""),
                     r.get("answer", ""),
                     r.get("bloom_level", ""),

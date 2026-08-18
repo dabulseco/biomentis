@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why It Matters — AI and Antibody Engineering | Biomentis</title>
+<meta name="description" content="Why chikungunya virus and its E1/E2 glycoproteins are a live research target, and where AI is actually changing antibody and nanobody engineering.">
+<link href="assets/img/favicon-32.png" rel="icon" sizes="32x32" type="image/png">
+<link href="assets/img/favicon-180.png" rel="apple-touch-icon">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="assets/css/site.css" rel="stylesheet">
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-biomentis sticky-top py-2">
+  <div class="container">
+    <a class="navbar-brand" href="index.html">
+      <img src="assets/img/biomentis-icon.png" alt="Biomentis">
+      <span>biomentis<span class="tagline">From molecule to insight</span></span>
+    </a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav" aria-controls="mainNav" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="mainNav">
+      <ul class="navbar-nav ms-auto">
+        <li class="nav-item"><a class="nav-link" href="index.html">Home</a></li>
+        <li class="nav-item"><a class="nav-link active" aria-current="page" href="impact.html">Why It Matters</a></li>
+        <li class="nav-item"><a class="nav-link" href="agent-capability.html">Agent Capability</a></li>
+        <li class="nav-item"><a class="nav-link" href="comparison.html">2025 vs 2026</a></li>
+        <li class="nav-item"><a class="nav-link" href="learning.html">Learning Tool</a></li>
+        <li class="nav-item"><a class="nav-link" href="resources.html">Resources</a></li>
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<header class="hero section-pad pb-4">
+  <div class="container">
+    <div class="eyebrow mb-3">Why it matters</div>
+    <h1 class="display-6 mb-3">AI is changing how antibody engineering gets done</h1>
+    <p class="lead lead-muted" style="max-width:52rem;">
+      Before looking at what Biomentis did, it's worth being precise about the problem it was pointed at,
+      and why the field has been reaching for AI in the first place.
+    </p>
+  </div>
+</header>
+
+<section class="section-pad pt-4">
+  <div class="container">
+    <div class="row g-5">
+      <div class="col-lg-7">
+        <h2 class="h3 mb-3">The target: chikungunya virus</h2>
+        <p>
+          Alphaviruses are a globally distributed group of mosquito-borne RNA viruses responsible for significant
+          human disease, including arthritis and encephalitis. Old World alphaviruses like <strong>chikungunya
+          virus (CHIKV)</strong> are increasingly linked to global outbreaks, accelerated by climate-driven expansion
+          of mosquito vectors; New World alphaviruses such as Venezuelan equine encephalitis virus (VEEV) carry
+          neuroinvasive risk. Despite this burden, only one CHIKV vaccine is approved and no antivirals currently exist.
+        </p>
+        <p>
+          Recent structural biology has identified the <strong>E1 and E2 envelope glycoproteins</strong> &mdash;
+          including the E2 Domain A, the domain A&amp;B linker, and the domain C connector &mdash; as key targets
+          for broadly neutralizing antibodies. Because these regions are relatively conserved across CHIKV genotypes
+          (East/Central/South African, Asian, and West African) and related alphaviruses like Mayaro virus, they're
+          promising anchors for pan-alphavirus vaccines and therapeutics.
+        </p>
+        <h2 class="h3 mb-3 mt-5">Why nanobodies specifically</h2>
+        <p>
+          Nanobodies (VHH domains) are the single-domain antigen-binding fragments derived from camelid heavy-chain
+          antibodies. They're small, stable, easy to express in bacteria, and &mdash; because they lack a light
+          chain &mdash; can reach into cryptic or conserved epitope pockets that a full antibody's larger paratope
+          can't access. That combination makes them an attractive format for chasing the kind of conserved,
+          structurally awkward epitopes CHIKV's E1/E2 trimer presents.
+        </p>
+      </div>
+      <div class="col-lg-5">
+        <div class="figure-card mb-4">
+          <img src="assets/img/fig3-conservation-tree.png" alt="Phylogenetic conservation tree of alphavirus E2 domains, showing chikungunya, Igbo Ora, Mayaro, Ross River, Getah, and Sagiyama E2 clustering together, separate from equine encephalitis viruses and a Salmon Pancreas Virus outgroup.">
+          <div class="figure-caption">
+            <strong>E2 conservation across alphaviruses.</strong> Old World alphaviruses (chikungunya, Igbo Ora, Mayaro,
+            Ross River, Getah, Sagiyama) cluster together in E2 sequence space &mdash; the basis for pursuing a single,
+            pan-genotypic nanobody rather than one virus at a time. From the 2025 hackathon report.
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value">1</div>
+          <div class="stat-label">approved CHIKV vaccine, 0 approved antivirals &mdash; per the 2025 hackathon team's own literature review</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad bg-brand-tint">
+  <div class="container">
+    <div class="text-center mb-5">
+      <div class="eyebrow">Where AI actually fits</div>
+      <h2 class="section-title">Every stage of this pipeline has an AI-shaped bottleneck</h2>
+      <div class="divider-brand mx-auto"></div>
+      <p class="lead-muted mx-auto" style="max-width:48rem;">
+        The traditional antibody/nanobody discovery pipeline is a chain of specialist steps &mdash; each one slow,
+        each one requiring a different tool, database, or piece of domain expertise. That chain is exactly what
+        agentic AI workflows are being aimed at across the field, not just in this project.
+      </p>
+    </div>
+    <div class="row g-4">
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <h3 class="h6 text-brand fw-bold">Literature &amp; data compilation</h3>
+          <p class="text-muted small mb-0">Manual PubMed/GenBank/PDB/IEDB searches, one paper and one accession number at a time, vs. retrieval-augmented LLMs that pull and structure the same data on request.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <h3 class="h6 text-brand fw-bold">Sequence &amp; structure analysis</h3>
+          <p class="text-muted small mb-0">Alignment, phylogenetics, and homology modeling traditionally run and interpreted by hand; agents can run the pipelines and synthesize the conservation map.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <h3 class="h6 text-brand fw-bold">Epitope prediction</h3>
+          <p class="text-muted small mb-0">BepiPred, DiscoTope, NetMHCpan, and IEDB outputs still need expert filtering for conservation, immunogenicity, and accessibility &mdash; a natural place for an LLM to rank and explain candidates.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <h3 class="h6 text-brand fw-bold">De novo binder design</h3>
+          <p class="text-muted small mb-0">Generative structural tools &mdash; RFdiffusion for VHH backbones, ProteinMPNN for CDR sequences &mdash; are replacing iterative, structural-biologist-guided grafting and mutagenesis.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <h3 class="h6 text-brand fw-bold">In-silico screening</h3>
+          <p class="text-muted small mb-0">Docking and molecular dynamics used to be run and interpreted step by step; agents can orchestrate the runs and rank the results against a scoring matrix automatically.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <h3 class="h6 text-brand fw-bold">Experimental hand-off</h3>
+          <p class="text-muted small mb-0">Even the most automated pipeline still ends at the bench &mdash; gene synthesis, expression, and binding assays remain wet-lab work that AI can plan for but not replace.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad">
+  <div class="container">
+    <div class="row g-5 align-items-center">
+      <div class="col-lg-6">
+        <h2 class="h3 mb-3">This isn't a hypothetical &mdash; it's what the 2025 hackathon actually tried</h2>
+        <p class="text-muted">
+          A ten-person team (six students and staff, four project consultants) spent a four-day hackathon
+          testing exactly this idea: could local LLMs, retrieval-augmented generation, and agentic workflows
+          meaningfully assist a real CHIKV/Mayaro nanobody design pipeline? Their own report is candid about
+          both the promise and the friction &mdash; including a commercial AI tool refusing to engage with the
+          research question at all.
+        </p>
+        <a href="comparison.html" class="fw-semibold text-decoration-none">See exactly what they ran into &rarr;</a>
+      </div>
+      <div class="col-lg-6">
+        <div class="figure-card">
+          <img src="assets/img/fig1-chatgpt-blocked.png" alt="Screenshot of ChatGPT in Agent Mode refusing a chikungunya epitope/nanobody research question with a usage-policy warning.">
+          <div class="figure-caption">
+            <strong>"This content may violate our usage policies."</strong> ChatGPT's Agent Mode declined to engage with
+            a legitimate epitope-mapping question during the 2025 hackathon, pushing the team toward local,
+            open-source LLMs instead.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad bg-brand text-white">
+  <div class="container text-center">
+    <h2 class="section-title">Next: what a single agent session actually produced</h2>
+    <a href="agent-capability.html" class="btn btn-lg btn-light fw-semibold mt-3">See the case studies &rarr;</a>
+  </div>
+</section>
+
+<footer class="site-footer py-5">
+  <div class="container">
+    <div class="row gy-4">
+      <div class="col-md-5">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <img src="assets/img/biomentis-icon.png" alt="" style="height:28px;width:28px;">
+          <strong class="text-white">biomentis</strong>
+        </div>
+        <p class="fine-print mb-0">Biomentis is a fork of <a href="https://github.com/snap-stanford/biomni" target="_blank" rel="noopener">Biomni</a> (Huang et al., 2025), maintained by Dylan Bulseco, adding an opt-in instructional layer for classroom and self-study use.</p>
+      </div>
+      <div class="col-md-3">
+        <div class="fw-bold text-white mb-2">Explore</div>
+        <ul class="list-unstyled small">
+          <li><a href="agent-capability.html">Agent capability</a></li>
+          <li><a href="comparison.html">2025 vs 2026</a></li>
+          <li><a href="learning.html">Learning tool</a></li>
+          <li><a href="resources.html">Resources &amp; downloads</a></li>
+        </ul>
+      </div>
+      <div class="col-md-4">
+        <div class="fw-bold text-white mb-2">Project</div>
+        <ul class="list-unstyled small">
+          <li><a href="https://github.com/dabulseco/biomentis" target="_blank" rel="noopener">GitHub: dabulseco/biomentis</a></li>
+          <li><a href="https://www.biorxiv.org/content/10.1101/2025.05.30.656746v1" target="_blank" rel="noopener">Biomni preprint</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="kicker-line" style="border-color: rgba(255,255,255,0.12);"></div>
+    <p class="fine-print mb-0">All agent outputs on this site are real, unedited exports from Biomentis A1 runs (July 2026). Generated sequences and pipeline results are in-silico research proposals, not experimentally validated therapeutics.</p>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

@@ -12,9 +12,9 @@ panel. The call sequence:
      last 3 instruction cards (so the tutor has continuity), the KB
      snippets, and the chat history.
   4. Call the LLM. Parse the JSON response (`{answer, follow_up,
-     citations}`). Coerce types defensively.
+     citations, also_consider}`). Coerce types defensively.
   5. Drop any citation whose `source` isn't in the retrieved set
-     (no hallucinations).
+     (no hallucinations). Cap `also_consider` to 3 items.
   6. Run `Rubric.classify_qa` to score the Q&A against Bloom/DOK
      and the teacher rubric. Falls back gracefully on LLM error.
   7. Log the Q&A to the `SessionLogger` (if one is attached) so the
@@ -40,6 +40,8 @@ _MAX_KB_SNIPPET_CHARS = 600
 _MAX_CARDS_IN_CONTEXT = 3
 _MAX_CITATION_SNIPPET = 200
 _MAX_QUESTION_CHARS = 1000
+_MAX_ALSO_CONSIDER = 3
+_MAX_ALSO_CONSIDER_CHARS = 200
 
 # Two behavioral modes for the chat:
 #   "chat" — KB + LLM hybrid. Use the KB as the primary source, but the
@@ -65,6 +67,11 @@ class ChatTurn:
     rubric_hit: list[str] = field(default_factory=list)
     confidence: float = 0.0
     failed: bool = False  # True if the LLM call or parse failed
+    # Gap-analysis: things a thorough expert would flag beyond the literal
+    # question (unstated assumptions, adjacent concepts, pitfalls, a better
+    # approach) — {"point": str, "why": str}. Empty when the model judged
+    # the question complete as asked.
+    also_consider: list[dict] = field(default_factory=list)
 
 
 # --- Prompt --------------------------------------------------------------
@@ -85,16 +92,18 @@ Return a single JSON object with EXACTLY these keys (no other keys, no prose, no
 {
   "answer": "<your answer, plain text or simple markdown>",
   "follow_up": "<one follow-up question, or empty string if none>",
-  "citations": [{"source": "<EXACT source string from KB_SNIPPETS>", "page": <int or null>, "snippet": "<≤200 char quote>"}]
+  "citations": [{"source": "<EXACT source string from KB_SNIPPETS>", "page": <int or null>, "snippet": "<≤200 char quote>"}],
+  "also_consider": [{"point": "<a related concept, unstated assumption, or pitfall the question didn't cover>", "why": "<one short sentence, why it matters>"}]
 }
 
 RULES:
 1. CITATIONS — only cite KB_SNIPPETS you actually saw. If none are relevant to THIS question, return "citations": []. Never invent a source.
 2. If the KB doesn't address the question, say so plainly. Don't invent content from prior knowledge; be honest about what the KB does and doesn't say.
-3. Reference RECENT_STEPS when the question is about a step the agent just did ("you just ran BLAST — the result was…").
+3. Reference RECENT_STEPS when the question is about a step the agent just did ("you just ran BLAST — the result was…") — CURRENT STEP is the one the student is paused on right now; earlier ones are history.
 4. HISTORY is provided for continuity. Don't repeat yourself.
 5. Keep the answer short. The student is in the middle of a workflow, not reading an essay.
-6. Output ONLY the JSON. No markdown fences, no commentary, no apology.
+6. ALSO_CONSIDER (KB-scoped) — after answering, list 0-3 gaps a thorough tutor would flag, but ONLY if you can ground them in KB_SNIPPETS content the student hasn't already been told. If nothing KB-groundable applies, return "also_consider": []. Do not use general knowledge here — that's what "chat" mode is for.
+7. Output ONLY the JSON. No markdown fences, no commentary, no apology.
 """
 
 
@@ -113,11 +122,14 @@ You will be given:
 
 Your job: answer the question accurately and concisely. Be brief (2-4 short paragraphs or a short bulleted list). When the KB covers the question, lead with KB content. When the KB only partially covers it (or is empty), use your general knowledge to fill gaps — but be clear about which is which. Always end with ONE follow-up question.
 
+After the direct answer, also do a brief gap-analysis: think about what the student would benefit from knowing that the question itself didn't ask for — an unstated assumption, a closely related concept, a common pitfall/misconception, or a better approach if one exists. This is what separates a thorough answer from a literal one.
+
 Return a single JSON object with EXACTLY these keys (no other keys, no prose, no markdown fences):
 {
   "answer": "<your answer, plain text or simple markdown>",
   "follow_up": "<one follow-up question, or empty string if none>",
-  "citations": [{"source": "<EXACT source string from KB_SNIPPETS>", "page": <int or null>, "snippet": "<≤200 char quote>"}]
+  "citations": [{"source": "<EXACT source string from KB_SNIPPETS>", "page": <int or null>, "snippet": "<≤200 char quote>"}],
+  "also_consider": [{"point": "<a related concept, unstated assumption, edge case, or pitfall the question didn't cover>", "why": "<one short sentence, why it matters>"}]
 }
 
 RULES:
@@ -125,11 +137,12 @@ RULES:
 2. KB FIRST — when KB_SNIPPETS address the question, prefer that content over your general knowledge. If the KB partially answers, lead with the KB portion, then add general knowledge to fill the gap, and cite only the KB portion.
 3. NEVER INVENT CITATIONS — every citation's "source" must be the EXACT string from a KB_SNIPPETS entry. Never fabricate a source, page, or snippet.
 4. If both the KB and your knowledge are insufficient, say so plainly.
-5. Reference RECENT_STEPS when the question is about a step the agent just did ("you just ran BLAST — the result was…").
+5. Reference RECENT_STEPS when the question is about a step the agent just did ("you just ran BLAST — the result was…") — CURRENT STEP is the one the student is paused on right now; earlier ones are history.
 6. Reference RECENT_TRANSCRIPT and AGENT_FINAL_ANSWER when the student asks about a finished run ("what databases did you use?", "summarize the result"). These are the agent's actual output, so you can answer confidently.
 7. HISTORY is provided for continuity. Don't repeat yourself.
 8. Keep the answer short. The student is in the middle of a workflow, not reading an essay.
-9. Output ONLY the JSON. No markdown fences, no commentary, no apology.
+9. ALSO_CONSIDER — list 0-3 items, each ONE short sentence plus a one-sentence "why". Be selective: only include something a domain expert would actually think worth flagging. If the question is simple and complete as asked, return "also_consider": [] — don't pad for the sake of it. This is separate from, and in addition to, the single required "follow_up" question.
+10. Output ONLY the JSON. No markdown fences, no commentary, no apology.
 """
 
 
@@ -151,7 +164,12 @@ def _build_user_prompt(
 
     if cards:
         parts.append("")
-        parts.append("RECENT_STEPS (most recent last):")
+        parts.append(
+            "RECENT_STEPS (most recent last — the LAST one is the step the "
+            "student is currently paused on; when the question says "
+            "\"this step\" / \"what we just did\", it means that one, not "
+            "an earlier one):"
+        )
         for i, c in enumerate(cards, 1):
             bits = []
             if c.get("event_type"):
@@ -160,7 +178,8 @@ def _build_user_prompt(
                 bits.append(f"what={c['what']}")
             if c.get("why"):
                 bits.append(f"why={c['why']}")
-            parts.append(f"{i}. " + " | ".join(bits))
+            label = "CURRENT STEP" if i == len(cards) else f"step {i}"
+            parts.append(f"{label}: " + " | ".join(bits))
 
     if transcript:
         parts.append("")
@@ -254,6 +273,7 @@ class TutorChat:
         transcript: str = "",
         last_answer: str = "",
         mode: str = _ASK_MODE_TUTOR,
+        step_id: int | None = None,
     ) -> ChatTurn:
         """Ask the tutor a question.
 
@@ -275,6 +295,10 @@ class TutorChat:
                 content) or "tutor" (KB-only — strict grounding; the LLM
                 must only answer from KB_SNIPPETS). The "tutor" mode is
                 the default for backwards compatibility.
+            step_id: The pedagogical step the student was paused on when
+                asking, if any. Recorded on the logged `qa` record so the
+                session log can tell which step a question was asked
+                during; purely for logging, doesn't affect the answer.
 
         Returns:
             A `ChatTurn` with the answer, citations, and (if classifiable)
@@ -334,7 +358,7 @@ class TutorChat:
 
         # 3. Call the LLM.
         if self.llm is None:
-            return self._soft_failure(question, "no LLM configured")
+            return self._soft_failure(question, "no LLM configured", step_id)
 
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -353,12 +377,12 @@ class TutorChat:
             text = getattr(response, "content", str(response)) or ""
         except Exception as e:
             print(f"tutor: chat LLM call failed: {e!r}")
-            return self._soft_failure(question, f"LLM call failed: {e!r}")
+            return self._soft_failure(question, f"LLM call failed: {e!r}", step_id)
 
         # 4. Parse JSON.
         data = _extract_json(text)
         if data is None:
-            return self._soft_failure(question, "tutor returned an unparseable response")
+            return self._soft_failure(question, "tutor returned an unparseable response", step_id)
 
         # 5. Coerce answer, follow_up, citations.
         answer = str(data.get("answer", "") or "").strip()
@@ -369,6 +393,7 @@ class TutorChat:
         citations = self._coerce_citations(
             data.get("citations") or [], allowed_sources
         )
+        also_consider = self._coerce_also_consider(data.get("also_consider") or [])
 
         # 6. Classify.
         cls = self.rubric.classify_qa(
@@ -392,6 +417,7 @@ class TutorChat:
             rubric_hit=list(cls.rubric_hit),
             confidence=cls.confidence,
             failed=cls.failed,
+            also_consider=also_consider,
         )
 
         # 7. Log.
@@ -408,6 +434,8 @@ class TutorChat:
                         "confidence": cls.confidence,
                         "failed": cls.failed,
                         "citations": citations,
+                        "also_consider": also_consider,
+                        "step_id": step_id,
                     }
                 )
             except Exception as e:
@@ -450,7 +478,35 @@ class TutorChat:
             )
         return out
 
-    def _soft_failure(self, question: str, reason: str) -> ChatTurn:
+    @staticmethod
+    def _coerce_also_consider(value: Any) -> list[dict]:
+        """Coerce the model's gap-analysis list. Tolerant of a missing
+        "why", non-dict items, or the model omitting the key entirely
+        (older prompts / cached responses won't have it)."""
+        if not isinstance(value, list):
+            return []
+        out: list[dict] = []
+        for item in value:
+            if isinstance(item, dict):
+                point = item.get("point")
+                why = item.get("why")
+            elif isinstance(item, str):
+                point, why = item, None
+            else:
+                continue
+            if not isinstance(point, str) or not point.strip():
+                continue
+            entry = {"point": point.strip()[:_MAX_ALSO_CONSIDER_CHARS]}
+            if isinstance(why, str) and why.strip():
+                entry["why"] = why.strip()[:_MAX_ALSO_CONSIDER_CHARS]
+            out.append(entry)
+            if len(out) >= _MAX_ALSO_CONSIDER:
+                break
+        return out
+
+    def _soft_failure(
+        self, question: str, reason: str, step_id: int | None = None
+    ) -> ChatTurn:
         turn = ChatTurn(
             role="assistant",
             content=(
@@ -474,6 +530,7 @@ class TutorChat:
                         "confidence": 0.0,
                         "failed": True,
                         "error": reason,
+                        "step_id": step_id,
                     }
                 )
             except Exception as e:

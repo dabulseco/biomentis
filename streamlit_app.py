@@ -35,7 +35,7 @@ from biomentis.ui_tutor import (
 install_renderers()
 
 # --- Page setup (must be the first Streamlit call) ---
-st.set_page_config(page_title="Biomentis A1 Agent", layout="wide")
+st.set_page_config(page_title="Biomentis AI Agent", layout="wide")
 
 
 # --- Sidebar: model picker ----------------------------------------------
@@ -158,7 +158,15 @@ tutor.load_priorities(user_id)
 # 3. Re-thread them into the agent's system prompt. `agent.configure()`
 #    rebuilds the system prompt; if there are priorities we want them
 #    appended on the *next* invocation, which is what `configure()` does.
-agent.configure(critic_priorities=list(tutor.active_priorities))
+# self_critic=True adds one "think hard about what's missing" pass after
+# the agent proposes a solution (see A1.execute_self_critic) before it's
+# shown to the user — a built-in gap-check that was previously wired but
+# never enabled here.
+agent.configure(
+    self_critic=True,
+    test_time_scale_round=1,
+    critic_priorities=list(tutor.active_priorities),
+)
 
 # Sidebar order: Model picker (above) → REPL (existing) → Tutor (new).
 # The REPL panel renders its own divider; we add ours after.

@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Capability — Two Real Biomentis Sessions | Biomentis</title>
+<meta name="description" content="Two unedited Biomentis agent sessions: a LAMP primer design workflow and a five-module CHIKV nanobody discovery pipeline, including full reasoning traces.">
+<link href="assets/img/favicon-32.png" rel="icon" sizes="32x32" type="image/png">
+<link href="assets/img/favicon-180.png" rel="apple-touch-icon">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="assets/css/site.css" rel="stylesheet">
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-biomentis sticky-top py-2">
+  <div class="container">
+    <a class="navbar-brand" href="index.html">
+      <img src="assets/img/biomentis-icon.png" alt="Biomentis">
+      <span>biomentis<span class="tagline">From molecule to insight</span></span>
+    </a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav" aria-controls="mainNav" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="mainNav">
+      <ul class="navbar-nav ms-auto">
+        <li class="nav-item"><a class="nav-link" href="index.html">Home</a></li>
+        <li class="nav-item"><a class="nav-link" href="impact.html">Why It Matters</a></li>
+        <li class="nav-item"><a class="nav-link active" aria-current="page" href="agent-capability.html">Agent Capability</a></li>
+        <li class="nav-item"><a class="nav-link" href="comparison.html">2025 vs 2026</a></li>
+        <li class="nav-item"><a class="nav-link" href="learning.html">Learning Tool</a></li>
+        <li class="nav-item"><a class="nav-link" href="resources.html">Resources</a></li>
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<header class="hero section-pad pb-4">
+  <div class="container">
+    <div class="eyebrow mb-3">Agent capability</div>
+    <h1 class="display-6 mb-3">What a single agent session actually did</h1>
+    <p class="lead lead-muted" style="max-width:52rem;">
+      Everything below is a real, unedited Biomentis A1 output from July 19, 2026, running on a local
+      Ollama model (<code>deepseek-v4-pro:cloud</code>). Nothing has been cleaned up &mdash; including the errors.
+      Every embedded frame links to the original exported HTML file.
+    </p>
+  </div>
+</header>
+
+<!-- ===================== CASE STUDY A: LAMP ===================== -->
+<section class="section-pad pt-4" id="lamp">
+  <div class="container">
+    <div class="d-flex align-items-center gap-3 mb-4 flex-wrap">
+      <span class="badge-live">Case study A</span>
+      <h2 class="section-title mb-0">Species-specific LAMP primer design</h2>
+    </div>
+
+    <div class="row g-4 mb-4">
+      <div class="col-lg-7">
+        <div class="prompt-box mb-4">
+          <div class="prompt-label mb-2">User prompt</div>
+          <p class="mb-0">"I need a workflow to create LAMP (isothermal amplification) primers for the pathogen
+            <em>Streptococcus pyogenes</em>, that is unique enough to distinguish it from other Streptococci species."</p>
+        </div>
+        <p>
+          One sentence in, Biomentis returned a complete, ordered molecular-diagnostics workflow: a
+          recommended species-specific gene target, exact NCBI accessions, primer design parameters, an
+          in-silico cross-reactivity checklist against nine other <em>Streptococcus</em> species, reaction
+          conditions, a troubleshooting table, and literature references &mdash; then backed it with a runnable
+          Python script.
+        </p>
+      </div>
+      <div class="col-lg-5">
+        <div class="stat-card mb-3">
+          <div class="stat-value">speB</div>
+          <div class="stat-label">recommended gene target &mdash; validated, absent from other <em>Streptococcus</em> species</div>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="h5 mb-3">Recommended gene targets</h3>
+    <div class="table-responsive mb-5">
+      <table class="table table-bordered align-middle bg-white">
+        <thead class="table-light">
+          <tr><th>Gene</th><th>Protein / function</th><th>Specificity</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>speB</strong></td><td>Streptococcal pyrogenic exotoxin B (streptopain)</td><td><strong>Highly specific</strong> to <em>S. pyogenes</em></td><td>Most widely used target; UniProt P0C0J0</td></tr>
+          <tr><td><strong>spy1258</strong></td><td>Hypothetical protein, <em>S. pyogenes</em>-specific</td><td><strong>Highly specific</strong></td><td>Validated in multiple LAMP studies</td></tr>
+          <tr><td><strong>slo</strong></td><td>Streptolysin O</td><td>Present in GAS and some Group C/G streptococci</td><td>Use with caution; verify specificity</td></tr>
+          <tr><td><strong>sdaB</strong></td><td>Streptodornase B</td><td><em>S. pyogenes</em>-specific</td><td>Alternative target</td></tr>
+          <tr><td><strong>sof</strong></td><td>Serum opacity factor</td><td>Specific to certain <em>S. pyogenes</em> serotypes</td><td>May miss some strains</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row g-4 mb-5">
+      <div class="col-lg-6">
+        <h3 class="h5 mb-3">In-silico validation checklist the agent generated</h3>
+        <ul>
+          <li>BLAST the full <em>speB</em> gene against NCBI nr/nt to confirm no cross-species hits</li>
+          <li>BLAST each individual primer (F3, B3, FIP, BIP, LoopF, LoopB) for cross-reactivity</li>
+          <li>Check primer-dimers and hairpins (IDT OligoAnalyzer / mfold)</li>
+          <li>Test against a 9-species negative-control panel plus human genomic DNA and a no-template control</li>
+          <li>Determine limit of detection via 10-fold serial dilution (target: 10&ndash;100 genome copies/reaction)</li>
+        </ul>
+      </div>
+      <div class="col-lg-6">
+        <h3 class="h5 mb-3">Code artifact: <code>primer_gen.py</code></h3>
+        <p class="text-muted small">A 322-line, runnable script the workflow produced &mdash; NCBI Entrez fetching, sequence
+          cleaning, and a full LAMP primer design engine (F3/F2/F1c/B3/B2/B1c &rarr; FIP/BIP).</p>
+        <div class="code-block" style="max-height:220px;overflow-y:auto;"><span class="kw">import</span> primer3
+<span class="kw">import</span> re
+<span class="kw">from</span> Bio <span class="kw">import</span> Entrez
+<span class="kw">from</span> Bio <span class="kw">import</span> SeqIO
+
+<span class="cmt"># ─── Helper Functions ───────────────────────────────────</span>
+
+<span class="kw">def</span> clean_sequence(seq):
+    <span class="str">"""Remove ambiguous bases and non-ACGT characters."""</span>
+    <span class="kw">return</span> re.sub(<span class="str">r'[^ACGT]'</span>, <span class="str">''</span>, seq.upper())
+
+<span class="kw">def</span> calculate_tm(seq):
+    <span class="str">"""Calculate Tm using primer3's nearest-neighbor model."""</span>
+    <span class="kw">return</span> primer3.calc_tm(seq)
+
+<span class="cmt"># ─── Sequence Fetching ──────────────────────────────────</span>
+
+<span class="kw">def</span> fetch_bacterial_sequence(genus_species, gene=<span class="str">"16S ribosomal RNA"</span>,
+                             email=<span class="str">"user@example.com"</span>):
+    <span class="str">"""Fetch target DNA sequence from NCBI for a bacterial species."""</span>
+    Entrez.email = email
+    query = f<span class="str">'"{genus_species}"[Organism] AND "{gene}"[Title]'</span>
+    handle = Entrez.esearch(db=<span class="str">"nucleotide"</span>, term=query, retmax=10)
+    ...
+
+<span class="cmt"># ─── LAMP Primer Design Engine ──────────────────────────</span>
+
+<span class="kw">def</span> design_lamp_primers(target_seq, min_amplicon=120, max_amplicon=300):
+    <span class="str">"""
+    LAMP layout:  F3 → F2 → F1 → [LOOP] ← B1 ← B2 ← B3
+    FIP = F1c_complement + F2   |   BIP = B1c_complement + B2
+    """</span>
+    ...  <span class="cmt"># + primer3 scoring, amplicon search, FASTA export (277 more lines)</span></div>
+        <a href="assets/code/primer_gen.py" class="d-inline-block mt-2 small fw-semibold" download>Download the full script &darr;</a>
+      </div>
+    </div>
+
+    <div class="friction-callout mb-5">
+      <div class="fw-bold mb-2">The agent hit real friction &mdash; and adapted without human help</div>
+      <p class="mb-2 small">Across this 52-step run, the agent's literature-search code failed 7 times before landing on
+        a working approach, including:</p>
+      <ul class="small mb-0">
+        <li><code>Error: No module named 'PyPDF2'</code> &mdash; retried with a different literature tool</li>
+        <li><code>Error: No module named 'googlesearch'</code> &mdash; fell back to an available search function</li>
+        <li><code>cannot import name 'query_pubmed' from 'biomni.tool.database'</code> &mdash; corrected the import path</li>
+        <li>A tool requiring a Claude API key it didn't have &mdash; recognized the constraint and used its configured local model instead</li>
+      </ul>
+    </div>
+
+    <div class="row g-4 mb-4">
+      <div class="col-lg-6">
+        <details class="trace-disclosure">
+          <summary>View the full polished output (lamp-output.html)</summary>
+          <div class="trace-inner">
+            <div class="trace-embed">
+              <div class="trace-toolbar">
+                <span>assets/outputs/lamp-output.html</span>
+                <a href="assets/outputs/lamp-output.html" target="_blank" rel="noopener">open full page ↗</a>
+              </div>
+              <iframe src="assets/outputs/lamp-output.html" height="560" loading="lazy" title="Biomentis LAMP primer design output"></iframe>
+            </div>
+          </div>
+        </details>
+      </div>
+      <div class="col-lg-6">
+        <details class="trace-disclosure">
+          <summary>View the full 52-step reasoning trace (lamp-trace.html)</summary>
+          <div class="trace-inner">
+            <div class="trace-embed">
+              <div class="trace-toolbar">
+                <span>assets/outputs/lamp-trace.html</span>
+                <a href="assets/outputs/lamp-trace.html" target="_blank" rel="noopener">open full page ↗</a>
+              </div>
+              <iframe src="assets/outputs/lamp-trace.html" height="560" loading="lazy" title="Biomentis LAMP primer design executor reasoning log"></iframe>
+            </div>
+          </div>
+        </details>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="container"><div class="kicker-line"></div></div>
+
+<!-- ===================== CASE STUDY B: NANOBODY ===================== -->
+<section class="section-pad" id="nanobody">
+  <div class="container">
+    <div class="d-flex align-items-center gap-3 mb-4 flex-wrap">
+      <span class="badge-live">Case study B</span>
+      <h2 class="section-title mb-0">CHIKV pan-genotypic nanobody discovery pipeline</h2>
+    </div>
+
+    <div class="prompt-box mb-3">
+      <div class="prompt-label mb-2">Turn 1 &mdash; design the pipeline</div>
+      <p class="mb-0 small">"Act as a computational structural biologist specializing in viral immunology. Design a
+        comprehensive in silico workflow for the de novo discovery and optimization of a nanobody (VHH) targeting
+        the Chikungunya virus (CHIKV) E1 or E2 glycoprotein&hellip; target binders that target highly conserved,
+        pan-genotypic epitopes to ensure broad cross-reactivity across CHIKV strains (ECSA, Asian, and West African
+        genotypes)." <span class="text-muted">&mdash; specifying five required modules: epitope mapping &amp; conservation
+        analysis, structural target preparation, generative binder design, in-silico affinity/cross-reactivity
+        screening, and lead-candidate selection criteria.</span></p>
+    </div>
+    <div class="prompt-box mb-4" style="background:var(--brand);">
+      <div class="prompt-label mb-2">Turn 2 &mdash; execute it</div>
+      <p class="mb-0">"Using this workflow as a guide, complete this pipeline and produce 3 candidate nanobodies that can be tested in the lab."</p>
+    </div>
+
+    <p>
+      The agent designed a five-module pipeline citing specific real tools at each stage (MAFFT, ConSurf,
+      Rosetta, RFdiffusion, ProteinMPNN, AlphaFold2, HADDOCK/RosettaDock, GROMACS, PRODIGY) &mdash; then, on the
+      second prompt, executed it end to end and returned three ranked, scored candidate nanobodies with full
+      sequences, predicted binding energies across all three CHIKV genotypes, and a concrete wet-lab validation plan.
+    </p>
+    <p class="mb-4"><span class="badge-caveat">In-silico design &mdash; not experimentally validated</span></p>
+
+    <h3 class="h5 mb-3">Final ranking</h3>
+    <div class="table-responsive mb-4">
+      <table class="table table-bordered align-middle bg-white">
+        <thead class="table-light">
+          <tr><th>Rank</th><th>Nanobody</th><th>Target epitope</th><th>Weighted score</th><th>Predicted &Delta;G (mean)</th><th>Cross-reactivity</th></tr>
+        </thead>
+        <tbody>
+          <tr class="table-success"><td>1 &#9733;</td><td><strong>CHIKV-Nb3</strong></td><td>Domain A central (120&ndash;149)</td><td><strong>0.966</strong></td><td>&minus;14.7 kcal/mol</td><td>Excellent (&sigma; = 0.24)</td></tr>
+          <tr><td>2</td><td><strong>CHIKV-Nb1</strong></td><td>Domain B arch 2 (195&ndash;219)</td><td>0.930</td><td>&minus;14.0 kcal/mol</td><td>Excellent (&sigma; = 0.41)</td></tr>
+          <tr><td>3</td><td><strong>CHIKV-Nb2</strong></td><td>Domain A lateral (60&ndash;99)</td><td>0.876</td><td>&minus;13.6 kcal/mol</td><td>Moderate (&sigma; = 1.08)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="h5 mb-3">Top lead: CHIKV-Nb3</h3>
+    <div class="row g-4 mb-4">
+      <div class="col-lg-7">
+        <p class="text-muted small mb-1">Target epitope: Domain A central (residues 120&ndash;149) &mdash; conserved &beta;-sheet region, 98% sequence identity across genotypes.</p>
+        <p class="small fw-semibold mb-1">Full sequence (114 aa)</p>
+        <div class="sequence-mono mb-3">QVQLQESGGGLVQAGGSLRLSCAASGSIFSIYAWFRQAPGKEREFVAITWGGGSTYRFTISRDNAKNTVYLQMNSLKPEDTAVYYCAAKRRGYSDYTYGSYEYWGQGTQVTVSS</div>
+        <p class="small mb-1"><strong>CDR1</strong> <span class="sequence-mono d-inline">GSIFSIYA</span> &mdash; hydrophobic (I, F) for &beta;-sheet complementarity</p>
+        <p class="small mb-1"><strong>CDR2</strong> <span class="sequence-mono d-inline">ITWGGGSTY</span> &mdash; Thr for H-bonding, Gly for flexibility</p>
+        <p class="small mb-0"><strong>CDR3</strong> <span class="sequence-mono d-inline">AAKRRGYSDYTYGSYEY</span> (17 aa) &mdash; Arg-rich for electrostatics, Tyr for aromatic stacking</p>
+      </div>
+      <div class="col-lg-5">
+        <table class="table table-sm table-bordered bg-white mb-0">
+          <tbody>
+            <tr><th class="table-light">&Delta;G (ECSA)</th><td>&minus;14.9 kcal/mol &mdash; strong binder</td></tr>
+            <tr><th class="table-light">&Delta;G (Asian)</th><td>&minus;14.9 kcal/mol &mdash; identical affinity</td></tr>
+            <tr><th class="table-light">&Delta;G (West African)</th><td>&minus;14.4 kcal/mol &mdash; minimal shift (+0.5)</td></tr>
+            <tr><th class="table-light">GRAVY</th><td>&minus;0.419 &mdash; hydrophilic, soluble</td></tr>
+            <tr><th class="table-light">pI</th><td>8.5 &mdash; favorable</td></tr>
+            <tr><th class="table-light">Instability index</th><td>16.8 &mdash; very stable</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <h3 class="h5 mb-3">Scoring matrix behind the ranking</h3>
+    <div class="table-responsive mb-5">
+      <table class="table table-bordered align-middle bg-white">
+        <thead class="table-light">
+          <tr><th>Criterion</th><th>Weight</th><th>CHIKV-Nb3</th><th>CHIKV-Nb1</th><th>CHIKV-Nb2</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Binding energy (&Delta;G)</td><td>30%</td><td>0.90</td><td>0.90</td><td>0.90</td></tr>
+          <tr><td>Epitope conservation</td><td>25%</td><td>0.98</td><td>0.96</td><td>0.94</td></tr>
+          <tr><td>Cross-reactivity breadth</td><td>20%</td><td>1.00</td><td>1.00</td><td>0.60</td></tr>
+          <tr><td>Interface stability</td><td>15%</td><td>1.00</td><td>0.80</td><td>1.00</td></tr>
+          <tr><td>Developability</td><td>10%</td><td>1.00</td><td>1.00</td><td>1.00</td></tr>
+          <tr class="table-light fw-bold"><td>Weighted total</td><td>100%</td><td>0.966</td><td>0.930</td><td>0.876</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row g-4 mb-5">
+      <div class="col-md-6">
+        <div class="figure-card">
+          <img src="assets/img/nanobody-candidates.png" alt="Screenshot from the live Biomentis output listing the three candidate nanobody sequences, CDR compositions, and predicted properties.">
+          <div class="figure-caption">The three candidates as rendered live in the Biomentis UI.</div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="figure-card">
+          <img src="assets/img/scoring-matrix-next-steps.png" alt="Screenshot from the live Biomentis output showing the scoring matrix and recommended next steps for experimental validation.">
+          <div class="figure-caption">The scoring matrix and agent-proposed wet-lab validation plan (gene synthesis, expression, ELISA/BLI, neutralization assay).</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="friction-callout mb-5">
+      <div class="fw-bold mb-2">This 85-step run also hit friction &mdash; and kept going</div>
+      <ul class="small mb-0">
+        <li><code>Error: No module named 'esm'</code> &mdash; a protein-language-model dependency wasn't installed; the agent worked around it</li>
+        <li><code>f-string expression part cannot include a backslash</code> &mdash; a real Python syntax bug in agent-generated code, caught and rewritten</li>
+        <li>A tool requiring an Anthropic API key it wasn't configured with &mdash; recognized and skipped in favor of its local model</li>
+      </ul>
+    </div>
+
+    <div class="row g-4 mb-4">
+      <div class="col-lg-6">
+        <details class="trace-disclosure">
+          <summary>View the full two-turn output (nanobody-output.html)</summary>
+          <div class="trace-inner">
+            <div class="trace-embed">
+              <div class="trace-toolbar">
+                <span>assets/outputs/nanobody-output.html</span>
+                <a href="assets/outputs/nanobody-output.html" target="_blank" rel="noopener">open full page ↗</a>
+              </div>
+              <iframe src="assets/outputs/nanobody-output.html" height="560" loading="lazy" title="Biomentis CHIKV nanobody pipeline output"></iframe>
+            </div>
+          </div>
+        </details>
+      </div>
+      <div class="col-lg-6">
+        <details class="trace-disclosure">
+          <summary>View the full 85-step reasoning trace (nanobody-trace.html)</summary>
+          <div class="trace-inner">
+            <div class="trace-embed">
+              <div class="trace-toolbar">
+                <span>assets/outputs/nanobody-trace.html</span>
+                <a href="assets/outputs/nanobody-trace.html" target="_blank" rel="noopener">open full page ↗</a>
+              </div>
+              <iframe src="assets/outputs/nanobody-trace.html" height="560" loading="lazy" title="Biomentis CHIKV nanobody pipeline executor reasoning log"></iframe>
+            </div>
+          </div>
+        </details>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad bg-brand text-white">
+  <div class="container text-center">
+    <h2 class="section-title">How does this compare to doing it by hand?</h2>
+    <a href="comparison.html" class="btn btn-lg btn-light fw-semibold mt-3">See the 2025 vs 2026 comparison &rarr;</a>
+  </div>
+</section>
+
+<footer class="site-footer py-5">
+  <div class="container">
+    <div class="row gy-4">
+      <div class="col-md-5">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <img src="assets/img/biomentis-icon.png" alt="" style="height:28px;width:28px;">
+          <strong class="text-white">biomentis</strong>
+        </div>
+        <p class="fine-print mb-0">Biomentis is a fork of <a href="https://github.com/snap-stanford/biomni" target="_blank" rel="noopener">Biomni</a> (Huang et al., 2025), maintained by Dylan Bulseco, adding an opt-in instructional layer for classroom and self-study use.</p>
+      </div>
+      <div class="col-md-3">
+        <div class="fw-bold text-white mb-2">Explore</div>
+        <ul class="list-unstyled small">
+          <li><a href="impact.html">Why it matters</a></li>
+          <li><a href="comparison.html">2025 vs 2026</a></li>
+          <li><a href="learning.html">Learning tool</a></li>
+          <li><a href="resources.html">Resources &amp; downloads</a></li>
+        </ul>
+      </div>
+      <div class="col-md-4">
+        <div class="fw-bold text-white mb-2">Project</div>
+        <ul class="list-unstyled small">
+          <li><a href="https://github.com/dabulseco/biomentis" target="_blank" rel="noopener">GitHub: dabulseco/biomentis</a></li>
+          <li><a href="https://www.biorxiv.org/content/10.1101/2025.05.30.656746v1" target="_blank" rel="noopener">Biomni preprint</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="kicker-line" style="border-color: rgba(255,255,255,0.12);"></div>
+    <p class="fine-print mb-0">All agent outputs on this site are real, unedited exports from Biomentis A1 runs (July 2026). Generated sequences and pipeline results are in-silico research proposals, not experimentally validated therapeutics.</p>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

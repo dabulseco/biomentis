@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2025 vs 2026 — Manual Hackathon vs Autonomous Agent | Biomentis</title>
+<meta name="description" content="A task-by-task comparison of the 2025 hackathon team's manual, multi-tool antibody engineering workflow against a single 2026 Biomentis agent session.">
+<link href="assets/img/favicon-32.png" rel="icon" sizes="32x32" type="image/png">
+<link href="assets/img/favicon-180.png" rel="apple-touch-icon">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="assets/css/site.css" rel="stylesheet">
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-biomentis sticky-top py-2">
+  <div class="container">
+    <a class="navbar-brand" href="index.html">
+      <img src="assets/img/biomentis-icon.png" alt="Biomentis">
+      <span>biomentis<span class="tagline">From molecule to insight</span></span>
+    </a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav" aria-controls="mainNav" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="mainNav">
+      <ul class="navbar-nav ms-auto">
+        <li class="nav-item"><a class="nav-link" href="index.html">Home</a></li>
+        <li class="nav-item"><a class="nav-link" href="impact.html">Why It Matters</a></li>
+        <li class="nav-item"><a class="nav-link" href="agent-capability.html">Agent Capability</a></li>
+        <li class="nav-item"><a class="nav-link active" aria-current="page" href="comparison.html">2025 vs 2026</a></li>
+        <li class="nav-item"><a class="nav-link" href="learning.html">Learning Tool</a></li>
+        <li class="nav-item"><a class="nav-link" href="resources.html">Resources</a></li>
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<header class="hero section-pad pb-4">
+  <div class="container">
+    <div class="eyebrow mb-3">2025 vs 2026</div>
+    <h1 class="display-6 mb-3">From a ten-person hackathon to a single prompt</h1>
+    <p class="lead lead-muted" style="max-width:54rem;">
+      In August 2025, the <em>AI as a Research Assistant</em> hackathon team set out to test whether LLMs and
+      agentic workflows could meaningfully assist a CHIKV/Mayaro nanobody design pipeline. Their own report is the
+      source for everything on the left side of this page. Everything on the right is drawn from the real
+      Biomentis traces on the <a href="agent-capability.html">agent capability page</a>.
+    </p>
+  </div>
+</header>
+
+<section class="section-pad pt-4">
+  <div class="container">
+    <div class="row g-4 mb-5">
+      <div class="col-6 col-lg-3">
+        <div class="stat-card legacy"><div class="stat-value">10</div><div class="stat-label">people: 6 team members + 4 consultants</div></div>
+      </div>
+      <div class="col-6 col-lg-3">
+        <div class="stat-card legacy"><div class="stat-value">4 days</div><div class="stat-label">hackathon, with a presentation due each day</div></div>
+      </div>
+      <div class="col-6 col-lg-3">
+        <div class="stat-card"><div class="stat-value">2</div><div class="stat-label">prompts, across 2 Biomentis sessions</div></div>
+      </div>
+      <div class="col-6 col-lg-3">
+        <div class="stat-card"><div class="stat-value">137</div><div class="stat-label">autonomous steps, 0 manual handoffs mid-task</div></div>
+      </div>
+    </div>
+
+    <div class="row g-4 align-items-center mb-5">
+      <div class="col-lg-6">
+        <div class="figure-card">
+          <img src="assets/img/fig1-chatgpt-blocked.png" alt="Screenshot of ChatGPT in Agent Mode refusing a chikungunya epitope/nanobody research question with a usage-policy warning.">
+          <div class="figure-caption">Figure 1 from the 2025 report: ChatGPT's Agent Mode declined to engage with the team's epitope/nanobody research question.</div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <h2 class="h4 mb-3">The same class of question, two different outcomes</h2>
+        <p class="text-muted">
+          The 2025 team's own report documents ChatGPT's Agent Mode refusing to answer a direct question about CHIKV
+          E1/E2 epitope consensus sequences, flagged as a possible usage-policy violation. That pushed the team
+          toward stitching together local LLMs (Ollama, LM Studio, LLaMA 3.2), NotebookLM, and several standalone
+          bioinformatics services by hand.
+        </p>
+        <p class="text-muted mb-0">
+          The Biomentis session on the <a href="agent-capability.html#nanobody">agent capability page</a> was asked an
+          equivalent (arguably harder) question &mdash; design and execute a full CHIKV nanobody discovery pipeline
+          &mdash; directly, in one conversation, and completed it.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad bg-brand-tint">
+  <div class="container">
+    <div class="text-center mb-5">
+      <div class="eyebrow">From the 2025 proposal</div>
+      <h2 class="section-title">What the team planned to automate</h2>
+      <div class="divider-brand mx-auto"></div>
+      <p class="lead-muted mx-auto" style="max-width:44rem;">
+        Reproduced from <code>AI_vs_Traditional_Workflow.xlsx</code>, the team's own task-by-task comparison of the
+        traditional workflow against their proposed AI-enabled version &mdash; written <em>before</em> they ran it.
+      </p>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-bordered table-compare bg-white align-middle">
+        <thead>
+          <tr><th style="width:18%">Activity topic</th><th class="col-legacy" style="width:41%">Traditional workflow</th><th class="col-agent" style="width:41%">Proposed AI-enabled workflow</th></tr>
+        </thead>
+        <tbody>
+          <tr><th>Literature Review &amp; Data Compilation</th><td class="col-legacy">Manual PubMed/GenBank/PDB/IEDB searches; collection of sequences, structures, known epitopes, antibody data</td><td class="col-agent">RAG-enhanced LLMs auto-retrieve sequences, PDBs, epitope/antibody data; agentic scripts continuously update project databases</td></tr>
+          <tr><th>Sequence &amp; Structure Analysis</th><td class="col-legacy">Manual multiple sequence alignments (ClustalOmega, MAFFT); phylogenetics; homology modeling; mapping conserved regions</td><td class="col-agent">Agents run alignments, phylogeny, and modeling pipelines; LLM synthesizes conservation maps, surface accessibility, and structural features</td></tr>
+          <tr><th>Epitope Prediction</th><td class="col-legacy">Use of BepiPred, DiscoTope, NetMHCpan, IEDB tools; predictions filtered manually</td><td class="col-agent">LLM suggests input parameters; agents run predictions; AI ranks and filters epitopes for conservation, immunogenicity, accessibility</td></tr>
+          <tr><th>Nanobody Epitope Target Selection</th><td class="col-legacy">Based on literature on neutralizing antibodies (E2 domains, E1 fusion loop) and structural conservation</td><td class="col-agent">AI-guided identification of cryptic/conserved epitopes (e.g., E1 N100, E2 180&ndash;223); LLM cross-references with antibody databases</td></tr>
+          <tr><th>De Novo Binder / Antibody Design</th><td class="col-legacy">Iterative protein engineering guided by structural biologists; manual grafting/mutagenesis</td><td class="col-agent">RFdiffusion for VHH backbone design; ProteinMPNN for CDR sequence generation; RoseTTAFold2 fine-tuned for antibody&ndash;antigen complexes; ParaSurf for paratope mapping</td></tr>
+          <tr><th>Experimental Epitope Mapping</th><td class="col-legacy">Peptide arrays, alanine scanning, HDX-MS, cryo-EM, phage/yeast display; neutralization assays</td><td class="col-agent">AI assists in experiment prioritization and design (peptide libraries, alanine sites); agent parses assay outputs; LLM interprets structural/biophysical data</td></tr>
+          <tr><th>Paratope Characterization</th><td class="col-legacy">Antibody sequencing (VH/VL), CDR annotation, Fab crystal structures; structural superposition</td><td class="col-agent">LLM + agents identify germline usage, CDR motifs, electrostatic complementarity; ML/graph neural networks identify &ldquo;consensus paratope&rdquo; features</td></tr>
+          <tr><th>Nanobody Production &amp; Screening</th><td class="col-legacy">Expression in <em>E. coli</em>/yeast; SPR/BLI affinity testing; cryo-EM confirmation</td><td class="col-agent">AI prioritizes variants for synthesis; automated pipelines parse SPR/BLI data; AI-guided analysis of cryo-EM conformational changes</td></tr>
+          <tr><th>Functional Validation</th><td class="col-legacy">In vitro neutralization assays (PRNT, FRNT); in vivo animal protection studies; iterative antibody engineering</td><td class="col-agent">LLM interprets neutralization/animal model data; AI proposes multivalent/Fc-fused variants; agent re-runs in silico docking &amp; dynamics before re-testing</td></tr>
+          <tr><th>Immunogen &amp; Therapeutic Design</th><td class="col-legacy">Epitope-focused vaccines (VLP, subunit, mRNA); bispecific antibody engineering; iterative preclinical testing</td><td class="col-agent">LLM generative design of immunogens/antibodies; agent docking and MD simulations; AI refines candidates iteratively with minimal human intervention</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-muted small mt-2">Source: <a href="assets/docs/AI_vs_Traditional_Workflow.xlsx">AI_vs_Traditional_Workflow.xlsx</a>, 2025 hackathon team.</p>
+  </div>
+</section>
+
+<section class="section-pad">
+  <div class="container">
+    <div class="text-center mb-5">
+      <div class="eyebrow">From the 2025 report's own results section</div>
+      <h2 class="section-title">What the team actually achieved &mdash; in their own words</h2>
+      <div class="divider-brand mx-auto"></div>
+    </div>
+    <div class="table-responsive mb-4">
+      <table class="table table-bordered table-compare bg-white align-middle">
+        <thead>
+          <tr><th style="width:18%">Aspect</th><th class="col-legacy" style="width:41%">Human-driven workflow</th><th class="col-agent" style="width:41%">AI-augmented workflow (what they got to)</th></tr>
+        </thead>
+        <tbody>
+          <tr><th>Sequence Processing</th><td class="col-legacy">Manually retrieved and aligned alphavirus FASTA sequences</td><td class="col-agent">Agents performed alignment and % similarity mapping using Muscle</td></tr>
+          <tr><th>Epitope Identification</th><td class="col-legacy">Identified hot spots and domain assignments using papers and IEDB</td><td class="col-agent">Agents assisted in IEDB querying and mapping; partial automation attempted</td></tr>
+          <tr><th>Nanobody Modeling</th><td class="col-legacy">Manually designed scaffold PDB using E2-only sequences</td><td class="col-agent">AI tools (RFdiffusion, RFantibody) proposed 3D models; some used to guide design</td></tr>
+          <tr><th>CDR Identification</th><td class="col-legacy">Initially planned to define manually, but skipped</td><td class="col-agent">Agents identified likely CDRs automatically</td></tr>
+          <tr><th>Experimental Validation</th><td class="col-legacy">Skipped due to time/resource constraints</td><td class="col-agent">No experimental steps simulated or run</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <blockquote class="border-start border-4 ps-4 py-2 text-muted" style="border-color:var(--legacy) !important;">
+      "Several planned manual steps &mdash; such as defining CDRs &mdash; were eventually skipped in favor of using
+      agents&hellip; while the team initially intended to evaluate outputs through experimental validation, time
+      constraints and tool limitations prevented this."
+      <footer class="blockquote-footer mt-1">2025 hackathon report, Comparative Assessment</footer>
+    </blockquote>
+  </div>
+</section>
+
+<section class="section-pad bg-brand-tint">
+  <div class="container">
+    <div class="text-center mb-5">
+      <div class="eyebrow">2026, one Biomentis session</div>
+      <h2 class="section-title">What actually happened this time, phase by phase</h2>
+      <div class="divider-brand mx-auto"></div>
+      <p class="lead-muted mx-auto" style="max-width:46rem;">
+        Mapped to the same phases above, using only what's verifiable from the <a href="agent-capability.html">real
+        trace files</a>. Where the 2025 team hit a wall, that's noted too &mdash; this isn't a claim that Biomentis
+        reached the bench.
+      </p>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-bordered table-compare bg-white align-middle">
+        <thead>
+          <tr><th style="width:22%">Phase</th><th style="width:39%">2025 (10-person team, 4 days)</th><th style="width:39%">2026 (single Biomentis session)</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Sequence &amp; structure processing</th>
+            <td>Manual FASTA retrieval and alignment (Muscle)</td>
+            <td>Handled autonomously inside the pipeline run, via <code>query_pdb</code> / <code>query_uniprot</code> tool calls &mdash; part of a single 85-step trace</td>
+          </tr>
+          <tr>
+            <th>Epitope identification &amp; target selection</th>
+            <td>Partial IEDB automation attempted; largely literature- and human-driven</td>
+            <td>Agent named specific conserved epitope patches (Domain A central 120&ndash;149, Domain B arch 2 195&ndash;219, Domain A lateral 60&ndash;99) with conservation percentages</td>
+          </tr>
+          <tr>
+            <th>CDR identification</th>
+            <td>Planned manually, then skipped entirely</td>
+            <td>Generated and reported for all 3 candidates, with a stated design rationale per CDR</td>
+          </tr>
+          <tr>
+            <th>De novo binder design</th>
+            <td>3D models proposed via RFdiffusion/RFantibody; used only to <em>guide</em> a manually-built scaffold</td>
+            <td>3 full-length VHH sequences produced directly, ready to order as gBlocks</td>
+          </tr>
+          <tr>
+            <th>Affinity &amp; cross-reactivity screening</th>
+            <td>Not reached</td>
+            <td>&Delta;G reported per candidate, per genotype (ECSA/Asian/West African), with a cross-reactivity standard deviation</td>
+          </tr>
+          <tr>
+            <th>Candidate selection</th>
+            <td>Not formalized into a scoring system</td>
+            <td>5-criterion weighted scoring matrix, fully computed for all 3 candidates</td>
+          </tr>
+          <tr>
+            <th>Experimental validation</th>
+            <td class="fw-semibold">Skipped &mdash; time/resource constraints</td>
+            <td class="fw-semibold">Not run &mdash; this remains a wet-lab step for both years</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad">
+  <div class="container">
+    <div class="row g-4 align-items-start">
+      <div class="col-lg-6">
+        <h2 class="h4 mb-3">The 2025 team's own conclusion</h2>
+        <blockquote class="border-start border-4 ps-4 py-2 text-muted" style="border-color:var(--brand) !important;">
+          "Our findings suggest that human intervention is still required at key decision and validation steps, so
+          we propose to always include human-in-the-loop approaches for AI-augmented research assistants using
+          agents&hellip; Future work should focus on improving tool interoperability, refining prompt templates for
+          scientific tasks, and collaborating with wet-lab researchers to validate outputs experimentally."
+          <footer class="blockquote-footer mt-1">2025 hackathon report, Conclusion</footer>
+        </blockquote>
+        <p class="text-muted">
+          That's still true of Biomentis: its nanobody candidates are in-silico proposals, not validated binders.
+          What changed is <em>where</em> the human-in-the-loop is needed &mdash; not stitching together eight tools by
+          hand and hoping the handoffs line up, but reviewing a finished, traceable proposal before it goes to the bench.
+        </p>
+      </div>
+      <div class="col-lg-6">
+        <div class="figure-card">
+          <img src="assets/img/fig2-rag-epitope-example.png" alt="Example RAG output listing eight predicted epitope sequences with antigenicity and allergenicity scores, extracted from a paper on Mayaro virus.">
+          <div class="figure-caption">
+            <strong>Figure 2 from the 2025 report.</strong> A RAG pipeline built on a local LLaMA 3.2 model correctly
+            extracted structured epitope data from a Mayaro virus paper &mdash; proof, even in 2025, that the
+            underlying idea worked when the tooling cooperated.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad bg-brand-tint">
+  <div class="container">
+    <div class="eyebrow mb-2">Credit</div>
+    <h2 class="h4 mb-4">The 2025 "AI as a Research Assistant" hackathon team</h2>
+    <div class="row g-4">
+      <div class="col-md-6">
+        <div class="fw-bold mb-2">Team</div>
+        <ul class="list-unstyled text-muted small">
+          <li class="mb-2"><strong>Dylan Bulseco</strong> &mdash; Team Lead <span class="text-muted">| Institute for Future Intelligence</span></li>
+          <li class="mb-2"><strong>Aarman Jamiluddin</strong> &mdash; Tech Lead / Coding <span class="text-muted">| Urbana High School, Institute for Future Intelligence</span></li>
+          <li class="mb-2"><strong>Andriy Kashyrskyy</strong> &mdash; Writer &amp; Design Lead <span class="text-muted">| Institute for Future Intelligence</span></li>
+          <li class="mb-2"><strong>Jane Davis</strong> &mdash; Data Hunter / Coding <span class="text-muted">| University of Hawai&#699;i</span></li>
+          <li class="mb-2"><strong>Koalani Okada</strong> &mdash; Data Hunter / Coding <span class="text-muted">| University of Hawai&#699;i</span></li>
+          <li class="mb-2"><strong>Maverick Kaopio</strong> &mdash; Subject Matter Expert <span class="text-muted">| Kapi&#699;olani Community College</span></li>
+        </ul>
+      </div>
+      <div class="col-md-6">
+        <div class="fw-bold mb-2">Project consultants</div>
+        <ul class="list-unstyled text-muted small">
+          <li class="mb-2"><strong>Dr. Alan Garcia</strong> <span class="text-muted">| Kapi&#699;olani Community College</span></li>
+          <li class="mb-2"><strong>Dr. Brien Haun</strong> <span class="text-muted">| Kapi&#699;olani Community College</span></li>
+          <li class="mb-2"><strong>David Clements</strong> <span class="text-muted">| Hawaii Biotech</span></li>
+          <li class="mb-2"><strong>Superbio.ai</strong> <span class="text-muted">(Eva Alderman)</span></li>
+        </ul>
+      </div>
+    </div>
+    <p class="text-muted small mt-3 mb-0">From <a href="assets/docs/AI-as-a-ResearchAssistant_final.pdf" target="_blank" rel="noopener">AI as a Research Assistant &mdash; Antibody Engineering Hackathon Project Documentation (2025)</a>.</p>
+  </div>
+</section>
+
+<footer class="site-footer py-5">
+  <div class="container">
+    <div class="row gy-4">
+      <div class="col-md-5">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <img src="assets/img/biomentis-icon.png" alt="" style="height:28px;width:28px;">
+          <strong class="text-white">biomentis</strong>
+        </div>
+        <p class="fine-print mb-0">Biomentis is a fork of <a href="https://github.com/snap-stanford/biomni" target="_blank" rel="noopener">Biomni</a> (Huang et al., 2025), maintained by Dylan Bulseco, adding an opt-in instructional layer for classroom and self-study use.</p>
+      </div>
+      <div class="col-md-3">
+        <div class="fw-bold text-white mb-2">Explore</div>
+        <ul class="list-unstyled small">
+          <li><a href="impact.html">Why it matters</a></li>
+          <li><a href="agent-capability.html">Agent capability</a></li>
+          <li><a href="learning.html">Learning tool</a></li>
+          <li><a href="resources.html">Resources &amp; downloads</a></li>
+        </ul>
+      </div>
+      <div class="col-md-4">
+        <div class="fw-bold text-white mb-2">Project</div>
+        <ul class="list-unstyled small">
+          <li><a href="https://github.com/dabulseco/biomentis" target="_blank" rel="noopener">GitHub: dabulseco/biomentis</a></li>
+          <li><a href="https://www.biorxiv.org/content/10.1101/2025.05.30.656746v1" target="_blank" rel="noopener">Biomni preprint</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="kicker-line" style="border-color: rgba(255,255,255,0.12);"></div>
+    <p class="fine-print mb-0">All agent outputs on this site are real, unedited exports from Biomentis A1 runs (July 2026). Generated sequences and pipeline results are in-silico research proposals, not experimentally validated therapeutics.</p>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

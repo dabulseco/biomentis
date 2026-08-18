@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Biomentis as a Learning Tool | Biomentis</title>
+<meta name="description" content="How Biomentis's opt-in tutor layer turns every agent step into a Bloom's-taxonomy and Webb's-DOK-tagged teaching moment, grounded in a student's own course materials.">
+<link href="assets/img/favicon-32.png" rel="icon" sizes="32x32" type="image/png">
+<link href="assets/img/favicon-180.png" rel="apple-touch-icon">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="assets/css/site.css" rel="stylesheet">
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-biomentis sticky-top py-2">
+  <div class="container">
+    <a class="navbar-brand" href="index.html">
+      <img src="assets/img/biomentis-icon.png" alt="Biomentis">
+      <span>biomentis<span class="tagline">From molecule to insight</span></span>
+    </a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav" aria-controls="mainNav" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="mainNav">
+      <ul class="navbar-nav ms-auto">
+        <li class="nav-item"><a class="nav-link" href="index.html">Home</a></li>
+        <li class="nav-item"><a class="nav-link" href="impact.html">Why It Matters</a></li>
+        <li class="nav-item"><a class="nav-link" href="agent-capability.html">Agent Capability</a></li>
+        <li class="nav-item"><a class="nav-link" href="comparison.html">2025 vs 2026</a></li>
+        <li class="nav-item"><a class="nav-link active" aria-current="page" href="learning.html">Learning Tool</a></li>
+        <li class="nav-item"><a class="nav-link" href="resources.html">Resources</a></li>
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<header class="hero section-pad pb-4">
+  <div class="container">
+    <div class="eyebrow mb-3">Learning tool</div>
+    <h1 class="display-6 mb-3">Biomentis isn't just an agent &mdash; it's a teaching assistant</h1>
+    <p class="lead lead-muted" style="max-width:52rem;">
+      The 85-step nanobody pipeline and 52-step LAMP primer run on the
+      <a href="agent-capability.html">agent capability page</a> are exactly the kind of dense, interdisciplinary
+      workflow that's hard for a student to follow &mdash; lots of tools, lots of domain vocabulary, lots of
+      "why did it just do that?" Biomentis has an <strong>opt-in instructional layer</strong> built specifically
+      to make runs like those legible, step by step, without changing what the agent actually does.
+    </p>
+    <span class="badge-live">Opt-in &mdash; disabled by default, zero behavior change for research use</span>
+  </div>
+</header>
+
+<section class="section-pad pt-4">
+  <div class="container">
+    <div class="text-center mb-5">
+      <div class="eyebrow">How it works</div>
+      <h2 class="section-title">Every agent step becomes a graded teaching moment</h2>
+      <div class="divider-brand mx-auto"></div>
+    </div>
+    <div class="row g-4">
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <div class="objective-num">1</div>
+          <h3 class="h6 fw-bold">Grounded in the student's own materials</h3>
+          <p class="text-muted small mb-0">Instructors or students upload course PDFs, slide decks, or URLs. Files are chunked,
+            embedded locally (<code>all-MiniLM-L6-v2</code>), and indexed in a per-session Chroma vector store &mdash; no
+            data leaves the machine to build the knowledge base.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <div class="objective-num">2</div>
+          <h3 class="h6 fw-bold">A teaching card for every step</h3>
+          <p class="text-muted small mb-0">After every reasoning, code, observation, solution, summary, or file event the agent
+            emits, the tutor generates a card: <strong>what</strong> the step is doing, <strong>why</strong> it exists in
+            the workflow, <strong>prerequisites</strong> the student should already know, and <strong>what to look for</strong>
+            in the output.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <div class="objective-num">3</div>
+          <h3 class="h6 fw-bold">Bloom's &amp; Webb's DOK tagging</h3>
+          <p class="text-muted small mb-0">Every card and every chat answer is tagged with a target Bloom's taxonomy level
+            (Remember&rarr;Create) and Webb's Depth-of-Knowledge level (1&ndash;4), calibrated by event type and shaped by
+            whatever rubric the instructor supplies.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <div class="objective-num">4</div>
+          <h3 class="h6 fw-bold">Strict citation whitelisting</h3>
+          <p class="text-muted small mb-0">Both the teaching cards and the tutor chat are told to cite only retrieved
+            knowledge-base snippets, never invent a source. A validator drops any citation that isn't in the
+            retrieved set before it's ever shown to the student.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <div class="objective-num">5</div>
+          <h3 class="h6 fw-bold">A chat column grounded in the same KB</h3>
+          <p class="text-muted small mb-0">Students can ask follow-up questions at any point. Every answer is classified
+            against the rubric and logged alongside its Bloom/DOK level and which rubric objectives it hit.</p>
+        </div>
+      </div>
+      <div class="col-md-6 col-lg-4">
+        <div class="objective-card">
+          <div class="objective-num">6</div>
+          <h3 class="h6 fw-bold">A gradable, exportable record</h3>
+          <p class="text-muted small mb-0">Every step and every Q&amp;A exchange is appended to a per-session JSONL log,
+            exportable as JSON or two CSVs (steps, Q&amp;A) &mdash; ready for grading or an LRS import.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad bg-brand-tint">
+  <div class="container">
+    <div class="text-center mb-5">
+      <div class="eyebrow">Applied to a real run</div>
+      <h2 class="section-title">What this would look like on the nanobody pipeline</h2>
+      <div class="divider-brand mx-auto"></div>
+    </div>
+    <div class="row justify-content-center">
+      <div class="col-lg-9">
+        <p class="text-muted">
+          The 85-step CHIKV nanobody trace on the <a href="agent-capability.html#nanobody">agent capability page</a> ran
+          with the tutor disabled &mdash; it's a research-mode session, and that's exactly the point: nothing about
+          the agent changes when the tutor is off. With it enabled, each of those 85 steps would pause and surface
+          a card. Step 4, for example &mdash; a code cell running <code>query_pdb</code> against the CHIKV E1&ndash;E2
+          trimer &mdash; would generate a card explaining <em>what</em> a PDB query does, <em>why</em> the pipeline needs
+          a structural template before it can dock anything, what prerequisite knowledge (protein structure file
+          formats, resolution/quality filtering) a student should already have, and what a "good" result looks like
+          &mdash; citing whichever course reading the instructor uploaded on structural biology databases.
+        </p>
+        <p class="text-muted mb-0">
+          The <code>esm</code> import error the agent hit mid-run (see the friction callout on the
+          <a href="agent-capability.html#nanobody">nanobody case study</a>) is itself a teachable moment under this
+          model &mdash; a card explaining what a missing dependency means and why the agent's recovery path was
+          reasonable, rather than something to edit out of the record.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad">
+  <div class="container">
+    <div class="text-center mb-5">
+      <div class="eyebrow">Example classroom workflow</div>
+      <h2 class="section-title">Pre-class, in-class, post-class, iterate</h2>
+      <div class="divider-brand mx-auto"></div>
+    </div>
+    <div class="row justify-content-center">
+      <div class="col-lg-9">
+        <div class="timeline">
+          <div class="timeline-step">
+            <div class="fw-bold">Pre-class</div>
+            <p class="text-muted mb-0">The instructor uploads a few course PDFs (or points the KB at the textbook's online
+              chapters) and uploads a custom YAML rubric mapping the day's learning objectives to Bloom/DOK levels.
+              Each student gets their own session, but the rubric can be reused.</p>
+          </div>
+          <div class="timeline-step">
+            <div class="fw-bold">In-class</div>
+            <p class="text-muted mb-0">Each student runs a small task &mdash; e.g. <em>"Find 3 candidate nanobodies against
+              CHIKV E2."</em> The agent runs to completion; the student reads each teaching card at their own pace,
+              clicks Continue, and asks follow-up questions in the chat column.</p>
+          </div>
+          <div class="timeline-step">
+            <div class="fw-bold">Post-class</div>
+            <p class="text-muted mb-0">The student exports their session log and submits it. The instructor reads each
+              step's <code>instruction.why</code> to see what the student was supposed to learn, scores the Q&amp;A
+              records against the rubric using their Bloom/DOK tags and <code>rubric_hit</code> ids, and aggregates
+              across students by session id to spot common sticking points.</p>
+          </div>
+          <div class="timeline-step">
+            <div class="fw-bold">Iterate</div>
+            <p class="text-muted mb-0">The instructor updates the rubric for next week based on what came up. The
+              instruction generator's Bloom/DOK calibration can also be tuned per event type if the cards run too
+              shallow or too deep for the class.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section-pad bg-brand-tint">
+  <div class="container">
+    <div class="row g-5">
+      <div class="col-lg-6">
+        <h2 class="h5 mb-3">A rubric is just YAML</h2>
+        <p class="text-muted small">The default rubric is discipline-agnostic; instructors can upload their own to
+          reshape what gets tracked, e.g. for a virology unit built around this exact CHIKV pipeline:</p>
+        <div class="code-block"><span class="kw">objectives</span>:
+  - <span class="kw">id</span>: CHIKV-1
+    <span class="kw">description</span>: <span class="str">"Explain why E1/E2 conservation matters for pan-genotypic binder design."</span>
+    <span class="kw">bloom_level</span>: Understand
+    <span class="kw">dok_level</span>: 2
+  - <span class="kw">id</span>: CHIKV-2
+    <span class="kw">description</span>: <span class="str">"Interpret a molecular-docking ΔG score and cross-reactivity σ."</span>
+    <span class="kw">bloom_level</span>: Analyze
+    <span class="kw">dok_level</span>: 3</div>
+      </div>
+      <div class="col-lg-6">
+        <h2 class="h5 mb-3">Every step is a structured, gradable record</h2>
+        <p class="text-muted small">One JSON record per teaching card, appended to a per-session JSONL log:</p>
+        <div class="code-block" style="font-size:0.78rem;">{
+  <span class="str">"kind"</span>: <span class="str">"step"</span>,
+  <span class="str">"event_type"</span>: <span class="str">"code"</span>,
+  <span class="str">"step_id"</span>: 4,
+  <span class="str">"title"</span>: <span class="str">"Query CHIKV E1-E2 structure"</span>,
+  <span class="str">"bloom_target"</span>: <span class="str">"Apply"</span>,
+  <span class="str">"dok_target"</span>: 2,
+  <span class="str">"instruction"</span>: {
+    <span class="str">"what"</span>: <span class="str">"Querying the PDB for a CHIKV trimer template."</span>,
+    <span class="str">"why"</span>: <span class="str">"Docking needs a structural target before anything else can run."</span>,
+    <span class="str">"prerequisites"</span>: [<span class="str">"PDB resolution & quality filtering"</span>],
+    <span class="str">"look_for"</span>: [<span class="str">"A pre-fusion trimer, resolution ≤ 4.0 Å"</span>]
+  },
+  <span class="str">"kb_citations"</span>: [{<span class="str">"source"</span>: <span class="str">"course_notes.pdf"</span>, <span class="str">"page"</span>: 12}],
+  <span class="str">"ts"</span>: <span class="str">"2026-07-19T06:57:15"</span>
+}</div>
+      </div>
+    </div>
+    <p class="text-muted small mt-3 mb-0">Schema and rubric example adapted from the project's own <code>docs/tutor.md</code>.</p>
+  </div>
+</section>
+
+<section class="section-pad bg-brand text-white">
+  <div class="container text-center">
+    <h2 class="section-title">See it applied to a real agent run first</h2>
+    <a href="agent-capability.html" class="btn btn-lg btn-light fw-semibold mt-3">Back to the case studies &rarr;</a>
+  </div>
+</section>
+
+<footer class="site-footer py-5">
+  <div class="container">
+    <div class="row gy-4">
+      <div class="col-md-5">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <img src="assets/img/biomentis-icon.png" alt="" style="height:28px;width:28px;">
+          <strong class="text-white">biomentis</strong>
+        </div>
+        <p class="fine-print mb-0">Biomentis is a fork of <a href="https://github.com/snap-stanford/biomni" target="_blank" rel="noopener">Biomni</a> (Huang et al., 2025), maintained by Dylan Bulseco, adding an opt-in instructional layer for classroom and self-study use.</p>
+      </div>
+      <div class="col-md-3">
+        <div class="fw-bold text-white mb-2">Explore</div>
+        <ul class="list-unstyled small">
+          <li><a href="impact.html">Why it matters</a></li>
+          <li><a href="agent-capability.html">Agent capability</a></li>
+          <li><a href="comparison.html">2025 vs 2026</a></li>
+          <li><a href="resources.html">Resources &amp; downloads</a></li>
+        </ul>
+      </div>
+      <div class="col-md-4">
+        <div class="fw-bold text-white mb-2">Project</div>
+        <ul class="list-unstyled small">
+          <li><a href="https://github.com/dabulseco/biomentis" target="_blank" rel="noopener">GitHub: dabulseco/biomentis</a></li>
+          <li><a href="https://www.biorxiv.org/content/10.1101/2025.05.30.656746v1" target="_blank" rel="noopener">Biomni preprint</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="kicker-line" style="border-color: rgba(255,255,255,0.12);"></div>
+    <p class="fine-print mb-0">All agent outputs on this site are real, unedited exports from Biomentis A1 runs (July 2026). Generated sequences and pipeline results are in-silico research proposals, not experimentally validated therapeutics.</p>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

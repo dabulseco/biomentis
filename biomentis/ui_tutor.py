@@ -10,27 +10,39 @@ wire the rich instruction-card and pause-gate renderers into
 
 `tutor_wrapped_stream` is the optional `stream_fn` passed to
 `launch_streamlit_demo`. When the tutor is disabled it is a no-op passthrough;
-when enabled it drives the agent to completion, buffers all events into a
-session-state queue, and yields them in batches — one batch per Continue
-click, ending with a "paused" gate and an instruction card.
+when enabled it advances the *live* `stream_agent_events` generator by
+exactly one instruction-bearing step per call, then pauses. The agent does
+not compute step N+1 until the student clicks Continue — per-step latency
+is the same as tutor-off mode; only the total is now paid incrementally
+instead of all up front.
 
 Run-state model (lives in `st.session_state["biomni_tutor_run"]`):
 
     {
         "prompt":  str,                # the user prompt for this run
         "thread_id": int,              # the LangGraph thread id
-        "events": [UIEvent, ...],      # all events from the agent
-        "cursor": int,                 # next event index to yield
+        "gen": Generator[UIEvent],     # the live stream_agent_events() generator
+        "events": [UIEvent, ...],      # events seen so far (for chat/export/critic)
         "step_id": int,                # current pedagogical step id
-        "phase": "buffering" | "ready" | "done",
+        "phase": "active" | "done",
+        "paused_at": float | None,     # monotonic() when the last pause started,
+                                       # for Continue-click dwell-time logging
+        "roadmap_shown": bool,         # whether the upfront roadmap card has run
+        "step_qa": {int: [dict, ...]}, # per-step inline Q&A, keyed by step_id
+                                       # (see "7a. Per-step inline Q&A" below) —
+                                       # separate from the page-level chat panel's
+                                       # own history
     }
 
-Phase transitions on each submit / continue:
+Because `events` only ever holds what's been seen so far, chat questions
+asked mid-run naturally can't see steps that haven't happened yet — the
+tutor can't spoil the ending.
 
-    no run            → buffering: drive stream_agent_events → ready
-    ready, cursor=0   → yield batch [0, first_instruction_idx] + card + pause
-    ready, continue   → yield batch [cursor, next_instruction_idx] + card + pause
-    ready, no more    → done: yield complete, clear state
+Transitions on each submit / continue:
+
+    no run                    → create run, generate roadmap card, advance one step
+    run active, continue      → advance one more step
+    generator exhausted       → done: yield complete, snapshot for post-run chat
 """
 
 from __future__ import annotations
@@ -55,8 +67,9 @@ _PENDING_KEY = "biomni_tutor_pending_continue"
 
 
 def install_renderers() -> None:
-    """Install the rich instruction-card and pause-gate renderers into
-    `biomentis.agent.a1` so `launch_streamlit_demo` can call them.
+    """Install the rich instruction-card, roadmap-card, and pause-gate
+    renderers into `biomentis.agent.a1` so `launch_streamlit_demo` can
+    call them.
 
     Called once at the top of `streamlit_app.py`. No-op if Streamlit isn't
     installed, since the renderers depend on it.
@@ -132,37 +145,94 @@ def install_renderers() -> None:
             if tags:
                 st.caption(" · ".join(tags))
 
-    def _render_pause_gate(container: Any, step_id: Any) -> None:
-        """Render a Continue button. On click, sets the resume flag and
-        triggers a rerun.
+    def _render_pause_gate(container: Any, step_id: Any, run_id: str = "") -> None:
+        """Render a Continue button (only for the step currently being
+        paused on) plus an always-available inline "Ask about this step"
+        box, tied to `(run_id, step_id)`.
 
-        The button key is namespaced by a per-render counter so that the
-        same `paused` event (with the same `step_id`) can be re-rendered
-        across reruns without a duplicate-key error. The resume flag
-        itself is keyed on `step_id`, so the counter only affects the
-        widget identity, not the resume logic.
+        Every "paused" entry ever yielded stays in the transcript and gets
+        re-rendered on every rerun (Streamlit re-runs top to bottom), so
+        without this check every past step would show its own live
+        Continue button — any of which would silently advance whatever
+        the *current* step actually is, not the one the button visually
+        sits under. Only the step matching the run's current `(run_id,
+        step_id)` (with the run not yet done) gets an active button;
+        earlier ones show a static "done" marker instead. The Q&A box has
+        no such constraint — asking about an earlier step never touches
+        run progression, so it stays open on every step, current or not.
+
+        Widget keys use `(run_id, step_id)` — stable across reruns, since
+        neither changes once this event is created. `step_id` ALONE is
+        not enough: it resets to 1 on every new run, and old transcript
+        entries from a previous run are never cleared, so two different
+        runs' step 1 would otherwise collide. (A previous per-render
+        counter suffix was tried here to dodge collisions, but that broke
+        Streamlit's ability to recognize clicks across the rerun the
+        click itself triggers — a widget's key must stay IDENTICAL across
+        reruns for its submitted/clicked state to be read back correctly;
+        it's the same-run-vs-different-run collision that needs
+        resolving, not reruns of the same event.)
         """
         import streamlit as st
 
-        counter = st.session_state.setdefault("biomni_tutor_pause_counter", 0)
-        st.session_state["biomni_tutor_pause_counter"] = counter + 1
+        run = st.session_state.get(_RUN_KEY)
+        is_current_pause = (
+            run is not None
+            and run.get("phase") != "done"
+            and run.get("run_id") == run_id
+            and run.get("step_id") == step_id
+        )
+        _key_suffix = f"{run_id}_{step_id}"
 
         with container.container():
             cols = st.columns([1, 1, 6])
             with cols[0]:
-                if st.button(
-                    "▶ Continue",
-                    key=f"biomni_tutor_continue_{step_id}_{counter}",
-                    use_container_width=True,
-                ):
-                    st.session_state[_CONTINUE_KEY] = step_id
-                    st.session_state[_PENDING_KEY] = True
-                    st.rerun()
+                if is_current_pause:
+                    if st.button(
+                        "▶ Continue",
+                        key=f"biomni_tutor_continue_{_key_suffix}",
+                        use_container_width=True,
+                    ):
+                        st.session_state[_CONTINUE_KEY] = step_id
+                        st.session_state[_PENDING_KEY] = True
+                        st.rerun()
+                else:
+                    st.caption("✓ done")
             with cols[1]:
-                st.caption("Read the teaching card above, then continue.")
+                if is_current_pause:
+                    st.caption("Read the teaching card above, then continue.")
+
+            tutor = st.session_state.get("biomni_tutor")
+            if tutor is not None and run is not None:
+                _render_step_qa(container, step_id, run, tutor, run_id)
+
+    def _render_roadmap_card(container: Any, card: Any) -> None:
+        """Render the once-per-run `RoadmapCard`: an overview sentence or
+        two, then the ordered step list with a one-line "why" each."""
+        import streamlit as st
+
+        if getattr(card, "_generation_failed", False):
+            with container.container():
+                st.warning("🗺️ Roadmap unavailable for this task (LLM call failed).")
+            return
+
+        with container.container():
+            st.markdown("**🗺️ Roadmap for this task**")
+            if card.overview:
+                st.markdown(card.overview)
+            for i, step in enumerate(card.steps or [], 1):
+                title = step.get("title", "") if isinstance(step, dict) else str(step)
+                why = step.get("why", "") if isinstance(step, dict) else ""
+                line = f"{i}. **{title}**"
+                if why:
+                    line += f" — {why}"
+                st.markdown(line)
+            if not card.steps:
+                st.caption("(no steps identified)")
 
     a1_mod._RENDER_INSTRUCTION_CARD = _render_instruction_card
     a1_mod._RENDER_PAUSE_GATE = _render_pause_gate
+    a1_mod._RENDER_ROADMAP_CARD = _render_roadmap_card
 
 
 # ----- 2. tutor_wrapped_stream --------------------------------------------
@@ -170,21 +240,20 @@ def install_renderers() -> None:
 
 def tutor_wrapped_stream(agent, text_input, files, history_messages, thread_id):
     """Wrap `stream_agent_events` to insert per-step instruction cards and
-    pause gates.
+    pause gates, advancing the agent's *live* stream one step at a time.
 
     Behavioral model (see module docstring for state shape):
 
     - Tutor disabled → pass-through.
-    - Tutor enabled, no buffered run → drive `stream_agent_events` to
-      completion, storing all events in `st.session_state[_RUN_KEY]`,
-      then yield the first batch.
-    - Tutor enabled, run in progress, Continue click → yield the next batch.
+    - Tutor enabled, no run yet → create one (wrapping the live generator,
+      no work done yet), then advance it one step.
+    - Tutor enabled, run in progress, Continue click → advance one more step.
 
-    Yields the same `UIEvent` objects the inner stream produces, plus
-    an `instruction` event and a `paused` event after each
-    instruction-bearing event in the batch. The dispatch in
-    `launch_streamlit_demo` converts these into transcript entries and
-    calls the renderers we installed.
+    Yields the same `UIEvent` objects the inner stream produces, plus a
+    one-time `roadmap` event before the first step, and an `instruction`
+    event + a `paused` event after each instruction-bearing event. The
+    dispatch in `launch_streamlit_demo` converts these into transcript
+    entries and calls the renderers we installed.
     """
     # Lazy imports — keep `biomentis.ui_tutor` importable on systems without
     # Streamlit.
@@ -208,37 +277,33 @@ def tutor_wrapped_stream(agent, text_input, files, history_messages, thread_id):
         st.session_state[_RUN_KEY] = None
         run = None
 
-    # Phase 1: drive the agent to completion if no buffered run exists.
-    # We measure how long this takes (typically seconds-to-minutes) and
-    # report it on the final "Done" entry. Buffered events for later
-    # Continue clicks are already in memory by then, so subsequent
-    # batches yield in microseconds — those don't get their own timer
-    # because it would always read 0.001s and add no information.
-    if run is None or run.get("phase") == "buffering":
-        _t_run_start = time.monotonic()
-        run = _start_new_run(agent, text_input, files, history_messages, thread_id, tutor)
+    if run is None:
+        run = _create_run(agent, text_input, files, history_messages, thread_id)
         st.session_state[_RUN_KEY] = run
-        st.session_state.biomni_tutor_run_started_at = _t_run_start
+        st.session_state.biomni_tutor_run_started_at = time.monotonic()
 
-    # Phase 2: yield a batch of events up to the next instruction-bearing event.
-    yield from _yield_next_batch(run, tutor)
+    # Advance the live generator by exactly one instruction-bearing step.
+    # The agent does no work for the *next* step until this is called
+    # again on the next Continue click.
+    yield from _advance_run_live(run, tutor)
 
-    # Phase 3: if we've exhausted all events, yield a `complete`.
-    # NOTE: we deliberately do NOT clear `st.session_state[_RUN_KEY]` here.
-    # The chat panel needs the buffered events to answer follow-up
-    # questions about the just-completed task (e.g. "summarize the
-    # databases used"). The "different prompt" check at the top of
-    # `tutor_wrapped_stream` (line 206) still clears the buffer when
-    # the user starts a new run with a different prompt.
+    # NOTE: we deliberately do NOT clear `st.session_state[_RUN_KEY]` when
+    # the run finishes. The chat panel needs the buffered events to answer
+    # follow-up questions about the just-completed task (e.g. "summarize
+    # the databases used"). The "different prompt" check above still
+    # clears the buffer when the user starts a new run with a different
+    # prompt.
     if run["phase"] == "done":
         from biomentis.ui_core import UIEvent, format_duration
         _t_started = st.session_state.get("biomni_tutor_run_started_at")
-        _duration = time.monotonic() - _t_started if _t_started is not None else 0.0
+        _wall = time.monotonic() - _t_started if _t_started is not None else 0.0
+        _compute = run.get("compute_seconds", 0.0)
         yield UIEvent(
             type="complete",
             content=(
                 "Tutor run complete — every step has been walked through.  ·  "
-                f"total time: {format_duration(_duration)}"
+                f"agent compute time: {format_duration(_compute)}  ·  "
+                f"session time (incl. reading/thinking): {format_duration(_wall)}"
             ),
             channel="inner",
             title="✅ Done",
@@ -248,99 +313,107 @@ def tutor_wrapped_stream(agent, text_input, files, history_messages, thread_id):
 # ----- 3. run management --------------------------------------------------
 
 
-def _start_new_run(agent, text_input, files, history_messages, thread_id, tutor) -> dict:
-    """Drive `stream_agent_events` to completion, collecting all events.
-
-    Returns a run-state dict in phase "ready". A spinner keeps the user
-    informed while the agent works (this can take seconds to minutes
-    for complex tasks).
-    """
+def _create_run(agent, text_input, files, history_messages, thread_id) -> dict:
+    """Create a fresh run-state dict wrapping a *live* `stream_agent_events`
+    generator. Nothing is pulled from it yet — the agent does no work
+    until `_advance_run_live` is called."""
     from biomentis.ui_core import stream_agent_events
-    import streamlit as st
+    import uuid
 
-    run: dict = {
+    return {
         "prompt": text_input,
         "thread_id": thread_id,
+        "gen": stream_agent_events(agent, text_input, files, history_messages, thread_id),
         "events": [],
-        "cursor": 0,
+        # Unique per run (NOT per step) — step_id resets to 1 on every new
+        # run, but old transcript entries are never cleared, so a stable
+        # widget key needs both. See "5. event builders" below.
+        "run_id": uuid.uuid4().hex[:8],
         "step_id": 0,
-        "phase": "buffering",
+        "phase": "active",
+        "paused_at": None,
+        "roadmap_shown": False,
+        "compute_seconds": 0.0,
+        "step_qa": {},
     }
-    st.session_state[_RUN_KEY] = run
-
-    # We don't drive the agent from inside a `st.spinner` block here —
-    # the spinner would block reruns from re-entering the wrapper, which
-    # we don't want. Instead, we just collect events; the script's own
-    # spinner (if any) can wrap the submit handler.
-    #
-    # Important: we iterate the inner generator *fully* before returning
-    # so that on the next script execution, the events list is complete
-    # and the wrapper can yield them in batches.
-    for event in stream_agent_events(agent, text_input, files, history_messages, thread_id):
-        run["events"].append(event)
-        # Log KB-relevant events so the analytics have them even before
-        # we attach a card. The card is generated when the user advances
-        # to the event in the wrapper.
-        if event.type in _INSTRUCTION_BEARING:
-            try:
-                _log_event_seen(run, event, tutor)
-            except Exception as e:
-                print(f"tutor: log_event_seen failed: {e!r}")
-
-    run["phase"] = "ready"
-    return run
 
 
-def _yield_next_batch(run: dict, tutor):
-    """Yield events from `run["cursor"]` up to and including the next
-    instruction-bearing event. Attach a card + pause gate to that event.
-    Advance the cursor. If no more instruction-bearing events, yield the
-    rest and mark the run done.
+def _advance_run_live(run: dict, tutor):
+    """Pull from the run's live generator until (and including) the next
+    instruction-bearing event, attach a card + pause gate, then stop.
+
+    Because this pulls directly from the live `stream_agent_events`
+    generator (not a pre-computed buffer), the agent genuinely does not
+    execute step N+1 until this function runs again — per-step latency
+    matches tutor-off mode.
     """
-    from biomentis.ui_core import UIEvent
+    # If we're resuming from a pause (not the run's very first call), log
+    # how long the student spent on the step they just clicked Continue
+    # off of, before doing anything else.
+    if run.get("paused_at") is not None:
+        try:
+            _log_advance(run, tutor)
+        except Exception as e:
+            print(f"tutor: log_advance failed: {e!r}")
+        run["paused_at"] = None
 
-    events = run["events"]
-    cursor = run["cursor"]
-    if cursor >= len(events):
-        run["phase"] = "done"
-        return
+    _t_step_start = time.monotonic()
+    gen = run["gen"]
+    for event in gen:
+        run["events"].append(event)
 
-    # Find the next instruction-bearing event at or after `cursor`.
-    end = len(events)
-    for i in range(cursor, len(events)):
-        if events[i].type in _INSTRUCTION_BEARING:
-            end = i + 1
-            break
-    else:
-        # No more instruction-bearing events; yield the rest and finish.
-        end = len(events)
-
-    # Yield every event in [cursor, end).
-    for i in range(cursor, end):
-        event = events[i]
-        yield event
-
-        # If this was the instruction-bearing event of the batch, also
-        # yield the card + pause gate.
+        # Tag the raw event with the step it belongs to *before* yielding
+        # it, so the UI can group it with its own instruction card and
+        # pause/Q&A gate into one visual box (see a1.py's render loop).
+        # This must happen before the yield, not after, since the raw
+        # event has already left this generator by the time we'd
+        # otherwise know its step_id.
         if event.type in _INSTRUCTION_BEARING:
             run["step_id"] += 1
-            card = _generate_or_get_card(event, run, tutor)
-            yield _make_instruction_event(event, card, run["step_id"])
-            yield _make_paused_event(run["step_id"])
-            run["cursor"] = i + 1
-            return
+            try:
+                event.step_id = run["step_id"]
+                event.run_id = run["run_id"]
+            except Exception:
+                pass
 
-    # If we walked past the end without finding an instruction-bearing event,
-    # we're done. Snapshot the run onto the engine so the chat panel can
-    # still answer follow-up questions about this task even if the
-    # session_state buffer is later cleared (e.g. on app reload).
-    run["cursor"] = end
-    if end >= len(events):
-        run["phase"] = "done"
+        yield event
+
+        if event.type not in _INSTRUCTION_BEARING:
+            continue
+
         try:
-            _record_run_snapshot(run, tutor)
+            _log_event_seen(run, event, tutor)
         except Exception as e:
-            print(f"tutor: record_run_snapshot failed: {e!r}")
+            print(f"tutor: log_event_seen failed: {e!r}")
+
+        # One-time roadmap card, generated from this — the first
+        # instruction-bearing event of the run — before its own per-step
+        # card. Never runs again for the rest of this run.
+        if not run["roadmap_shown"]:
+            run["roadmap_shown"] = True
+            try:
+                roadmap = _generate_roadmap_for_run(event, run, tutor)
+                yield _make_roadmap_event(roadmap)
+            except Exception as e:
+                print(f"tutor: roadmap generation failed: {e!r}")
+
+        card = _generate_or_get_card(event, run, tutor)
+        yield _make_instruction_event(event, card, run["step_id"], run["run_id"])
+        run["compute_seconds"] = run.get("compute_seconds", 0.0) + (time.monotonic() - _t_step_start)
+        run["paused_at"] = time.monotonic()
+        yield _make_paused_event(run["step_id"], run["run_id"])
+        return
+
+    # Generator exhausted with no further instruction-bearing event this
+    # call — the run is done. Snapshot it onto the engine so the chat
+    # panel can still answer follow-up questions even if the
+    # session_state buffer is later cleared (e.g. on app reload).
+    run["compute_seconds"] = run.get("compute_seconds", 0.0) + (time.monotonic() - _t_step_start)
+    run["phase"] = "done"
+    try:
+        _record_run_snapshot(run, tutor)
+    except Exception as e:
+        print(f"tutor: record_run_snapshot failed: {e!r}")
 
 
 def _record_run_snapshot(run: dict, tutor) -> None:
@@ -428,6 +501,28 @@ def _generate_or_get_card(event, run, tutor) -> Any:
     return card
 
 
+def _generate_roadmap_for_run(event, run: dict, tutor) -> Any:
+    """Generate the once-per-run roadmap card from the first
+    instruction-bearing event's content (typically the agent's own
+    numbered plan) and log it."""
+    from biomentis.agent.tutor.instruction import generate_roadmap
+
+    plan_text = _event_text_for_hash(event)
+    roadmap = generate_roadmap(tutor.llm, run.get("prompt", ""), plan_text)
+    try:
+        tutor.logger.log(
+            {
+                "kind": "roadmap",
+                "overview": roadmap.overview,
+                "steps": roadmap.steps,
+                "generation_failed": getattr(roadmap, "_generation_failed", False),
+            }
+        )
+    except Exception as e:
+        print(f"tutor: failed to log roadmap: {e!r}")
+    return roadmap
+
+
 def _event_text_for_hash(event) -> str:
     parts = []
     if getattr(event, "title", None):
@@ -441,12 +536,16 @@ def _event_text_for_hash(event) -> str:
 
 def _log_event_seen(run: dict, event, tutor) -> None:
     """Light log entry written as soon as we see an event. The full card
-    is added later via `_log_step_with_card` when it's generated."""
+    is added later via `_log_step_with_card` when it's generated.
+
+    `run["step_id"]` is already incremented by the time this runs (see
+    `_advance_run_live` — the raw event is tagged with its step_id before
+    being yielded), so this is the current step, not a lookahead."""
     tutor.logger.log(
         {
             "kind": "event_seen",
             "event_type": event.type,
-            "step_id": _step_id_for(event, run),
+            "step_id": run["step_id"],
             "title": getattr(event, "title", None),
         }
     )
@@ -474,10 +573,19 @@ def _log_step_with_card(run: dict, event, card, tutor) -> None:
     )
 
 
-def _step_id_for(event, run) -> int:
-    """Best-effort step id for an event we've just seen but haven't
-    yielded yet. Returns the next step id without mutating `run`."""
-    return run["step_id"] + 1
+def _log_advance(run: dict, tutor) -> None:
+    """Log that the student clicked Continue off `run["step_id"]`, and how
+    long they dwelled on it (time between the step's pause gate appearing
+    and this call). `run["paused_at"]` is set in `_advance_run_live` right
+    before yielding the pause event for that step."""
+    dwell = time.monotonic() - run["paused_at"]
+    tutor.logger.log(
+        {
+            "kind": "advance",
+            "step_id": run.get("step_id"),
+            "dwell_seconds": round(dwell, 1),
+        }
+    )
 
 
 def _hash(text: str) -> str:
@@ -489,7 +597,7 @@ def _hash(text: str) -> str:
 # ----- 5. event builders --------------------------------------------------
 
 
-def _make_instruction_event(prior_event: Any, card: Any, step_id: int = 0) -> Any:
+def _make_instruction_event(prior_event: Any, card: Any, step_id: int = 0, run_id: str = "") -> Any:
     from biomentis.ui_core import UIEvent
 
     bits = []
@@ -514,16 +622,47 @@ def _make_instruction_event(prior_event: Any, card: Any, step_id: int = 0) -> An
     )
     ev.card = card
     ev.step_id = step_id
-    # Also store step_id on the card so the renderer can include it in
-    # expander labels and keep the same card re-renderable across reruns.
+    ev.run_id = run_id
+    # Also store step_id/run_id on the card so the renderer can build
+    # stable keys/labels and keep the same card re-renderable across
+    # reruns without colliding with a same-numbered step from an earlier,
+    # unrelated run (step_id resets to 1 each run; transcript entries
+    # from past runs are never cleared).
     try:
         card.step_id = step_id
+        card.run_id = run_id
     except Exception:
         pass
     return ev
 
 
-def _make_paused_event(step_id: int) -> Any:
+def _make_roadmap_event(card: Any) -> Any:
+    """One-time, run-level event previewing the agent's overall plan.
+    Rendered before the first per-step instruction card."""
+    from biomentis.ui_core import UIEvent
+
+    bits = []
+    if card.overview:
+        bits.append(card.overview)
+    for i, step in enumerate(card.steps, 1):
+        title = step.get("title", "")
+        why = step.get("why", "")
+        line = f"{i}. **{title}**"
+        if why:
+            line += f" — {why}"
+        bits.append(line)
+    content = "\n\n".join(bits) if bits else "(roadmap unavailable for this task)"
+    ev = UIEvent(
+        type="roadmap",
+        content=content,
+        channel="inner",
+        title="🗺️ Roadmap for this task",
+    )
+    ev.card = card
+    return ev
+
+
+def _make_paused_event(step_id: int, run_id: str = "") -> Any:
     from biomentis.ui_core import UIEvent
 
     ev = UIEvent(
@@ -533,6 +672,7 @@ def _make_paused_event(step_id: int) -> Any:
         title="⏸ Paused",
     )
     ev.step_id = step_id
+    ev.run_id = run_id
     return ev
 
 
@@ -561,6 +701,23 @@ def _build_model_choices() -> list[tuple[str, str]]:
         for m in models:
             choices.append((source, m))
     return choices
+
+
+def _is_cloud_ollama_llm(llm) -> bool:
+    """Best-effort detection of an Ollama-Cloud-signed-in model (vs. a
+    fully local one) from an already-constructed LLM object.
+
+    Ollama's cloud-hosted models carry a "-cloud" suffix by convention
+    (e.g. "qwen3-coder:480b-cloud"); models pulled locally via
+    `ollama pull` don't. Cloud models route through the local daemon's
+    own connection to Ollama's cloud backend, which is the thing that
+    can go stale during a long instructional-mode pause between steps
+    (see `_invoke_llm_with_retry` in agent/a1.py for the retry mitigation
+    on that path). A fully local model has no such connection to go
+    stale in the first place.
+    """
+    model_name = getattr(llm, "model", None)
+    return isinstance(model_name, str) and model_name.endswith("-cloud")
 
 
 def render_tutor_sidebar(tutor) -> None:
@@ -600,6 +757,31 @@ def render_tutor_sidebar(tutor) -> None:
             ),
             key="biomni_tutor_enabled",
         )
+
+        if tutor.enabled and _is_cloud_ollama_llm(tutor.llm):
+            _model_name = getattr(tutor.llm, "model", "?")
+            _msg = (
+                f"⚠️ **{_model_name}** is an Ollama Cloud model. Instructional "
+                "mode pauses between steps while you read and ask questions — "
+                "that idle time can occasionally make the cloud connection "
+                "time out. A fully local model (no `-cloud` suffix) has no "
+                "cloud connection to time out in the first place."
+            )
+            try:
+                from biomentis.ollama_utils import list_ollama_models
+
+                local_models = [
+                    m for m in list_ollama_models() if not m.endswith("-cloud")
+                ]
+            except Exception:
+                local_models = []
+            if local_models:
+                _msg += "\n\nLocal models available in the picker above: " + ", ".join(
+                    f"`{m}`" for m in local_models
+                )
+            else:
+                _msg += "\n\nNo local models found — pull one with `ollama pull <name>`."
+            st.warning(_msg)
 
         with st.expander("Knowledge base", expanded=True):
             _render_kb_panel(tutor)
@@ -1127,7 +1309,53 @@ def render_tutor_chat_panel(tutor) -> None:
     )
 
     with st.container():
-        st.markdown("### 💬 Ask about this task")
+        # Heading row: chat-panel title on the left, Export to HTML on
+        # the right. The download_button writes the file in-memory and
+        # surfaces a save dialog — no on-disk path to track, which is
+        # cleaner than the panel-write + success-toast pattern the main
+        # transcript exporters use.
+        _head_l, _head_r = st.columns([6, 1])
+        with _head_l:
+            st.markdown("### 💬 Ask about this task")
+        with _head_r:
+            _history = st.session_state.biomni_tutor_chat_history
+            if _history:
+                from biomentis.ui_core import (
+                    ExportEntry,
+                    get_llm_display_name,
+                    render_transcript_html,
+                )
+                _entries = [
+                    ExportEntry(
+                        role=turn.get("role", "assistant"),
+                        kind="qa" if turn.get("role") == "assistant" else "text",
+                        title="💬 Tutor Q&A" if turn.get("role") == "assistant" else None,
+                        content=turn.get("content", ""),
+                        citations=turn.get("citations") or None,
+                        bloom_level=turn.get("bloom_level"),
+                        dok_level=turn.get("dok_level"),
+                        rubric_hit=turn.get("rubric_hit") or None,
+                        confidence=turn.get("confidence"),
+                        also_consider=turn.get("also_consider") or None,
+                    )
+                    for turn in _history
+                ]
+                _model_name = "KB + LLM hybrid"
+                try:
+                    _model_name = get_llm_display_name(getattr(tutor, "llm", None))
+                except Exception:
+                    pass
+                _html = render_transcript_html(
+                    _entries, "Biomentis AI Agent — Ask About this Task", _model_name
+                )
+                st.download_button(
+                    "📥 Export to HTML",
+                    data=_html,
+                    file_name="biomni_chat_export.html",
+                    mime="text/html",
+                    key="biomni_tutor_chat_export",
+                    use_container_width=True,
+                )
         st.caption(
             "Ask a question about the running task. Upload a KB in the "
             "sidebar to ground answers in your course materials — "
@@ -1160,6 +1388,18 @@ def render_tutor_chat_panel(tutor) -> None:
                             "_No KB sources cited — this answer used the "
                             "selected LLM's general knowledge._"
                         )
+                if turn.get("also_consider"):
+                    with st.expander(
+                        f"Also worth knowing ({len(turn['also_consider'])})",
+                        expanded=False,
+                    ):
+                        for item in turn["also_consider"]:
+                            point = item.get("point", "") if isinstance(item, dict) else str(item)
+                            why = item.get("why") if isinstance(item, dict) else None
+                            line = f"- **{point}**"
+                            if why:
+                                line += f" — {why}"
+                            st.markdown(line)
                 # Bloom / DOK / rubric_hit badges (only for assistant turns
                 # that have non-empty labels, i.e. the classifier ran).
                 badges = []
@@ -1199,7 +1439,8 @@ def render_tutor_chat_panel(tutor) -> None:
         user_q = chat_text.strip() if ask_clicked else ""
         st.session_state.biomni_tutor_chat_draft = "" if ask_clicked else chat_text
         if user_q:
-            _handle_chat_turn(tutor, user_q)
+            with st.spinner("🎓 Thinking..."):
+                _handle_chat_turn(tutor, user_q)
 
 
 def _handle_chat_turn(tutor, question: str) -> None:
@@ -1292,6 +1533,7 @@ def _handle_chat_turn(tutor, question: str) -> None:
             transcript=transcript,
             last_answer=last_answer,
             mode="chat",  # KB + LLM hybrid; chat panel is decoupled from tutor
+            step_id=run.get("step_id") if run else None,
         )
     except Exception as e:
         # Defensive: TutorChat.ask is supposed to handle its own errors,
@@ -1325,9 +1567,104 @@ def _handle_chat_turn(tutor, question: str) -> None:
             "rubric_hit": list(turn.rubric_hit),
             "confidence": turn.confidence,
             "failed": turn.failed,
+            "also_consider": list(turn.also_consider),
         }
     )
     st.rerun()
+
+
+# ----- 7a. Per-step inline Q&A ---------------------------------------------
+#
+# Distinct from the page-level "Ask about this task" panel above: this is
+# a small "Ask about this step" box attached directly to each step's own
+# card in the transcript (rendered from `_render_pause_gate`), so a
+# clarifying question about step 1 stays visually and pedagogically tied
+# to step 1 — not routed through the whole-task chat, and nowhere near
+# the main "Ask something..." task box that starts a brand-new run.
+# Both surfaces share the same `TutorChat`/`Rubric`, so history and
+# rubric coverage stay unified; only the log's `step_id` and the on-screen
+# placement differ.
+
+
+def _render_step_qa(container: Any, step_id: int, run: dict, tutor, run_id: str = "") -> None:
+    """Render this step's Q&A history (if any) plus a small form to ask
+    a new question about it. Available on every step, current or already
+    continued past — asking never advances the run.
+
+    Keys use `(run_id, step_id)`, stable across reruns (see
+    `_render_pause_gate`'s docstring for why `step_id` alone isn't enough
+    and why a per-render counter broke click detection)."""
+    import streamlit as st
+
+    step_qa: dict = run.setdefault("step_qa", {})
+    qa_list = step_qa.get(step_id, [])
+    _key_suffix = f"{run_id}_{step_id}"
+
+    with container.container():
+        if qa_list:
+            with st.expander(
+                f"💬 Questions about this step ({len(qa_list)})", expanded=True
+            ):
+                for turn in qa_list:
+                    st.markdown(f"**Q:** {turn['question']}")
+                    st.markdown(f"**A:** {turn['answer']}")
+                    if turn.get("also_consider"):
+                        with st.expander("Also worth knowing", expanded=False):
+                            for item in turn["also_consider"]:
+                                point = item.get("point", "")
+                                why = item.get("why")
+                                line = f"- **{point}**"
+                                if why:
+                                    line += f" — {why}"
+                                st.markdown(line)
+                    st.markdown("---")
+
+        with st.form(
+            key=f"biomni_tutor_step_ask_form_{_key_suffix}",
+            clear_on_submit=True,
+        ):
+            question = st.text_input(
+                "Ask about this step",
+                key=f"biomni_tutor_step_ask_input_{_key_suffix}",
+                label_visibility="collapsed",
+                placeholder="Ask a question about this specific step...",
+            )
+            asked = st.form_submit_button("💬 Ask about this step")
+
+    if asked and question.strip():
+        with container.container():
+            with st.spinner("🎓 Thinking..."):
+                _handle_step_qa(tutor, run, step_id, question.strip())
+        st.rerun()
+
+
+def _handle_step_qa(tutor, run: dict, step_id: int, question: str) -> None:
+    """Ask the tutor about one specific step. Goes through the same
+    `TutorChat.ask` path as the page-level chat panel (so history,
+    rubric classification, and `SessionLogger` logging — with `step_id`
+    attached — all stay consistent), but the result is stored on
+    `run["step_qa"][step_id]` instead of the page-level chat history, so
+    it re-renders attached to that step's card."""
+    turn = tutor.chat.ask(
+        question=question,
+        context=f"step_id={step_id}",
+        task=run.get("prompt", ""),
+        mode="chat",
+        step_id=step_id,
+    )
+    run.setdefault("step_qa", {}).setdefault(step_id, []).append(
+        {
+            "question": question,
+            "answer": turn.content,
+            "citations": list(turn.citations),
+            "also_consider": list(turn.also_consider),
+            "bloom_level": turn.bloom_level,
+            "dok_level": turn.dok_level,
+            "rubric_hit": list(turn.rubric_hit),
+            "confidence": turn.confidence,
+            "failed": turn.failed,
+        }
+    )
 
 
 # ----- 8. submit-handler integration --------------------------------------
@@ -1366,3 +1703,16 @@ def get_current_run_prompt() -> str | None:
     if run.get("phase") == "done":
         return None
     return run.get("prompt")
+
+
+def abandon_current_run() -> None:
+    """Explicitly discard the in-progress tutor run.
+
+    Called from `launch_streamlit_demo`'s submit guard when the student
+    confirms they want to abandon a walkthrough that isn't done yet and
+    start a different task instead — the deliberate version of what used
+    to happen silently any time a different prompt was typed into the
+    main task box."""
+    import streamlit as st
+
+    st.session_state[_RUN_KEY] = None

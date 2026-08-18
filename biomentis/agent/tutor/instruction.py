@@ -27,6 +27,12 @@ Failure modes are handled at every step:
 
 The dataclass and the engine both import this module. The engine calls
 `InstructionGenerator.generate(event)`; the dataclass is returned.
+
+`generate_roadmap` is a separate, one-time call made once per run (not
+per step): it turns the agent's own first-message plan into a short
+`RoadmapCard` (overview + ordered steps) shown before the first
+per-step card, so the student sees where the walkthrough is headed
+before diving into step-by-step detail.
 """
 
 from __future__ import annotations
@@ -214,6 +220,97 @@ def _coerce_citations(
     return out
 
 
+@dataclass
+class RoadmapCard:
+    """A one-time, run-level preview of the agent's overall plan, shown
+    before the first per-step InstructionCard. Distinct from InstructionCard:
+    this previews *all* steps at a glance; InstructionCard explains one."""
+
+    overview: str = ""
+    steps: list[dict] = field(default_factory=list)  # [{"title": str, "why": str}]
+    _generation_failed: bool = field(default=False, repr=False)
+
+
+def _build_soft_failure_roadmap() -> RoadmapCard:
+    return RoadmapCard(_generation_failed=True)
+
+
+_ROADMAP_SYSTEM_PROMPT = """You are an expert tutor previewing a multi-step biomedical research task for a student, before a step-by-step walkthrough begins. The agent has just proposed its plan; your job is to turn that plan into a short roadmap the student reads once, up front, so they know where the walkthrough is headed.
+
+You will be given:
+- TASK: the student's original research task
+- PLAN_TEXT: the agent's own first message, which usually includes a numbered plan (may be informal or embedded in other reasoning text)
+
+Return a single JSON object with EXACTLY these keys (no other keys, no prose, no markdown fences):
+{
+  "overview": "<2-3 sentences, plain language: the overall strategy for solving this task>",
+  "steps": [{"title": "<short step name, a few words>", "why": "<1-2 sentences: why this step is needed>"}]
+}
+
+RULES:
+1. Base "steps" on PLAN_TEXT's own numbered list. Don't invent steps it doesn't imply. If PLAN_TEXT has no clear numbered list, infer a reasonable 3-7 step breakdown from TASK and PLAN_TEXT together.
+2. Each step's "why" is 1-2 sentences ONLY — this is a preview, not a full explanation. Each step gets its own detailed teaching card later in the walkthrough.
+3. "overview" orients the student to the strategy, not a restatement of the task.
+4. Output ONLY the JSON. No markdown code fences, no commentary, no apology.
+"""
+
+
+def generate_roadmap(llm, task: str, plan_text: str) -> RoadmapCard:
+    """Generate a one-time roadmap card for the start of a tutor run.
+
+    Args:
+        llm: A LangChain chat model, same calling convention as
+            `InstructionGenerator`.
+        task: The student's original research prompt.
+        plan_text: The agent's first reasoning event's content (usually
+            contains its numbered plan/checklist).
+    """
+    if llm is None:
+        return _build_soft_failure_roadmap()
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    user_prompt = (
+        f"TASK: {task or '(no task provided)'}\n\n"
+        "PLAN_TEXT:\n---\n"
+        f"{_truncate(plan_text, _MAX_EVENT_CHARS) or '(empty)'}\n---"
+    )
+    try:
+        response = llm.invoke(
+            [
+                SystemMessage(content=_ROADMAP_SYSTEM_PROMPT),
+                HumanMessage(content=user_prompt),
+            ]
+        )
+        text = getattr(response, "content", str(response)) or ""
+    except Exception as e:
+        print(f"tutor: roadmap LLM call failed: {e!r}")
+        return _build_soft_failure_roadmap()
+
+    data = _extract_json(text)
+    if data is None:
+        return _build_soft_failure_roadmap()
+
+    overview = _truncate(str(data.get("overview", "") or ""), 600).strip()
+    steps: list[dict] = []
+    raw_steps = data.get("steps")
+    if isinstance(raw_steps, list):
+        for item in raw_steps[:10]:
+            if not isinstance(item, dict):
+                continue
+            title = item.get("title")
+            if not isinstance(title, str) or not title.strip():
+                continue
+            why = item.get("why")
+            steps.append(
+                {
+                    "title": _truncate(title.strip(), 160),
+                    "why": _truncate(why.strip(), 300) if isinstance(why, str) else "",
+                }
+            )
+    return RoadmapCard(overview=overview, steps=steps)
+
+
 def _build_soft_failure_card(event) -> InstructionCard:
     """Return a placeholder card when the LLM call fails. The renderer
     sees `_generation_failed=True` and shows a small note. The user can
@@ -242,7 +339,7 @@ You will be given:
 Return a single JSON object with EXACTLY these keys (no other keys, no prose, no markdown fences):
 {
   "what": "<1-2 sentences, plain language, what this step is doing>",
-  "why": "<1-2 sentences, the rationale / learning point — why this step exists in the workflow, or what would go wrong without it>",
+  "why": "<3-6 sentences: the rationale AND the reasoning trail behind it — why this step exists in the workflow, what alternative approaches exist and why this one was chosen, what would go wrong or be missed without it, and how it connects to the step before/after it>",
   "prerequisites": ["<short concept the student should know>", "..."],
   "look_for": ["<what success looks like in the output, e.g. 'a non-empty DataFrame with columns X, Y, Z'>", "..."],
   "citations": [{"source": "<EXACT source string from KB_SNIPPETS>", "page": <int or null>, "snippet": "<≤200 char quote>"}],
@@ -259,8 +356,8 @@ RULES:
    - solution / summary → usually Create or Evaluate
    Most steps are Apply/Analyze. Reserve Create for genuine synthesis steps.
 3. "what" must stand alone — a student who skipped the prior step should still understand it.
-4. "why" is the most important field. It must answer "why this step exists" or "what would go wrong without it" — not just describe the code.
-5. KEEP IT SHORT: "what" and "why" are 1-2 sentences each. "prerequisites" and "look_for" are 2-4 short bullets.
+4. "why" is the most important field, and this is a learning tool, not a changelog — treat it as a mini worked-explanation, not a one-liner. It must cover: why this step exists in the plan, what would go wrong or be incomplete without it, and (when relevant) what tradeoffs or alternative methods were available. Do not just restate what the code does.
+5. "what" stays short (1-2 sentences). "why" gets real room (3-6 sentences) — use it. "prerequisites" and "look_for" are 2-4 short bullets.
 6. Output ONLY the JSON. No markdown code fences, no commentary, no apology.
 
 Default Bloom/DOK by event_type (override only if the content clearly supports it):
@@ -470,7 +567,7 @@ class InstructionGenerator:
 
         card = InstructionCard(
             what=_truncate(str(data.get("what", "") or ""), 500).strip(),
-            why=_truncate(str(data.get("why", "") or ""), 500).strip(),
+            why=_truncate(str(data.get("why", "") or ""), 1200).strip(),
             prerequisites=_coerce_str_list(
                 data.get("prerequisites"), _MAX_PREREQS
             ),

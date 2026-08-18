@@ -295,6 +295,10 @@ def advanced_web_search_claude(
     # agent still gets web results on the Ollama default path. The LLM sees
     # the same string shape, so the ReAct loop is unchanged.
     if not api_key:
+        print(
+            "[advanced_web_search_claude] ANTHROPIC_API_KEY not set — "
+            "falling back to search_google instead of Claude's web_search tool."
+        )
         return _advanced_web_search_fallback(query)
 
     # The "use the key for this tool even when chat is on Ollama" path is

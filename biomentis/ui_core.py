@@ -37,10 +37,13 @@ UIEventType = Literal[
     "complete",
     # --- Tutor-layer events (Phase 1+) ---
     # "instruction": a teaching card attached to the previous event.
+    # "roadmap": a one-time, run-level preview of all the steps the agent
+    #   intends to take, shown before the first per-step instruction card.
     # "paused": a "Continue" gate; the stream halts until the user clicks.
     # "qa": a tutor-chat exchange (user question + assistant answer).
     # "rubric_update": a teacher rubric was loaded or replaced.
     "instruction",
+    "roadmap",
     "paused",
     "qa",
     "rubric_update",
@@ -106,6 +109,11 @@ def stream_agent_events(
     agent_messages = [*history_messages, HumanMessage(content=full_text_input)]
     inputs = {"messages": agent_messages, "next_step": None}
     config = {"recursion_limit": 500, "configurable": {"thread_id": thread_id}}
+
+    # `go`/`go_stream` set this themselves before streaming; this function
+    # drives `agent.app.stream` directly instead of going through either,
+    # so it must set it too — `execute_self_critic` reads it back.
+    agent.user_task = text_input
 
     t = time()
     solution_found = False
@@ -299,10 +307,29 @@ class ExportEntry:
     content: str = ""
     language: str | None = None
     file_path: str | None = None
-    # Tutor step id (set on `instruction` and `paused` events). Used by
-    # the Streamlit renderer to give expander labels and button keys a
-    # stable per-step suffix so re-renders don't collide.
+    # Tutor step id (set on `instruction` and `paused` events, and now on
+    # the raw event + its per-step Q&A too — see a1.py's `export_entries`).
+    # Used by the Streamlit renderer to give expander labels and button
+    # keys a stable per-step suffix so re-renders don't collide, and by
+    # `render_transcript_html` to box a step's entries together.
     step_id: int | None = None
+    # Which run this step belongs to. step_id resets to 1 on every new
+    # task, so on its own it can't tell two different runs' "step 1"
+    # apart — run_id can. See `_StepBoxTracker` in a1.py for the live-UI
+    # analog of the grouping this drives in the HTML export.
+    run_id: str | None = None
+    # Tutor Q&A metadata (set on `qa` entries). When present, the HTML
+    # renderer appends a "Sources" list (if citations) and a metadata
+    # line (Bloom / DOK / rubric) under the body so the export carries
+    # the same context the live chat panel shows.
+    citations: list[dict] | None = None
+    bloom_level: str | None = None
+    dok_level: str | None = None
+    rubric_hit: list[str] | None = None
+    confidence: float | None = None
+    # Gap-analysis items ({"point": str, "why": str}) the tutor flagged
+    # beyond the literal question. See `also_consider` on `ChatTurn`.
+    also_consider: list[dict] | None = None
 
 
 def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
@@ -409,6 +436,69 @@ def _render_markdown(text: str) -> str:
     return rendered
 
 
+def _qa_extras_html(entry: ExportEntry) -> str:
+    """Render the qa-only tail: Sources list, gap-analysis list, and a
+    metadata line.
+
+    All three pieces are optional. A Sources block appears only when
+    `entry.citations` is a non-empty list; an "Also worth knowing" block
+    appears only when `entry.also_consider` is non-empty. The metadata
+    line appears when at least one of `bloom_level` / `dok_level` /
+    `rubric_hit` / `confidence` is populated — anything else is dropped
+    to keep the
+    line short.
+    """
+    parts: list[str] = []
+    citations = entry.citations or []
+    if citations:
+        items = []
+        for c in citations:
+            src = c.get("source", "?") if isinstance(c, dict) else "?"
+            page = c.get("page") if isinstance(c, dict) else None
+            label = f"<strong>{html.escape(str(src))}</strong>"
+            if page is not None:
+                label += f" <span class='text-muted'>(p. {html.escape(str(page))})</span>"
+            items.append(f"<li>{label}</li>")
+        parts.append(
+            f"<details class='mt-2'><summary class='text-muted small'>"
+            f"Sources ({len(citations)})</summary>"
+            f"<ul class='small mb-0'>{''.join(items)}</ul></details>"
+        )
+
+    also_consider = entry.also_consider or []
+    if also_consider:
+        items = []
+        for item in also_consider:
+            point = item.get("point") if isinstance(item, dict) else str(item)
+            why = item.get("why") if isinstance(item, dict) else None
+            label = f"<strong>{html.escape(str(point))}</strong>"
+            if why:
+                label += f" <span class='text-muted'>— {html.escape(str(why))}</span>"
+            items.append(f"<li>{label}</li>")
+        parts.append(
+            f"<details class='mt-2'><summary class='text-muted small'>"
+            f"Also worth knowing ({len(also_consider)})</summary>"
+            f"<ul class='small mb-0'>{''.join(items)}</ul></details>"
+        )
+
+    meta_bits: list[str] = []
+    if entry.bloom_level:
+        meta_bits.append(f"Bloom: {html.escape(entry.bloom_level)}")
+    if entry.dok_level:
+        meta_bits.append(f"DOK: {html.escape(str(entry.dok_level))}")
+    if entry.rubric_hit:
+        joined = ", ".join(html.escape(s) for s in entry.rubric_hit)
+        meta_bits.append(f"Rubric: {joined}")
+    if entry.confidence is not None:
+        meta_bits.append(f"Confidence: {entry.confidence:.2f}")
+    if meta_bits:
+        parts.append(
+            f"<div class='text-muted small mt-1'>{' &middot; '.join(meta_bits)}</div>"
+        )
+
+    return "".join(parts)
+
+
 def _entry_body_html(entry: ExportEntry) -> str:
     if entry.kind == "code":
         language = entry.language or ""
@@ -420,37 +510,28 @@ def _entry_body_html(entry: ExportEntry) -> str:
     if entry.kind == "pdf":
         return _render_markdown(entry.content) if entry.content else ""
     if entry.kind in ("instruction", "qa"):
-        # Tutor-layer exports: a left "Tutor" badge, then markdown body.
+        # Tutor-layer exports: a left "Tutor" badge, then markdown body,
+        # then (for qa) a Sources list and a metadata line if the entry
+        # carries them. The chat-panel Q&A turn shape adds these so the
+        # export captures the same context the live panel shows.
         badge = "Tutor" if entry.kind == "qa" else "Teaching"
         badge_class = "bg-info-subtle text-info-emphasis" if entry.kind == "qa" else "bg-warning-subtle text-warning-emphasis"
         body = _render_markdown(entry.content) if entry.content else ""
-        return f'<div class="d-flex align-items-start gap-2"><span class="badge {badge_class} flex-shrink-0">{badge}</span><div class="flex-grow-1">{body}</div></div>'
+        tail = _qa_extras_html(entry) if entry.kind == "qa" else ""
+        return f'<div class="d-flex align-items-start gap-2"><span class="badge {badge_class} flex-shrink-0">{badge}</span><div class="flex-grow-1">{body}{tail}</div></div>'
     if entry.content:
         return _render_markdown(entry.content)
     return ""
 
 
-def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_name: str) -> str:
-    """Render a self-contained Bootstrap 5 / HTML5 page for a chat transcript.
-
-    Images are embedded as base64 data URIs so the exported file is portable;
-    Bootstrap's CSS is pulled from its CDN, so opening the file needs internet access.
-    """
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    if not entries:
-        body_html = '<p class="text-muted fst-italic">No messages yet.</p>'
-    else:
-        cards = []
-        for entry in entries:
-            is_user = entry.role == "user"
-            bubble_class = "bg-primary text-white" if is_user else "bg-white"
-            align_class = "ms-auto" if is_user else "me-auto"
-            title_html = (
-                f'<div class="fw-semibold small mb-1">{html.escape(entry.title)}</div>' if entry.title else ""
-            )
-            body = _entry_body_html(entry)
-            cards.append(f"""
+def _render_entry_card(entry: ExportEntry) -> str:
+    """Render one entry as a single chat-bubble card."""
+    is_user = entry.role == "user"
+    bubble_class = "bg-primary text-white" if is_user else "bg-white"
+    align_class = "ms-auto" if is_user else "me-auto"
+    title_html = f'<div class="fw-semibold small mb-1">{html.escape(entry.title)}</div>' if entry.title else ""
+    body = _entry_body_html(entry)
+    return f"""
       <div class="d-flex mb-3 {align_class}" style="max-width: 85%;">
         <div class="card {bubble_class} shadow-sm w-100">
           <div class="card-body">
@@ -459,8 +540,58 @@ def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_n
             {body}
           </div>
         </div>
+      </div>"""
+
+
+def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_name: str) -> str:
+    """Render a self-contained Bootstrap 5 / HTML5 page for a chat transcript.
+
+    Images are embedded as base64 data URIs so the exported file is portable;
+    Bootstrap's CSS is pulled from its CDN, so opening the file needs internet access.
+
+    Entries that share a `(run_id, step_id)` — a tutor step's raw output,
+    its teaching card, and its "Ask about this step" Q&A — are boxed
+    together in one bordered block, mirroring the live app's per-step
+    grouping (see `_StepBoxTracker` in a1.py). Entries without a step_id
+    (status lines, the once-per-run roadmap, plain research-mode output)
+    render as standalone cards and don't interrupt an open box — the
+    roadmap in particular sits between a step's raw event and its
+    instruction card in the live stream, so treating it as a group-ender
+    would needlessly split that step's box in two.
+    """
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if not entries:
+        body_html = '<p class="text-muted fst-italic">No messages yet.</p>'
+    else:
+        blocks: list[str] = []
+        box_entries: list[ExportEntry] | None = None
+        box_key: tuple | None = None
+
+        def flush_box() -> None:
+            nonlocal box_entries, box_key
+            if box_entries:
+                inner = "".join(_render_entry_card(e) for e in box_entries)
+                blocks.append(f"""
+      <div class="border rounded-3 p-3 mb-3">
+        <div class="text-muted small fw-semibold mb-2">📍 Step {html.escape(str(box_key[1]))}</div>
+        {inner}
       </div>""")
-        body_html = "".join(cards)
+            box_entries = None
+            box_key = None
+
+        for entry in entries:
+            if entry.step_id is not None:
+                key = (entry.run_id, entry.step_id)
+                if key != box_key:
+                    flush_box()
+                    box_entries = []
+                    box_key = key
+                box_entries.append(entry)
+            else:
+                blocks.append(_render_entry_card(entry))
+        flush_box()
+        body_html = "".join(blocks)
 
     return f"""<!doctype html>
 <html lang="en">

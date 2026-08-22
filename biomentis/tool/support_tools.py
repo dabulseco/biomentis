@@ -41,6 +41,14 @@ def run_python_repl(command: str) -> str:
         return output
 
     command = command.strip("```").strip()
+    # The agent guesses module paths for tools; point them at the real ones
+    # before executing so a misfiled import isn't a dead run.
+    try:
+        from biomentis.tool.tool_imports import fix_tool_imports
+
+        command = fix_tool_imports(command)
+    except Exception:
+        pass
     return execute_in_repl(command)
 
 

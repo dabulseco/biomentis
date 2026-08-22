@@ -164,8 +164,34 @@ class _StubLLM:
                     {"source": "course_notes.txt", "page": None, "snippet": "BLAST E-value < 1e-10 against PDB hits indicates strong homology."},
                 ],
             }))
+        if "sections_requested" in user_lower:
+            # Two-mode instruction card prompt. Return both sections; the
+            # generator drops whichever mode wasn't requested, which is
+            # what the mode assertions below check.
+            return AIMessage(content=json.dumps({
+                "technical": {
+                    "what": "Calls run_blast() against the local PDB sequence database.",
+                    "why": "BLAST is the standard heuristic aligner for this size of query.",
+                    "prerequisites": ["A FASTA-formatted query sequence", "The pdb BLAST database is installed"],
+                    "look_for": ["A non-empty hit table with e_value and identity columns"],
+                },
+                "scientific": {
+                    "what": "Searches for structural homologs of the CHIKV E2 glycoprotein.",
+                    "why": "Sequence homology above the twilight zone implies a shared fold, which is what makes template-based modeling of the epitope defensible.",
+                    "impact": "Supplies the structural templates that the nanobody ranking downstream depends on; without them the ranking would have no structure to dock against.",
+                    "prerequisites": ["Sequence-structure relationship", "E-value as a significance measure"],
+                    "look_for": ["Hits concentrated in the receptor-binding domain rather than scattered"],
+                },
+                "citations": [
+                    {"source": "course_notes.txt", "page": None, "snippet": "BLAST E-value < 1e-10 against PDB hits indicates strong homology."}
+                ],
+                "bloom_target": "Apply",
+                "dok_target": 2,
+            }))
         if "event_type" in user_lower and "look_for" in sys_text.lower():
-            # Instruction card prompt
+            # Legacy single-section instruction card prompt (pre-two-mode
+            # shape) — kept so the backwards-compatible parse path stays
+            # covered.
             return AIMessage(content=json.dumps({
                 "what": "Running a BLAST search to find homologs of CHIKV E2 in the PDB.",
                 "why": "Homologs in the PDB are required as templates for homology-based docking of the nanobody candidates.",
@@ -269,6 +295,63 @@ def run_smoke_test() -> int:
     _check("Card has 'why' field", bool(getattr(card, "why", "")), f"why='{card.why}'")
     _check("Card has 'bloom_target'", bool(getattr(card, "bloom_target", "")), f"bloom='{card.bloom_target}'")
     _check("Card has 'dok_target'", getattr(card, "dok_target", 0) > 0, f"dok={card.dok_target}")
+
+    # 5a. Instruction modes: technical and scientific are independent.
+    from biomentis.agent.tutor.instruction import ALL_MODES, MODE_SCIENTIFIC, MODE_TECHNICAL
+
+    _check(
+        "Both modes populate both sections",
+        bool(card.technical.what) and bool(card.scientific.what),
+        f"tech={card.technical.what[:40]!r} sci={card.scientific.what[:40]!r}",
+    )
+    _check(
+        "Scientific section carries 'impact'",
+        bool(card.scientific.impact),
+        f"impact='{card.scientific.impact[:60]}'",
+    )
+    _check(
+        "Sections keep prerequisites separate",
+        card.technical.prerequisites != card.scientific.prerequisites
+        and bool(card.technical.prerequisites)
+        and bool(card.scientific.prerequisites),
+        f"tech={card.technical.prerequisites} sci={card.scientific.prerequisites}",
+    )
+
+    tech_only = engine.instruction_gen.generate(ev, task="t", modes=[MODE_TECHNICAL])
+    _check(
+        "Technical-only card has no scientific section",
+        bool(tech_only.technical.what) and tech_only.scientific.is_empty(),
+        f"modes={tech_only.modes}",
+    )
+    sci_only = engine.instruction_gen.generate(ev, task="t", modes=[MODE_SCIENTIFIC])
+    _check(
+        "Scientific-only card has no technical section",
+        bool(sci_only.scientific.what) and sci_only.technical.is_empty(),
+        f"modes={sci_only.modes}",
+    )
+
+    both_off = engine.instruction_gen.generate(ev, task="t", modes=[])
+    _check(
+        "Both modes off yields an empty card",
+        both_off.is_empty() and both_off.modes == (),
+        f"modes={both_off.modes}",
+    )
+
+    engine.set_modes([MODE_TECHNICAL])
+    _check(
+        "TutorEngine.set_modes() propagates to the generator",
+        engine.modes == (MODE_TECHNICAL,)
+        and engine.instruction_gen.modes == (MODE_TECHNICAL,),
+        f"engine={engine.modes} gen={engine.instruction_gen.modes}",
+    )
+    engine.set_modes([])
+    _check(
+        "TutorEngine.modes_enabled() is False with no modes",
+        engine.modes_enabled() is False,
+        f"modes={engine.modes}",
+    )
+    engine.set_modes(ALL_MODES)
+
     # Log the step manually (this is what the wrapper does).
     try:
         engine.logger.log({

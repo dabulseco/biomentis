@@ -128,9 +128,21 @@ BIOMNI_DATA_PATH=/path/to/your/data
 # Agent execution timeout in seconds (default: 600)
 BIOMNI_TIMEOUT_SECONDS=600
 
-# Sampling temperature (default: 0.7)
-BIOMNI_TEMPERATURE=0.7
+# Sampling temperature for the main loop -- code generation, tool selection,
+# structured output, verification. Cold on purpose (default: 0.2).
+BIOMNI_TEMPERATURE=0.2
+
+# Sampling temperature for divergent calls only -- hypothesis generation and
+# the self-critic's "what are we missing?" pass (default: 0.7).
+BIOMNI_CREATIVE_TEMPERATURE=0.7
 ```
+
+> **Why two temperatures?** The agent writes and runs Python, and sampling noise
+> in that loop produces hallucinated arguments rather than insight — so the main
+> loop runs cold. Creativity is bought explicitly, on the handful of calls that
+> ask for ideas, via `A1.creative_llm`. Running a small local model? Try
+> `BIOMNI_TEMPERATURE=0.1` and `BIOMNI_CREATIVE_TEMPERATURE=0.5` — sub-13B models
+> degrade with temperature faster than frontier models do.
 
 > **Always run Biomni from the directory that contains your `.env`** (or export the same vars in your shell). The config priority is: direct parameter to `A1(...)` > runtime `default_config` mutation > env vars > built-in defaults.
 

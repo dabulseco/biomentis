@@ -58,6 +58,18 @@ from typing import Any
 # pass-through — they don't carry new pedagogical content.
 _INSTRUCTION_BEARING = {"reasoning", "code", "observation", "solution", "file", "summary"}
 
+# Sub-captions for the per-mode expanders. They exist because
+# "prerequisites" means something different under each lens, and a student
+# reading both boxes needs to know which is which at a glance.
+_PREREQ_HINT = {
+    "technical": "What must already exist or be installed for this step to run.",
+    "scientific": "Background concepts you need in order to follow the science.",
+}
+_LOOK_FOR_HINT = {
+    "technical": "How to tell the step technically succeeded.",
+    "scientific": "Scientifically meaningful signals in the result, and what they mean.",
+}
+
 _RUN_KEY = "biomni_tutor_run"
 _CONTINUE_KEY = "biomni_tutor_continue_step_id"
 _PENDING_KEY = "biomni_tutor_pending_continue"
@@ -84,6 +96,18 @@ def install_renderers() -> None:
     def _render_instruction_card(container: Any, card: Any) -> None:
         """Render a structured `InstructionCard` into a Streamlit container.
 
+        The card carries one section per enabled instructional mode, and
+        each mode gets its own bordered box in its own color so the two
+        never read as one wall of text:
+
+            technical  → blue   (:material/build:)  — the machinery
+            scientific → violet (:material/science:) — the meaning
+
+        The colors come from `MODE_META` in `agent/tutor/instruction.py`,
+        not from CSS, so they follow the user's light/dark theme instead
+        of fighting it. Citations and the Bloom/DOK tags sit below both
+        boxes: they describe the step, not one lens on it.
+
         Falls back to a minimal "tutor unavailable" hint if the LLM call
         failed; the dispatcher in `ui_tutor` attaches a `_generation_failed`
         flag to the card in that case.
@@ -93,6 +117,12 @@ def install_renderers() -> None:
         auto-generated expander keys.
         """
         import streamlit as st
+
+        from biomentis.agent.tutor.instruction import (
+            MODE_META,
+            MODE_SCIENTIFIC,
+            normalize_modes,
+        )
 
         # step_id should be set by the dispatcher; if not, fall back to a
         # per-render counter so we never collide on expander/button keys.
@@ -104,25 +134,71 @@ def install_renderers() -> None:
         if getattr(card, "_generation_failed", False):
             with container.container():
                 st.warning(
-                    f"🎓 Teaching card unavailable for this step "
-                    f"(LLM call failed). The agent's work above is unchanged."
+                    "🎓 Teaching card unavailable for this step "
+                    "(LLM call failed). The agent's work above is unchanged."
                 )
                 if card.what:
                     st.caption(card.what)
             return
 
+        modes = normalize_modes(getattr(card, "modes", None))
+
         with container.container():
-            st.markdown(f"**🎓 What:** {card.what or '(no summary)'}")
-            if card.why:
-                st.markdown(f"**Why:** {card.why}")
-            if card.prerequisites:
-                with st.expander(f"Prerequisites · step {step_id}", expanded=False):
-                    for p in card.prerequisites:
-                        st.markdown(f"- {p}")
-            if card.look_for:
-                with st.expander(f"What to look for in the output · step {step_id}", expanded=False):
-                    for p in card.look_for:
-                        st.markdown(f"- {p}")
+            if not modes:
+                # Both lenses off: the walkthrough still paces the run and
+                # the per-step Q&A box below still works, there is just
+                # nothing to teach. Say so rather than rendering a blank.
+                st.caption(
+                    "🎓 _Both instructional modes are off — turn on "
+                    "**Technical details** or **Scientific content** in the "
+                    "sidebar to get teaching cards._"
+                )
+                return
+
+            for mode in modes:
+                meta = MODE_META[mode]
+                section = card.section(mode)
+                color = meta["color"]
+                with st.container(border=True):
+                    st.markdown(
+                        f"{meta['icon']} :{color}-badge[**{meta['label']}**]"
+                    )
+                    if section.is_empty():
+                        st.caption(
+                            f"_The tutor returned nothing for the "
+                            f"{meta['short'].lower()} lens on this step._"
+                        )
+                        continue
+                    if section.what:
+                        st.markdown(f":{color}[**What:**] {section.what}")
+                    if section.why:
+                        st.markdown(f":{color}[**Why:**] {section.why}")
+                    # Scientific-only: how this step moves the actual answer
+                    # forward. Given its own heading because it is the field
+                    # that ties the science back to the student's query.
+                    if mode == MODE_SCIENTIFIC and section.impact:
+                        st.markdown(
+                            f":{color}[**How this builds the answer:**] {section.impact}"
+                        )
+                    if section.prerequisites:
+                        with st.expander(
+                            f":{color}[{meta['short']} prerequisites] · step {step_id}",
+                            expanded=False,
+                            icon=":material/checklist:",
+                        ):
+                            st.caption(_PREREQ_HINT[mode])
+                            for item in section.prerequisites:
+                                st.markdown(f"- {item}")
+                    if section.look_for:
+                        with st.expander(
+                            f":{color}[What to look for — {meta['short'].lower()}] · step {step_id}",
+                            expanded=False,
+                            icon=":material/search:",
+                        ):
+                            st.caption(_LOOK_FOR_HINT[mode])
+                            for item in section.look_for:
+                                st.markdown(f"- {item}")
+
             if card.citations:
                 with st.expander(
                     f"Sources ({len(card.citations)}) · step {step_id}", expanded=False
@@ -307,6 +383,14 @@ def tutor_wrapped_stream(agent, text_input, files, history_messages, thread_id):
             ),
             channel="inner",
             title="✅ Done",
+            # Carrying the duration tells `launch_streamlit_demo` that this
+            # event already accounts for its own timing, so it renders the
+            # content as-is instead of appending a second, contradictory
+            # "total time". Session time is the honest number for a
+            # walkthrough: the run clock is restarted on every Continue
+            # click, so a wall-clock total from it would only cover the
+            # last step.
+            duration=_wall,
         )
 
 
@@ -360,6 +444,16 @@ def _advance_run_live(run: dict, tutor):
     _t_step_start = time.monotonic()
     gen = run["gen"]
     for event in gen:
+        if event.type == "complete":
+            # The inner stream's "👈 Returning the result to the main
+            # interface" is research-mode narration for a run that ends the
+            # moment the agent stops. A walkthrough ends when the *student*
+            # finishes reading it, and `tutor_wrapped_stream` emits its own
+            # "✅ Done" with the timings that describe that. Letting both
+            # through gave the user two completion banners, and because the
+            # first one stopped the run clock, the second one reported
+            # "total time: 0.0s".
+            continue
         run["events"].append(event)
 
         # Tag the raw event with the step it belongs to *before* yielding
@@ -397,8 +491,12 @@ def _advance_run_live(run: dict, tutor):
             except Exception as e:
                 print(f"tutor: roadmap generation failed: {e!r}")
 
+        # `card` is None when both instruction modes are off: the run
+        # still paces step by step and the Q&A gate below still works,
+        # there is simply no teaching card to attach.
         card = _generate_or_get_card(event, run, tutor)
-        yield _make_instruction_event(event, card, run["step_id"], run["run_id"])
+        if card is not None:
+            yield _make_instruction_event(event, card, run["step_id"], run["run_id"])
         run["compute_seconds"] = run.get("compute_seconds", 0.0) + (time.monotonic() - _t_step_start)
         run["paused_at"] = time.monotonic()
         yield _make_paused_event(run["step_id"], run["run_id"])
@@ -457,11 +555,19 @@ _CARD_CACHE: dict[tuple, Any] = {}
 def _generate_or_get_card(event, run, tutor) -> Any:
     """Generate (or fetch from cache) an InstructionCard for an event.
 
-    Caching is keyed on (event_type, content_hash, kb_signature) so that
-    re-emitting a near-identical event in the same run doesn't re-bill
-    the LLM. The cache is shared across the whole run.
+    Caching is keyed on (event_type, content_hash, kb_signature, modes)
+    so that re-emitting a near-identical event in the same run doesn't
+    re-bill the LLM. `modes` is part of the key because a card generated
+    with only the technical lens on is not a valid answer once the
+    student switches the scientific lens on mid-run.
+
+    Returns `None` when both instructional modes are off — there is
+    nothing to teach, so no LLM call is made and no card event is
+    yielded (the step still pauses for questions).
     """
-    from biomentis.agent.tutor.instruction import InstructionCard
+    modes = tuple(getattr(tutor, "modes", ()) or ())
+    if not modes:
+        return None
 
     content = _event_text_for_hash(event)
     kb_sig = ""
@@ -470,10 +576,10 @@ def _generate_or_get_card(event, run, tutor) -> Any:
             kb_sig = tutor.kb.kb_signature() or ""
         except Exception:
             kb_sig = ""
-    key = (event.type, _hash(content), kb_sig)
+    key = (event.type, _hash(content), kb_sig, modes)
     if key in _CARD_CACHE:
         return _CARD_CACHE[key]
-    card = tutor.instruction_gen.generate(event, task=run.get("prompt", ""))
+    card = tutor.instruction_gen.generate(event, task=run.get("prompt", ""), modes=modes)
     _CARD_CACHE[key] = card
 
     # Log the full step with the card so analytics can see it.
@@ -492,6 +598,11 @@ def _generate_or_get_card(event, run, tutor) -> Any:
                 "title": getattr(event, "title", None),
                 "what": card.what,
                 "why": card.why,
+                # The scientific lens is what a follow-up question is
+                # usually about, so give the chat that section explicitly
+                # rather than only the technical-first flat view.
+                "scientific_why": card.scientific.why,
+                "impact": card.scientific.impact,
                 "bloom_target": card.bloom_target,
                 "dok_target": card.dok_target,
             }
@@ -561,11 +672,20 @@ def _log_step_with_card(run: dict, event, card, tutor) -> None:
             "title": getattr(event, "title", None),
             "bloom_target": card.bloom_target,
             "dok_target": card.dok_target,
+            "modes": list(getattr(card, "modes", ()) or ()),
+            # `instruction` keeps the historical flat shape (technical
+            # first, scientific as fallback) so the CSV export and the
+            # Critic digest keep reading it unchanged; `sections` carries
+            # the per-mode split for anything that wants the real
+            # structure.
             "instruction": {
                 "what": card.what,
                 "why": card.why,
                 "prerequisites": list(card.prerequisites),
                 "look_for": list(card.look_for),
+            },
+            "sections": {
+                mode: section.to_dict() for mode, section in card.active_sections()
             },
             "kb_citations": list(card.citations),
             "generation_failed": getattr(card, "_generation_failed", False),
@@ -598,17 +718,31 @@ def _hash(text: str) -> str:
 
 
 def _make_instruction_event(prior_event: Any, card: Any, step_id: int = 0, run_id: str = "") -> Any:
+    from biomentis.agent.tutor.instruction import MODE_META, MODE_SCIENTIFIC
     from biomentis.ui_core import UIEvent
 
+    # Plain-markdown mirror of the card, used by the fallback renderer and
+    # by anything that reads the transcript as text (export, chat context).
+    # Section headings are kept so the two lenses stay distinguishable even
+    # without the colored boxes.
     bits = []
-    if card.what:
-        bits.append(f"**What:** {card.what}")
-    if card.why:
-        bits.append(f"**Why:** {card.why}")
-    if card.prerequisites:
-        bits.append("**Prereqs:** " + "; ".join(card.prerequisites))
-    if card.look_for:
-        bits.append("**Look for:** " + "; ".join(card.look_for))
+    for mode, section in card.active_sections():
+        meta = MODE_META[mode]
+        bits.append(f"**{meta['label']}**")
+        if section.what:
+            bits.append(f"**What:** {section.what}")
+        if section.why:
+            bits.append(f"**Why:** {section.why}")
+        if mode == MODE_SCIENTIFIC and section.impact:
+            bits.append(f"**How this builds the answer:** {section.impact}")
+        if section.prerequisites:
+            bits.append(
+                f"**{meta['short']} prereqs:** " + "; ".join(section.prerequisites)
+            )
+        if section.look_for:
+            bits.append(
+                f"**Look for ({meta['short'].lower()}):** " + "; ".join(section.look_for)
+            )
     if card.bloom_target:
         bits.append(f"**Bloom:** {card.bloom_target}")
     if card.dok_target:
@@ -758,6 +892,9 @@ def render_tutor_sidebar(tutor) -> None:
             key="biomni_tutor_enabled",
         )
 
+        if tutor.enabled:
+            _render_mode_toggles(tutor)
+
         if tutor.enabled and _is_cloud_ollama_llm(tutor.llm):
             _model_name = getattr(tutor.llm, "model", "?")
             _msg = (
@@ -794,6 +931,65 @@ def render_tutor_sidebar(tutor) -> None:
 
         with st.expander("Session log", expanded=False):
             _render_log_export(tutor)
+
+
+# ----- 6a0. Instructional-mode toggles ------------------------------------
+
+
+def _render_mode_toggles(tutor) -> None:
+    """Two independent switches for what a teaching card teaches.
+
+    These are deliberately NOT one radio/segmented control: the modes are
+    orthogonal lenses, and all four combinations are meaningful. A student
+    debugging a pipeline runs technical-only; a student learning the
+    biology runs scientific-only; a course session usually runs both; and
+    both-off keeps the step-by-step pacing and the per-step Q&A while
+    generating (and paying for) no teaching text at all.
+
+    Each toggle is color-matched to the box it produces in the transcript
+    (blue = technical, violet = scientific) so the sidebar switch and the
+    card it controls are visually the same thing.
+    """
+    import streamlit as st
+
+    from biomentis.agent.tutor.instruction import (
+        ALL_MODES,
+        MODE_META,
+        MODE_SCIENTIFIC,
+        MODE_TECHNICAL,
+    )
+
+    st.caption("Instruction modes — enable either, both, or neither:")
+
+    selected: list[str] = []
+    for mode in ALL_MODES:
+        meta = MODE_META[mode]
+        on = st.toggle(
+            f"{meta['icon']} :{meta['color']}[**{meta['label']}**]",
+            value=mode in tutor.modes,
+            help=meta["blurb"],
+            key=f"biomni_tutor_mode_{mode}",
+        )
+        if on:
+            selected.append(mode)
+
+    tutor.set_modes(selected)
+
+    if not tutor.modes:
+        st.info(
+            "Both instruction modes are off. The agent still pauses after "
+            "each step so you can ask questions, but no teaching cards are "
+            "generated.",
+            icon=":material/info:",
+        )
+    elif tutor.modes == (MODE_TECHNICAL,):
+        st.caption(
+            ":blue[Technical only] — how each step is carried out, without the science."
+        )
+    elif tutor.modes == (MODE_SCIENTIFIC,):
+        st.caption(
+            ":violet[Scientific only] — what each step means, without the implementation."
+        )
 
 
 # ----- 6a. Knowledge-base panel ------------------------------------------
@@ -986,7 +1182,12 @@ def _render_self_improvement_panel(tutor) -> None:
         else:
             src, mdl = selected_critic_label.split(": ", 1)
             try:
-                critic_llm = get_llm(mdl, source=src, config=default_config)
+                critic_llm = get_llm(
+                    mdl,
+                    temperature=default_config.temperature,  # verification runs cold
+                    source=src,
+                    config=default_config,
+                )
                 tutor.set_critic_llm(critic_llm)
                 st.toast(f"Critic set to {selected_critic_label}.", icon="🤖")
             except Exception as e:
@@ -1716,3 +1917,10 @@ def abandon_current_run() -> None:
     import streamlit as st
 
     st.session_state[_RUN_KEY] = None
+    # The abandoned run is no longer in flight. Without this the run
+    # banner in `launch_streamlit_demo` would keep claiming a run is
+    # active — `biomni_run_active` is otherwise only ever cleared by a
+    # `complete` event, which an abandoned walkthrough never reaches.
+    st.session_state["biomni_run_active"] = False
+    st.session_state["biomni_run_started_at"] = None
+    st.session_state["biomni_last_run_duration"] = ""

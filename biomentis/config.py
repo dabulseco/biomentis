@@ -40,7 +40,27 @@ class BiomentisConfig:
     # (Anthropic, OpenAI, ...) just set BIOMNI_LLM=... and BIOMNI_SOURCE=... in
     # your .env — the local-first path will then short-circuit.
     llm: str = "auto"
-    temperature: float = 0.7
+
+    # Two temperatures, not one.
+    #
+    # A1 is a code-writing / code-executing loop: nearly every token it emits is
+    # Python, a tool name, or a function signature, and sampling noise there
+    # doesn't buy creativity — it buys hallucinated kwargs, wrong column names,
+    # and retry loops. So the *base* temperature is cold, and it is what gets
+    # used for code generation, tool retrieval, structured output, and every
+    # verification/critique-of-a-claim pass.
+    temperature: float = 0.2
+
+    # Divergent calls — "what hypotheses should we test?", "what are we
+    # missing?" — are the only place entropy earns its keep. Nothing uses this
+    # implicitly; call sites opt in via A1.creative_llm.
+    #
+    # Note for local models: small Ollama models degrade faster with
+    # temperature than frontier models do. If you run 7-13B locally, consider
+    # BIOMNI_CREATIVE_TEMPERATURE=0.5 and BIOMNI_TEMPERATURE=0.1. This is left
+    # as an explicit setting rather than auto-scaled per provider, so that a
+    # given .env always means the same thing regardless of which model is up.
+    creative_temperature: float = 0.7
 
     # Tool settings
     use_tool_retriever: bool = True
@@ -80,6 +100,8 @@ class BiomentisConfig:
             self.commercial_mode = os.getenv("BIOMNI_COMMERCIAL_MODE").lower() == "true"
         if os.getenv("BIOMNI_TEMPERATURE"):
             self.temperature = float(os.getenv("BIOMNI_TEMPERATURE"))
+        if os.getenv("BIOMNI_CREATIVE_TEMPERATURE"):
+            self.creative_temperature = float(os.getenv("BIOMNI_CREATIVE_TEMPERATURE"))
         if os.getenv("BIOMNI_CUSTOM_BASE_URL"):
             self.base_url = os.getenv("BIOMNI_CUSTOM_BASE_URL")
         if os.getenv("BIOMNI_CUSTOM_API_KEY"):
@@ -147,6 +169,7 @@ class BiomentisConfig:
             "timeout_seconds": self.timeout_seconds,
             "llm": self.llm,
             "temperature": self.temperature,
+            "creative_temperature": self.creative_temperature,
             "use_tool_retriever": self.use_tool_retriever,
             "commercial_mode": self.commercial_mode,
             "base_url": self.base_url,

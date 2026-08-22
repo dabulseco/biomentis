@@ -1,12 +1,15 @@
 import re
 
+from biomentis.config import default_config
 from biomentis.llm import get_llm
 
 
 class base_agent:
-    def __init__(self, llm="claude-3-haiku-20240307", cheap_llm=None, tools=None, temperature=0.7):
+    def __init__(self, llm="claude-3-haiku-20240307", cheap_llm=None, tools=None, temperature=None):
         self.tools = tools
-        self.llm = get_llm(llm, temperature)
+        # temperature=None -> the cold BiomentisConfig.temperature. This agent
+        # emits executable Python, where sampling noise is just bugs.
+        self.llm = get_llm(llm, temperature, config=default_config)
         if cheap_llm is None:
             self.cheap_llm = llm
         else:
@@ -22,7 +25,7 @@ class base_agent:
 class FunctionGenerator(base_agent):
     """Agent that generates executable Python code scripts given a task description."""
 
-    def __init__(self, llm="claude-3-7-sonnet-20250219", cheap_llm=None, temperature=0.7):
+    def __init__(self, llm="claude-3-7-sonnet-20250219", cheap_llm=None, temperature=None):
         """Initialize the PaperTaskExtractor agent.
 
         Args:

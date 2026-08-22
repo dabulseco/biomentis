@@ -1,0 +1,7 @@
+sp1,sp2,mean,min,max,n
+Gracilaria_salicornia,Gracilaria_salicornia,0.5883306971808273,0.0,0.7676282051282052,156
+Gracilaria_parvispora,Gracilaria_salicornia,0.662565647532869,0.014010507880910683,0.7993579454253612,78
+Gracilaria_parvispora,Gracilaria_parvispora,0.577706866465226,0.0,0.7299703264094956,30
+Gracilaria_coronopifolia,Gracilaria_salicornia,0.71303338940542,0.6356107660455487,0.761344537815126,52
+Gracilaria_coronopifolia,Gracilaria_parvispora,0.6448869877645357,0.15204678362573099,0.7507418397626113,24
+Gracilaria_coronopifolia,Gracilaria_coronopifolia,0.35999999999999993,0.0,0.72,12

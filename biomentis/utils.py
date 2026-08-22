@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import pickle
+import re
 import subprocess
 import tempfile
 import traceback
@@ -810,8 +811,11 @@ def textify_api_dict(api_dict):
     """Convert a nested API dictionary to a nicely formatted string."""
     lines = []
     for category, methods in api_dict.items():
-        lines.append(f"Import file: {category}")
-        lines.append("=" * (len("Import file: ") + len(category)))
+        # The module is stated as a ready-to-paste import so the agent doesn't
+        # have to infer it — misfiled imports were a common run-killer.
+        header = f"Module: {category} — import as: from {category} import <function_name>"
+        lines.append(header)
+        lines.append("=" * len(header))
         for method in methods:
             lines.append(f"Method: {method.get('name', 'N/A')}")
             lines.append(f"  Description: {method.get('description', 'No description provided.')}")
@@ -1018,6 +1022,57 @@ def check_and_download_s3_files(
             download_results[filename] = False
 
     return download_results
+
+
+# A model turn ends at the first closing tag. Only `</execute>` and
+# `</solution>` count: `</think>` is a preamble to one of them, not a turn.
+_FIRST_CLOSING_TAG_RE = re.compile(r"</(?:execute|solution)>", re.IGNORECASE)
+
+
+def truncate_after_first_tag(message: str) -> tuple[str, str]:
+    """Cut a model response at the end of its first `</execute>`/`</solution>`.
+
+    This is a stop sequence, applied locally instead of by the provider.
+
+    A stop sequence is the API-side version of the same rule, but it cannot be
+    relied on: `ChatOllama` takes `stop=`, not `stop_sequences=`, and silently
+    swallows the wrong name — no warning, no `model_kwargs`, the value simply
+    vanishes. So on the default local path the model was never stopped, and
+    whatever it wrote after `</execute>` went into the message history as if it
+    were real. Two concrete failures came out of that:
+
+      * a fabricated `<observation>` the model then reasoned over as a result
+      * a trailing `<solution>`, which wins the branch test in `generate`
+        (`answer_match` is checked before `execute_match`) — so the run ended
+        on an answer built from output that was never computed
+
+    Truncating here fixes both for every provider at once, including any that
+    ignores `stop` in future.
+
+    Nothing is lost that was ever used: the `<execute>` and `<solution>`
+    extractors are non-greedy and only ever read the first block anyway.
+
+    Args:
+        message: The raw model response, after any missing closing tag has
+            been repaired.
+
+    Returns:
+        `(kept, dropped)` — the response up to and including its first closing
+        tag, and whatever followed it (empty when there was nothing to cut).
+
+    Example:
+        >>> truncate_after_first_tag("a <execute>x</execute> <solution>y</solution>")
+        ('a <execute>x</execute>', '<solution>y</solution>')
+        >>> truncate_after_first_tag("<solution>done</solution>")
+        ('<solution>done</solution>', '')
+    """
+    match = _FIRST_CLOSING_TAG_RE.search(message)
+    if match is None:
+        return message, ""
+    dropped = message[match.end() :].strip()
+    if not dropped:
+        return message, ""
+    return message[: match.end()], dropped
 
 
 def clean_message_content(content: str) -> str:

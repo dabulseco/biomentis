@@ -35,6 +35,9 @@ taxonomy, Webb's DOK, and a teacher-supplied rubric.
 
 3. In the **🎓 Tutor (optional)** sidebar:
     - Flip **Enable instructional mode** on.
+    - Choose the **instruction modes** — 🔧 **Technical details**,
+      🔬 **Scientific content**, both, or neither (see
+      [Instruction modes](#instruction-modes)).
     - Upload one or more course materials (PDF / PPTX / DOCX / TXT) and
       click **📥 Add to KB**. Optionally paste URLs (one per line) and
       add those too.
@@ -44,14 +47,9 @@ taxonomy, Webb's DOK, and a teacher-supplied rubric.
 4. Submit a task in the main prompt area. The agent will run to
    completion; events stream into the right panel. After every
    reasoning / code / observation / solution / file event, a **🎓
-   Teaching note** appears with:
-
-    - **What** the step is doing
-    - **Why** it exists in the workflow
-    - **Prerequisites** the student should already know
-    - **What to look for** in the output
-    - **Sources** from the uploaded KB
-    - **Bloom** and **DOK** target levels
+   Teaching note** appears, carrying one colored box per enabled
+   instruction mode plus the shared **Sources** from the uploaded KB and
+   the **Bloom** / **DOK** target levels.
 
    Click **▶ Continue** to advance to the next step.
 
@@ -72,7 +70,8 @@ taxonomy, Webb's DOK, and a teacher-supplied rubric.
 - Adds a KB ingestion pipeline (PDF, PPTX, DOCX, TXT, URLs) backed by
   a local Chroma vector index.
 - Generates a teaching card for every reasoning, code, observation,
-  solution, summary, and file event the agent emits.
+  solution, summary, and file event the agent emits, through two
+  independently-switchable lenses (technical / scientific).
 - Pauses the run between cards so the student can read at their own
   pace.
 - Grounds both the cards and the tutor chat in the KB, with strict
@@ -92,6 +91,37 @@ taxonomy, Webb's DOK, and a teacher-supplied rubric.
 - Track individual learners across sessions. Each Streamlit session
   has its own `biomentis_session_id`; the KB and log live under
   `data/tutor_kb/<session_id>/` and `data/tutor_logs/<session_id>/`.
+
+---
+
+## Instruction modes
+
+A teaching card explains a step through two independent lenses. Each has
+its own toggle in the sidebar, and all four combinations are valid — turn
+on one, both, or neither.
+
+| | 🔧 Technical details | 🔬 Scientific content |
+|---|---|---|
+| Color | blue | violet |
+| **What** | The operation being run — the actual method, tool, library, API, or algorithm, and the parameters that matter | The science being done — the entities involved, the property measured, the question interrogated |
+| **Why** | Why *this* technique or tool: what it buys over the alternative, what breaks without it | Why it matters scientifically: the mechanism or principle, what claim the result licenses, what a strong vs. weak result would mean, and the caveats |
+| **How this builds the answer** | — | How this step's result changes the material being assembled to answer *your specific query*, and what the final answer would be missing without it |
+| **Prerequisites** | What must already exist or be installed for the step to run — upstream outputs, dependencies, required formats | Background concepts you need in order to follow the science |
+| **What to look for** | How to tell the step technically succeeded | Scientifically meaningful signals in the result, and what they mean |
+
+The two are prompted to repel each other: the technical lens is told not to
+explain biology, and the scientific lens is told not to name functions or
+parameters. Read side by side they complement rather than repeat; read alone
+either one stands on its own.
+
+Only the enabled modes are requested from the LLM, so running one lens costs
+roughly half of running both. With **both modes off**, the walkthrough still
+paces the run step by step and the per-step **Ask about this step** box still
+works — no teaching cards are generated and no tokens are spent on them.
+
+Switching a mode on mid-run regenerates the affected cards: card caching is
+keyed by the mode set, so you never get a card that is silently missing the
+lens you just enabled.
 
 ---
 
@@ -211,11 +241,27 @@ Every session writes a JSONL file at
   "title": "Run BLAST",
   "bloom_target": "Apply",
   "dok_target": 2,
+  "modes": ["technical", "scientific"],
   "instruction": {
-    "what": "Running a BLAST search to find homologs in PDB.",
-    "why": "Homologs in the PDB are a prerequisite for homology-based docking.",
-    "prerequisites": ["BLAST E-value interpretation"],
+    "what": "Calls run_blast() against the local PDB sequence database.",
+    "why": "BLAST is the standard heuristic aligner at this query size.",
+    "prerequisites": ["A FASTA query sequence", "BLAST E-value interpretation"],
     "look_for": ["A non-empty DataFrame with columns: hit_id, e_value, identity"]
+  },
+  "sections": {
+    "technical": {
+      "what": "Calls run_blast() against the local PDB sequence database.",
+      "why": "BLAST is the standard heuristic aligner at this query size.",
+      "prerequisites": ["A FASTA query sequence", "The pdb BLAST database is installed"],
+      "look_for": ["A non-empty DataFrame with columns: hit_id, e_value, identity"]
+    },
+    "scientific": {
+      "what": "Searches for structural homologs of the CHIKV E2 glycoprotein.",
+      "why": "Homology above the twilight zone implies a shared fold, which is what makes template-based modeling of the epitope defensible.",
+      "prerequisites": ["Sequence-structure relationship", "E-value as a significance measure"],
+      "look_for": ["Hits concentrated in the receptor-binding domain"],
+      "impact": "Supplies the structural templates the nanobody ranking downstream depends on."
+    }
   },
   "kb_citations": [{"source": "course_notes.pdf", "page": 12, "snippet": "E-values below 1e-10 indicate strong homology."}],
   "generation_failed": false,
@@ -223,6 +269,13 @@ Every session writes a JSONL file at
   "session_id": "abc12345"
 }
 ```
+
+`modes` records which instructional lenses were enabled when the card was
+generated. `sections` is the per-mode split — the technical lens covers the
+technology being carried out, the scientific lens covers what the step means
+and how it builds the answer. `instruction` is a flattened view of the same
+content (technical first, scientific as fallback) kept so the CSV export and
+the Critic digest read unchanged.
 
 ### `qa` — one tutor-chat exchange
 
@@ -404,7 +457,16 @@ print(turn.content, turn.citations, turn.bloom_level)
 from biomentis.ui_core import UIEvent
 ev = UIEvent(type="code", content="run_blast('CHIKV E2')", title="BLAST")
 card = engine.instruction_gen.generate(ev, task="Find 3 nanobodies")
-print(card.what, card.why, card.bloom_target)
+print(card.technical.what, card.technical.prerequisites)
+print(card.scientific.why, card.scientific.impact)
+
+# Generate only one lens (both, either, or neither is valid)
+card = engine.instruction_gen.generate(ev, task="Find 3 nanobodies", modes=["scientific"])
+print(card.modes, card.technical.is_empty())
+
+# Set the modes for every subsequent card on this engine
+engine.set_modes(["technical"])          # blue cards only
+engine.set_modes([])                     # no cards, no LLM calls
 
 # Inspect the log
 import json

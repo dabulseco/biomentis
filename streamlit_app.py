@@ -20,7 +20,6 @@ import streamlit as st
 from biomentis.agent import A1
 from biomentis.agent.tutor import TutorEngine
 from biomentis.config import default_config
-from biomentis.llm import get_llm
 from biomentis.ui_core import list_available_providers
 from biomentis.ui_repl import render_repl_panel
 from biomentis.ui_tutor import (
@@ -113,9 +112,10 @@ def _get_or_build_agent(source: str, model: str) -> A1:
             use_tool_retriever=False,
             expected_data_lake_files=[],
         )
-        # Override the LLM with the user-selected one.
+        # Override the LLM with the user-selected one. set_model (not a bare
+        # `agent.llm = ...`) keeps the agent's temperature and stop sequences.
         try:
-            agent.llm = get_llm(model, source=source, config=default_config)
+            agent.set_model(model, source=source)
         except Exception as e:
             st.error(f"Failed to load model `{source}: {model}`: {e}")
             st.stop()
@@ -162,11 +162,18 @@ tutor.load_priorities(user_id)
 # the agent proposes a solution (see A1.execute_self_critic) before it's
 # shown to the user — a built-in gap-check that was previously wired but
 # never enabled here.
-agent.configure(
-    self_critic=True,
-    test_time_scale_round=1,
-    critic_priorities=list(tutor.active_priorities),
-)
+#
+# Skipped while a run is in flight. `configure()` rebuilds the system prompt
+# and recompiles the LangGraph app, and since runs moved onto a background
+# thread (see biomentis/run_worker.py) a rerun can now land in the middle of
+# one — which would mutate the agent out from under the worker driving it.
+# Between turns there is nothing to disturb, which is when it matters anyway.
+if not st.session_state.get("biomni_run_active"):
+    agent.configure(
+        self_critic=True,
+        test_time_scale_round=1,
+        critic_priorities=list(tutor.active_priorities),
+    )
 
 # Sidebar order: Model picker (above) → REPL (existing) → Tutor (new).
 # The REPL panel renders its own divider; we add ours after.

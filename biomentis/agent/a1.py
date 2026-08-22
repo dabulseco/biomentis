@@ -3,6 +3,7 @@ import inspect
 import os
 import re
 import time
+import uuid
 from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
@@ -25,12 +26,86 @@ _RENDER_INSTRUCTION_CARD: Callable[..., None] | None = None
 _RENDER_PAUSE_GATE: Callable[..., None] | None = None
 _RENDER_ROADMAP_CARD: Callable[..., None] | None = None
 
+
+# --- Tab focus -----------------------------------------------------------
+# The two transcript views live in `st.tabs`. Their labels and their ORDER
+# are constants and must stay that way: Streamlit stores a stateful tab's
+# selection as the label string, so changing either the order or the text
+# of a label silently resets the selection to the first tab.
+#
+# This is what the previous implementation did on purpose — it re-ordered
+# the labels each rerun to fake a programmatic switch, because `st.tabs`
+# had no selection API in Streamlit 1.42. Since 1.45 it takes `key=` and
+# `on_change=`, so focus is now moved by writing the label into session
+# state instead, and the tabs themselves never move.
+#
+# That programmatic focus is only available on STATEFUL tabs, and making
+# tabs stateful means a tab click reruns the script. So it is switched on
+# only while the tutor is gating the run, where a rerun is the normal
+# mechanism anyway. In research mode the tabs are left untracked and a
+# click stays inert — see the `_tabs_stateful` decision in
+# `launch_streamlit_demo` for the full reasoning.
+_TAB_MAIN_LABEL = "Biomentis AI Agent"
+_TAB_INNER_LABEL = "Biomentis Executor"
+# Widget key. Streamlit forbids writing a widget's key after the widget is
+# instantiated, so this may only be assigned BEFORE the `st.tabs` call —
+# use `_TAB_INTENT_KEY` from anywhere else.
+_TAB_KEY = "biomni_active_tab"
+# Plain (non-widget) key holding a requested tab label. Writable from any
+# point in the script; applied to `_TAB_KEY` at the top of the next render.
+_TAB_INTENT_KEY = "biomni_tab_intent"
+# Set once the user clicks a tab themselves: from then until the next run
+# starts, auto-focus requests are ignored rather than yanking them back.
+_TAB_PINNED_KEY = "biomni_tab_pinned"
+
+
+def _note_manual_tab_switch() -> None:
+    """`on_change` for the transcript tabs — the user took the wheel.
+
+    Pins the current selection so nothing auto-focuses over it for the
+    rest of this run. Cleared when the next run starts.
+
+    Only wired up when the tabs are stateful (tutor-gated runs); in
+    research mode the tabs are untracked and never call this.
+    """
+    import streamlit as st
+
+    st.session_state[_TAB_PINNED_KEY] = True
+
+
+def _focus_executor_for_new_run() -> None:
+    """`on_click` for the Send button: focus the Executor for the new run.
+
+    Runs as a widget callback, i.e. BEFORE the script body reruns, so the
+    intent is applied by the time `st.tabs` is built in that same rerun —
+    the switch lands on the transition itself rather than one rerun late.
+    A new run also earns one free auto-focus, so the pin resets here.
+
+    The intent is honored only when the tabs are stateful (tutor-gated
+    runs); research mode discards it, since untracked tabs have no
+    programmatic selection to set.
+    """
+    import streamlit as st
+
+    st.session_state[_TAB_PINNED_KEY] = False
+    st.session_state[_TAB_INTENT_KEY] = _TAB_INNER_LABEL
+
 from biomentis.config import default_config
+from biomentis.context_budget import (
+    WRAP_UP_INSTRUCTION,
+    fit_messages,
+    is_context_length_error,
+    learn_limit_from_error,
+    resolve_context_limit,
+)
+from biomentis.eval.step_trace import StepTrace
 from biomentis.know_how import KnowHowLoader
 from biomentis.llm import SourceType, get_llm
 from biomentis.model.retriever import ToolRetriever
 from biomentis.tool.support_tools import run_python_repl
 from biomentis.tool.tool_registry import ToolRegistry
+from biomentis.run_journal import RunJournal, journaled
+from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
     ExportEntry,
     format_duration,
@@ -39,6 +114,7 @@ from biomentis.ui_core import (
     render_transcript_html,
     save_html_export,
     stream_agent_events,
+    transcript_entry_for_event,
     ui_event_to_export_entry,
 )
 from biomentis.utils import (
@@ -62,6 +138,7 @@ from biomentis.utils import (
     run_with_timeout,
     should_skip_message,
     textify_api_dict,
+    truncate_after_first_tag,
 )
 
 if os.path.exists(".env"):
@@ -72,6 +149,12 @@ if os.path.exists(".env"):
 class AgentState(TypedDict):
     messages: list[BaseMessage]
     next_step: str | None
+
+
+# Scratch space for the most recent `_invoke_llm_with_retry` call, so the
+# generate node can record how many attempts it took without changing the
+# function's signature (it has two callers).
+LAST_LLM_CALL: dict[str, int] = {"attempts": 0}
 
 
 def _invoke_llm_with_retry(llm, messages, max_retries: int = 3, base_delay: float = 2.0):
@@ -95,11 +178,20 @@ def _invoke_llm_with_retry(llm, messages, max_retries: int = 3, base_delay: floa
     hop to go stale in the first place and never needs this.
     """
     last_exc: Exception | None = None
+    LAST_LLM_CALL["attempts"] = 0
     for attempt in range(1, max_retries + 1):
+        LAST_LLM_CALL["attempts"] = attempt
         try:
             return llm.invoke(messages)
         except Exception as e:
             last_exc = e
+            if is_context_length_error(e):
+                # Deterministic, not transient: the same request will be
+                # refused every time. Retrying it three times only spent six
+                # seconds and three more over-long requests. Record the limit
+                # the provider named so the guard can prevent the next one.
+                learn_limit_from_error(llm, e)
+                raise
             if attempt < max_retries:
                 delay = base_delay * (2 ** (attempt - 1))
                 print(
@@ -124,6 +216,10 @@ class A1:
         api_key: str | None = None,
         commercial_mode: bool | None = None,
         expected_data_lake_files: list | None = None,
+        temperature: float | None = None,
+        creative_temperature: float | None = None,
+        trace: bool | None = None,
+        trace_dir: str | None = None,
     ):
         """Initialize the biomni agent.
 
@@ -136,6 +232,18 @@ class A1:
             base_url: Base URL for custom model serving (e.g., "http://localhost:8000/v1")
             api_key: API key for the custom LLM
             commercial_mode: If True, excludes datasets that require commercial licenses or are non-commercial only
+            temperature: Sampling temperature for the main agent loop — code
+                generation, tool selection, structured output, verification.
+                Defaults to the cold BiomentisConfig.temperature.
+            creative_temperature: Sampling temperature for divergent calls only
+                (see `self.creative_llm`). Defaults to
+                BiomentisConfig.creative_temperature.
+            trace: Record a per-step JSONL trace of the run (branch taken,
+                execution outcome, classified failures and what to build to
+                fix them). On by default; set False, or BIOMENTIS_TRACE=0, to
+                disable. See `biomentis.eval.step_trace`.
+            trace_dir: Directory for trace files (default "traces", or
+                $BIOMENTIS_TRACE_DIR).
 
         """
         # Use default_config values for unspecified parameters
@@ -155,6 +263,10 @@ class A1:
             api_key = default_config.api_key if default_config.api_key else "EMPTY"
         if commercial_mode is None:
             commercial_mode = default_config.commercial_mode
+        if temperature is None:
+            temperature = default_config.temperature
+        if creative_temperature is None:
+            creative_temperature = default_config.creative_temperature
 
         # Import appropriate env_desc based on commercial_mode
         if commercial_mode:
@@ -253,8 +365,20 @@ class A1:
         self.path = os.path.join(path, "biomni_data")
         module2api = read_module2api()
 
+        # Remembered so `set_model()` can rebuild the client on a model switch
+        # without silently dropping the temperature or the stop sequences.
+        self._llm_model = llm
+        self._llm_source = source
+        self._llm_base_url = base_url
+        self._llm_api_key = api_key
+        self.temperature = temperature
+        self.creative_temperature = creative_temperature
+        # Built lazily by the `creative_llm` property — most runs never touch it.
+        self._creative_llm = None
+
         self.llm = get_llm(
             llm,
+            temperature=temperature,
             stop_sequences=["</execute>", "</solution>"],
             source=source,
             base_url=base_url,
@@ -279,7 +403,64 @@ class A1:
 
         # Add timeout parameter
         self.timeout_seconds = timeout_seconds  # 10 minutes default timeout
+
+        # Step-level tracing. Cheap (a few JSON lines per step, no extra LLM
+        # calls), so it defaults on -- the failures worth studying are the
+        # ones nobody thought to switch recording on for.
+        if trace is None:
+            trace = os.getenv("BIOMENTIS_TRACE", "1").strip().lower() not in ("0", "false", "no")
+        self.tracer = StepTrace(
+            trace_dir=trace_dir or os.getenv("BIOMENTIS_TRACE_DIR", "traces"),
+            enabled=trace,
+        )
+
         self.configure()
+
+    @property
+    def creative_llm(self):
+        """A second client on the same model, sampled hot.
+
+        Reserved for genuinely divergent calls — generating hypotheses, asking
+        "what are we missing?". Everything else (code, tool calls, structured
+        output, verifying a specific claim) must use `self.llm`, which runs
+        cold: sampling noise in a code-executing loop is bugs, not insight.
+
+        Built on first access and cached; `set_model()` invalidates it. Note
+        that it carries no stop sequences — divergent output is prose, and a
+        critique that happens to quote `</execute>` shouldn't be truncated.
+        """
+        if self._creative_llm is None:
+            self._creative_llm = get_llm(
+                self._llm_model,
+                temperature=self.creative_temperature,
+                source=self._llm_source,
+                base_url=self._llm_base_url,
+                api_key=self._llm_api_key,
+                config=default_config,
+            )
+        return self._creative_llm
+
+    def set_model(self, model: str, source: SourceType | None = None) -> None:
+        """Switch the agent to a different model, preserving its sampling setup.
+
+        Use this instead of assigning to `agent.llm` directly: a bare
+        `get_llm(model, source=source)` drops both the configured temperature
+        and the `</execute>` / `</solution>` stop sequences the agent loop
+        parses against.
+        """
+        self._llm_model = model
+        self._llm_source = source
+        self.llm = get_llm(
+            model,
+            temperature=self.temperature,
+            stop_sequences=["</execute>", "</solution>"],
+            source=source,
+            base_url=self._llm_base_url,
+            api_key=self._llm_api_key,
+            config=default_config,
+        )
+        # Force a rebuild on next access so the hot client follows the switch.
+        self._creative_llm = None
 
     def add_tool(self, api):
         """Add a new tool to the agent's tool registry and make it available for retrieval.
@@ -1199,6 +1380,8 @@ For R code, use the #!R marker at the beginning of your code block to indicate i
 For Bash scripts and commands, use the #!BASH marker at the beginning of your code block. This allows for both simple commands and multi-line scripts with variables, loops, conditionals, loops, and other Bash features.
 
 In each response, you must include EITHER <execute> or <solution> tag. Not both at the same time. Do not respond with messages without any tags. No empty messages.
+
+A PLAN IS NOT A SOLUTION. Never put a plan, a checklist, or a statement of what you are about to do inside <solution> tags. <solution> is reserved for your final answer to the user's task, after the work is done. Your first response should state the plan as plain text and then start step 1 with an <execute> block in the same response. Wrapping a plan in <solution> ends the working loop and shows the user a checklist where they expected results.
 """
 
         # Add self-critic instructions if needed
@@ -1308,7 +1491,13 @@ Each library is listed with its description to help you understand its functiona
             library_intro = (
                 "Based on your query, I've identified the following most relevant libraries that you can use:"
             )
-            import_instruction = "IMPORTANT: When using any function, you MUST first import it from its module. For example:\nfrom [module_name] import [function_name]"
+            import_instruction = (
+                "IMPORTANT: When using any function, you MUST first import it from its module:\n"
+                "from [module_name] import [function_name]\n"
+                "Use the exact module printed above the function in the dictionary above. "
+                "Do not guess a module from the function's name — tools that look related "
+                "often live in different modules."
+            )
         else:
             function_intro = "In your code, you will need to import the function location using the following dictionary of functions:"
             data_lake_intro = "You can write code to understand the data, process and utilize it for the task. Here is the list of datasets:"
@@ -1470,7 +1659,12 @@ Each library is listed with its description to help you understand its functiona
                 system_prompt += "\n\nIMPORTANT FOR GPT MODELS: You MUST use XML tags <execute> or <solution> in EVERY response. Do not use markdown code blocks (```) - use <execute> tags instead."
 
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
+            messages, context_fit = self._fit_request(messages)
+            trace_t0 = time.time()
             response = _invoke_llm_with_retry(self.llm, messages)
+            trace_latency = time.time() - trace_t0
+            trace_attempts = LAST_LLM_CALL.get("attempts", 1)
+            trace_coerced = False
 
             # Normalize Responses API content blocks (list of dicts) into a plain string
             content = response.content
@@ -1502,6 +1696,24 @@ Each library is listed with its description to help you understand its functiona
             if "<think>" in msg and "</think>" not in msg:
                 msg += "</think>"
 
+            # A turn ends at its first closing tag. The provider is supposed to
+            # enforce that with a stop sequence, but it cannot be relied on —
+            # `ChatOllama` silently swallows the wrong kwarg name, so on the
+            # default local path nothing stopped the model at all. Enforce it
+            # here, where it holds for every provider.
+            #
+            # Without this, anything the model wrote after `</execute>` entered
+            # the history as fact: a fabricated `<observation>` it would then
+            # reason over, or a trailing `<solution>` that wins the branch test
+            # below (`answer_match` is checked first) and ends the run on an
+            # answer built from output that was never computed.
+            msg, dropped_tail = truncate_after_first_tag(msg)
+            if dropped_tail:
+                print(
+                    f"truncated {len(dropped_tail)} chars after the first closing tag"
+                    + (" (model wrote its own <observation>)" if "<observation>" in dropped_tail.lower() else "")
+                )
+
             # More flexible pattern matching for different LLM styles
             think_match = re.search(r"<think>(.*?)</think>", msg, re.DOTALL | re.IGNORECASE)
             execute_match = re.search(r"<execute>(.*?)</execute>", msg, re.DOTALL | re.IGNORECASE)
@@ -1514,17 +1726,26 @@ Each library is listed with its description to help you understand its functiona
                 if code_block_match and not answer_match:
                     # If we found a code block and no solution, treat it as execute
                     execute_match = code_block_match
+                    # Rescuing a markdown fence keeps the run alive but hides a
+                    # real format-compliance failure -- record it as one.
+                    trace_coerced = True
 
             # Add the message to the state before checking for errors
             state["messages"].append(AIMessage(content=msg.strip()))
 
+            trace_parse_error = False
             if answer_match:
                 state["next_step"] = "end"
+                trace_branch = "solution"
             elif execute_match:
                 state["next_step"] = "execute"
+                trace_branch = "execute"
             elif think_match:
                 state["next_step"] = "generate"
+                trace_branch = "think"
             else:
+                trace_branch = "none"
+                trace_parse_error = True
                 print("parsing error...")
 
                 error_count = sum(
@@ -1535,6 +1756,7 @@ Each library is listed with its description to help you understand its functiona
                     # If we've already tried to correct the model twice, just end the conversation
                     print("Detected repeated parsing errors, ending conversation")
                     state["next_step"] = "end"
+                    trace_branch = "abort_parse_errors"
                     # Add a final message explaining the termination
                     state["messages"].append(
                         AIMessage(
@@ -1549,6 +1771,39 @@ Each library is listed with its description to help you understand its functiona
                         )
                     )
                     state["next_step"] = "generate"
+                    trace_branch = "retry_parse_error"
+
+            # Out of runway and still running code. Two nudges are a fair
+            # chance to wrap up; a third means the agent is not going to stop
+            # on its own, and every further step makes the answer less likely
+            # to be written at all. End the run and let the caller salvage the
+            # last message — a partial report beats a 400.
+            if context_fit.must_hard_stop_after(getattr(self, "_context_wrap_ups", 0)) and trace_branch == "execute":
+                print("context budget: out of runway — ending the run so the answer can be written")
+                state["messages"].append(
+                    HumanMessage(
+                        content=(
+                            "Context exhausted before the task was finished. The run was "
+                            "stopped here; the work completed so far is above."
+                        )
+                    )
+                )
+                state["next_step"] = "end"
+                trace_branch = "abort_context_exhausted"
+                # Skip the self-critic round: it re-sends the whole history to
+                # the LLM, which is the one thing there is no room for.
+                self.critic_count = 10**9
+
+            self.tracer.record_generate(
+                branch=trace_branch,
+                raw_length=len(msg),
+                latency_s=trace_latency,
+                llm_attempts=trace_attempts,
+                coerced_from_markdown=trace_coerced,
+                parse_error=trace_parse_error,
+                usage=dict(getattr(response, "usage_metadata", None) or {}),
+                thinking_chars=len(think_match.group(1)) if think_match else 0,
+            )
             return state
 
         def execute(state: AgentState) -> AgentState:
@@ -1563,6 +1818,8 @@ Each library is listed with its description to help you understand its functiona
 
                 # Set timeout duration (10 minutes = 600 seconds)
                 timeout = self.timeout_seconds
+                trace_t0 = time.time()
+                trace_lang = "python"
 
                 # Check if the code is R code
                 if (
@@ -1572,6 +1829,7 @@ Each library is listed with its description to help you understand its functiona
                 ):
                     # Remove the R marker and run as R code
                     r_code = re.sub(r"^#!R|^# R code|^# R script", "", code, count=1).strip()
+                    trace_lang = "r"
                     result = run_with_timeout(run_r_code, [r_code], timeout=timeout)
                 # Check if the code is a Bash script or CLI command
                 elif (
@@ -1585,10 +1843,12 @@ Each library is listed with its description to help you understand its functiona
                         cli_command = re.sub(r"^#!CLI", "", code, count=1).strip()
                         # Remove any newlines to ensure it's a single command
                         cli_command = cli_command.replace("\n", " ")
+                        trace_lang = "cli"
                         result = run_with_timeout(run_bash_script, [cli_command], timeout=timeout)
                     else:
                         # For Bash scripts, remove the marker and run as a bash script
                         bash_script = re.sub(r"^#!BASH|^# Bash script", "", code, count=1).strip()
+                        trace_lang = "bash"
                         result = run_with_timeout(run_bash_script, [bash_script], timeout=timeout)
                 # Otherwise, run as Python code
                 else:
@@ -1630,8 +1890,30 @@ Each library is listed with its description to help you understand its functiona
                 }
                 self._execution_results.append(execution_entry)
 
+                # Classify the step and log what could be built to prevent this
+                # failure class recurring. Note this runs on the post-truncation
+                # `result` -- i.e. on exactly what the model gets to see.
+                try:
+                    trace_tools = (
+                        self._parse_tool_calls_from_code(code) if trace_lang == "python" else []
+                    )
+                except Exception:
+                    trace_tools = []
+                self.tracer.record_execute(
+                    code=code,
+                    result=result,
+                    language=trace_lang,
+                    duration_s=time.time() - trace_t0,
+                    tools=trace_tools,
+                    plots=len(execution_plots),
+                )
+
                 observation = f"\n<observation>{result}</observation>"
                 state["messages"].append(AIMessage(content=observation.strip()))
+            else:
+                # Routed here, but nothing to run: the step is consumed without
+                # producing an observation. Invisible in the transcript, so record it.
+                self.tracer.record_execute_noop(last_message)
 
             return state
 
@@ -1671,7 +1953,15 @@ Each library is listed with its description to help you understand its functiona
                 Think hard what are missing to solve the task.
                 No question asked, just feedbacks.
                 """
-                feedback = _invoke_llm_with_retry(self.llm, messages + [HumanMessage(content=feedback_prompt)])
+                # Divergent by design ("think hard what are missing"), so this is
+                # the one call in the loop that runs on the hot client. The
+                # generate/execute nodes above stay cold.
+                # Same guard as `generate`: this call re-sends the entire
+                # run history, so it is the largest request the graph makes.
+                critic_messages, _ = self._fit_request(
+                    messages + [HumanMessage(content=feedback_prompt)]
+                )
+                feedback = _invoke_llm_with_retry(self.creative_llm, critic_messages)
 
                 # Add feedback as a new message
                 state["messages"].append(
@@ -1839,6 +2129,65 @@ Each library is listed with its description to help you understand its functiona
 
         return selected_resources_names
 
+    def _fit_request(self, messages: list[BaseMessage]) -> tuple[list[BaseMessage], Any]:
+        """Trim an outgoing request to fit the model's context window.
+
+        Both LLM call sites in the graph go through this. The window fills the
+        same way every long run: a ~42k-token system prompt, plus an
+        observation per execute step that never comes back out. Left
+        unwatched, the first symptom is the provider refusing the request and
+        the whole run dying with it.
+
+        Only the request is trimmed. `state["messages"]` keeps everything, so
+        the transcript and the journal stay complete and the next call
+        recomputes the trim from scratch.
+        """
+        fit = fit_messages(messages, resolve_context_limit(self.llm))
+        if fit.changed:
+            print(f"context budget: {fit.summary()}")
+        if fit.must_wrap_up:
+            self._context_wrap_ups = getattr(self, "_context_wrap_ups", 0) + 1
+            return [*fit.messages, HumanMessage(content=WRAP_UP_INSTRUCTION)], fit
+        return fit.messages, fit
+
+    def _trace_finish(self, final_state, error: Exception | None = None) -> None:
+        """Close the trace, labelling how the run actually ended.
+
+        The distinction that matters: a run that reached <solution> vs. one the
+        loop abandoned (repeated parse errors, recursion limit, exception).
+        Those look the same in the transcript but mean very different things.
+        """
+        if error is not None:
+            self.tracer.end_run("exception", detail=f"{type(error).__name__}: {error}")
+            return
+        last = ""
+        try:
+            last = str(final_state["messages"][-1].content) if final_state else ""
+        except Exception:
+            last = ""
+        if "<solution>" in last:
+            outcome = "solution"
+        elif "repeated parsing errors" in last:
+            outcome = "aborted_parse_errors"
+        elif "<observation>" in last:
+            outcome = "stopped_after_execution"
+        else:
+            outcome = "no_solution"
+        self.tracer.end_run(outcome, detail=last[:200])
+
+    @staticmethod
+    def _trace_tool_names(selected_resources) -> list[str]:
+        """Best-effort tool names from a retriever result, for retrieval scoring."""
+        names = []
+        for item in (selected_resources or {}).get("tools", []) or []:
+            if isinstance(item, dict):
+                name = item.get("name")
+            else:
+                name = getattr(item, "name", None) or (item if isinstance(item, str) else None)
+            if name:
+                names.append(str(name))
+        return names
+
     def go(self, prompt):
         """Execute the agent with the given prompt.
 
@@ -1848,10 +2197,22 @@ Each library is listed with its description to help you understand its functiona
         """
         self.critic_count = 0
         self.user_task = prompt
+        self._context_wrap_ups = 0
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
             self.update_system_prompt_with_selected_resources(selected_resources_names)
+
+        self.tracer.start_run(
+            prompt,
+            llm=str(getattr(self.llm, "model_name", None) or getattr(self.llm, "model", "unknown")),
+            source=str(getattr(self, "_llm_source", None) or "unknown"),
+            use_tool_retriever=bool(self.use_tool_retriever),
+            timeout_seconds=self.timeout_seconds,
+            retrieved_tools=(
+                self._trace_tool_names(selected_resources_names) if self.use_tool_retriever else []
+            ),
+        )
 
         inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
         config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
@@ -1860,11 +2221,17 @@ Each library is listed with its description to help you understand its functiona
         # Store the final conversation state for markdown generation
         final_state = None
 
-        for s in self.app.stream(inputs, stream_mode="values", config=config):
-            message = s["messages"][-1]
-            out = pretty_print(message)
-            self.log.append(out)
-            final_state = s  # Store the latest state
+        try:
+            for s in self.app.stream(inputs, stream_mode="values", config=config):
+                message = s["messages"][-1]
+                out = pretty_print(message)
+                self.log.append(out)
+                final_state = s  # Store the latest state
+        except Exception as exc:
+            self._trace_finish(final_state, error=exc)
+            raise
+
+        self._trace_finish(final_state)
 
         # Store the conversation state for markdown generation
         self._conversation_state = final_state
@@ -1885,10 +2252,22 @@ Each library is listed with its description to help you understand its functiona
         """
         self.critic_count = 0
         self.user_task = prompt
+        self._context_wrap_ups = 0
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
             self.update_system_prompt_with_selected_resources(selected_resources_names)
+
+        self.tracer.start_run(
+            prompt,
+            llm=str(getattr(self.llm, "model_name", None) or getattr(self.llm, "model", "unknown")),
+            source=str(getattr(self, "_llm_source", None) or "unknown"),
+            use_tool_retriever=bool(self.use_tool_retriever),
+            timeout_seconds=self.timeout_seconds,
+            retrieved_tools=(
+                self._trace_tool_names(selected_resources_names) if self.use_tool_retriever else []
+            ),
+        )
 
         inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
         config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
@@ -1897,14 +2276,20 @@ Each library is listed with its description to help you understand its functiona
         # Store the final conversation state for markdown generation
         final_state = None
 
-        for s in self.app.stream(inputs, stream_mode="values", config=config):
-            message = s["messages"][-1]
-            out = pretty_print(message)
-            self.log.append(out)
-            final_state = s  # Store the latest state
+        try:
+            for s in self.app.stream(inputs, stream_mode="values", config=config):
+                message = s["messages"][-1]
+                out = pretty_print(message)
+                self.log.append(out)
+                final_state = s  # Store the latest state
 
-            # Yield the current step
-            yield {"output": out}
+                # Yield the current step
+                yield {"output": out}
+        except Exception as exc:
+            self._trace_finish(final_state, error=exc)
+            raise
+
+        self._trace_finish(final_state)
 
         # Store the conversation state for markdown generation
         self._conversation_state = final_state
@@ -2895,7 +3280,7 @@ Each library is listed with its description to help you understand its functiona
                 return
             source, model = selected.split(": ", 1)
             try:
-                self.llm = get_llm(model, source=source, config=default_config)
+                self.set_model(model, source=source)
                 print(f"Switched model to {source}: {model}")
             except Exception as e:
                 print(f"Failed to switch model to {selected}: {e}")
@@ -3034,6 +3419,31 @@ Each library is listed with its description to help you understand its functiona
         if "biomni_verified" not in st.session_state:
             st.session_state.biomni_verified = not require_verification
 
+        # Identity for the background-run registry. A run outlives the script
+        # execution that started it, so it cannot be held in a local; it lives
+        # in a module-level dict in `biomentis.run_worker` keyed by this id.
+        # Session state is the right home for the key itself: it is per-browser
+        # -session and survives every rerun.
+        if "biomni_session_key" not in st.session_state:
+            st.session_state.biomni_session_key = uuid.uuid4().hex
+        _session_key = st.session_state.biomni_session_key
+        # `biomni_run_cursor` is how many of this run's events are already in
+        # the transcript. It is what makes re-attaching after a stray click
+        # exact: the worker keeps every event it ever produced, and the cursor
+        # says where this session stopped consuming them.
+        st.session_state.setdefault("biomni_run_cursor", 0)
+        _runner = get_run(_session_key)
+
+        # A finished run whose events have all been consumed is just clutter
+        # in the registry; drop it so the next submit starts clean.
+        if (
+            _runner is not None
+            and _runner.done
+            and _runner.pending_from(st.session_state.biomni_run_cursor) == 0
+        ):
+            clear_run(_session_key)
+            _runner = None
+
         if not st.session_state.biomni_verified:
             st.title("Biomentis AI Agent - Access Verification")
             code = st.text_input("Access Code", type="password")
@@ -3062,11 +3472,22 @@ Each library is listed with its description to help you understand its functiona
                 if selected and selected != st.session_state.get("biomni_selected_model"):
                     source, model = selected.split(": ", 1)
                     try:
-                        self.llm = get_llm(model, source=source, config=default_config)
+                        self.set_model(model, source=source)
                         st.session_state.biomni_selected_model = selected
                         st.sidebar.success(f"Switched model to {selected}")
                     except Exception as e:
                         st.sidebar.error(f"Failed to switch model: {e}")
+
+        # Recovery panel: every run is journaled to disk step by step, so a
+        # run lost to a crash or an app restart can be put back on screen and
+        # its generated code downloaded. Rendered for tutor and research mode
+        # alike, and before the run block so it is reachable mid-run.
+        try:
+            from biomentis.ui_recovery import render_run_recovery
+
+            render_run_recovery(st.sidebar)
+        except Exception as e:  # a recovery panel must never break the app
+            print(f"run recovery panel unavailable: {e!r}")
 
         # File attachments live next to the agent's prompt input (below the
         # transcript) instead of in the sidebar, so the boundary between
@@ -3080,39 +3501,104 @@ Each library is listed with its description to help you understand its functiona
         # by row, so the user asked for tabs. The file-uploader / prompt
         # form below is a shared input and stays outside the tabs so it's
         # visible regardless of which view is active.
-        #
-        # While a run is in flight, swap the order so the Executor tab
-        # is the active (first) tab — new users wouldn't otherwise know
-        # the activity is happening in the other tab. `st.tabs` in
-        # Streamlit 1.42 has no programmatic-switch API, so we
-        # re-render the labels in the desired order each rerun; the
-        # first label is always the active one. The tab labels are
-        # identical either way, so this is a pure UX change.
+        # A live worker is authoritative: a run in flight on a background
+        # thread is running whether or not the flag survived the last rerun.
+        if _runner is not None and _runner.is_alive():
+            st.session_state.biomni_run_active = True
         _in_run = bool(st.session_state.get("biomni_run_active"))
-        _tab_labels = (
-            ["Biomentis Executor", "Biomentis AI Agent"]
-            if _in_run
-            else ["Biomentis AI Agent", "Biomentis Executor"]
-        )
-        _first_tab, _second_tab = st.tabs(_tab_labels)
-        if _in_run:
-            tab_main, tab_inner = _second_tab, _first_tab
-        else:
-            tab_main, tab_inner = _first_tab, _second_tab
-        # Alias the tab handles to the variable names the rest of the
-        # method uses (`main_col` / `inner_col`). The dispatch in the
-        # entry-rendering loop and the live-stream loop reads off each
-        # entry's `panel` tag, so it works unchanged.
-        main_col, inner_col = tab_main, tab_inner
-        # Tab labels already convey the panel name; the per-column
-        # subheader was redundant.
 
-        # Live "elapsed" caption at the top of the Executor tab. Each
-        # streaming event triggers a rerun, so the value updates on its
-        # own — no autorefresh needed. Hidden when no run is active.
+        # Run status, rendered ABOVE the tabs and therefore outside both of
+        # them, so it reads the same whichever tab you are on. This is the
+        # gap the old auto-switch existed to paper over: the elapsed caption
+        # used to live inside the Executor tab, invisible from the other one,
+        # so a new user had no way to tell where the activity was without
+        # being moved there. Each streaming event triggers a rerun, so the
+        # elapsed value updates on its own — no autorefresh needed.
         if _in_run and st.session_state.get("biomni_run_started_at") is not None:
             _elapsed = time.monotonic() - st.session_state.biomni_run_started_at
-            inner_col.caption(f"⏱  {_elapsed:0.1f}s elapsed")
+            if _runner is not None and _runner.is_alive():
+                # The run is on its own thread, so clicking things no longer
+                # kills it. Say so: the old behavior trained users to sit on
+                # their hands for twenty minutes, and the whole point of the
+                # worker is that they no longer have to.
+                st.caption(
+                    f"⏳ Running · {format_duration(_elapsed)} · "
+                    f"output landing in **{_TAB_INNER_LABEL}** · "
+                    "runs in the background — clicking around won't stop it"
+                )
+                if st.button(
+                    "⏹ Stop run",
+                    key="biomni_stop_run",
+                    help=(
+                        "Ends the run at the next step boundary. A step already "
+                        "in flight (an LLM call, or code that is executing) has "
+                        "to finish first — everything produced up to that point "
+                        "is kept."
+                    ),
+                ):
+                    _runner.cancel()
+                    st.rerun()
+            else:
+                st.caption(
+                    f"⏳ Running · {format_duration(_elapsed)} · "
+                    f"output landing in **{_TAB_INNER_LABEL}**"
+                )
+        elif st.session_state.get("biomni_last_run_duration"):
+            st.caption(
+                f"✅ Done · {st.session_state['biomni_last_run_duration']} · "
+                f"answer ready in **{_TAB_MAIN_LABEL}**"
+            )
+
+        # Whether the tabs track their own selection. This is the single
+        # knob that decides whether clicking a tab costs a rerun, and it is
+        # deliberately tied to whether a rerun is *safe* right now:
+        #
+        #   tutor gating the run → stateful. The walkthrough already
+        #     advances one step per rerun with the generator parked in
+        #     session state, so an extra rerun costs nothing. We get real
+        #     programmatic focus and manual-pin tracking in exchange.
+        #
+        #   otherwise (research mode, or the tutor installed but switched
+        #     off) → NOT stateful. A research run streams start to finish
+        #     inside a single script execution, so a rerun part-way through
+        #     would tear the run down and lose it. Untracked tabs send no
+        #     state back to the server, so clicking one is inert: no rerun,
+        #     no restart. That is the pre-existing behavior and it is worth
+        #     more than auto-focus — the run banner above already says
+        #     where the output is landing.
+        _tutor = st.session_state.get("biomni_tutor")
+        _tabs_stateful = stream_fn is not None and bool(getattr(_tutor, "enabled", False))
+
+        if _tabs_stateful:
+            # Apply any pending focus request. This MUST happen before the
+            # `st.tabs` call below — Streamlit raises if a widget's key is
+            # written after the widget is instantiated. A user who has
+            # manually picked a tab is left alone until the next run starts.
+            _intent = st.session_state.pop(_TAB_INTENT_KEY, None)
+            if _intent in (_TAB_MAIN_LABEL, _TAB_INNER_LABEL) and not st.session_state.get(
+                _TAB_PINNED_KEY
+            ):
+                st.session_state[_TAB_KEY] = _intent
+
+            # Fixed labels in a fixed order — see the `_TAB_*` constants at
+            # the top of this module for why neither may vary.
+            main_col, inner_col = st.tabs(
+                [_TAB_MAIN_LABEL, _TAB_INNER_LABEL],
+                key=_TAB_KEY,
+                on_change=_note_manual_tab_switch,
+            )
+        else:
+            # Drop any focus request rather than letting it go stale and
+            # fire later, the first time the tutor is switched on.
+            st.session_state.pop(_TAB_INTENT_KEY, None)
+            main_col, inner_col = st.tabs(
+                [_TAB_MAIN_LABEL, _TAB_INNER_LABEL], key=_TAB_KEY
+            )
+        # `main_col` / `inner_col` keep their historical names either way:
+        # the entry-rendering loop and the live-stream loop dispatch off
+        # each entry's `panel` tag, so they work unchanged.
+        # Tab labels already convey the panel name; the per-column
+        # subheader was redundant.
 
         def export_entries(panel):
             # The per-step "Ask about this step" Q&A isn't part of
@@ -3320,7 +3806,14 @@ Each library is listed with its description to help you understand its functiona
                     "Send button or Ctrl+Enter / Cmd+Enter."
                 ),
             )
-            submitted = st.form_submit_button("Send", use_container_width=False)
+            # `on_click` fires before the script body reruns, so the focus
+            # request is in place by the time `st.tabs` is built above in
+            # that same rerun. Setting it from the submit handler below
+            # would be both one rerun late and illegal (the tabs widget is
+            # already instantiated by then).
+            submitted = st.form_submit_button(
+                "Send", use_container_width=False, on_click=_focus_executor_for_new_run
+            )
         prompt = prompt_text.strip() if submitted else ""
         st.session_state.biomni_prompt_draft = "" if submitted else prompt_text
 
@@ -3366,181 +3859,217 @@ Each library is listed with its description to help you understand its functiona
             else:
                 prompt = ""
 
-        if prompt or (_tutor_continue and _tutor_run_prompt is not None):
-            # In tutor-resume mode, the prompt is the in-flight run's prompt.
-            effective_prompt = prompt or _tutor_run_prompt or ""
+        # Two ways into the run block. Starting a turn is the obvious one.
+        # *Resuming* one is the reason a stray click is no longer fatal: the
+        # worker thread kept going while this script was being torn down and
+        # re-executed, so there are events waiting to be rendered even though
+        # nothing was submitted this time round.
+        _starting = bool(prompt) or (_tutor_continue and _tutor_run_prompt is not None)
+        _resuming = _runner is not None and (
+            _runner.is_alive() or _runner.pending_from(st.session_state.biomni_run_cursor) > 0
+        )
 
-            # Start the per-task timer the moment we begin. The matching
-            # stop point is the `complete` event below. `monotonic()`
-            # is wall-clock-immune (DST / NTP jumps don't produce
-            # negative durations). The flag also drives the tab
-            # reorder: while a run is in flight, the Executor tab
-            # becomes the active (first) tab.
-            st.session_state.biomni_run_started_at = time.monotonic()
-            st.session_state.biomni_run_active = True
+        # Starting a second turn while one is in flight would have two threads
+        # driving the same agent object and the same LangGraph thread id.
+        # Before background runs this was impossible (the script was blocked);
+        # now it has to be refused explicitly.
+        if _starting and _runner is not None and _runner.is_alive():
+            st.warning(
+                "A run is already in progress — it is still going in the "
+                "background. Wait for it to finish, or press **Stop run** "
+                "above, before starting another task."
+            )
+            st.session_state.biomni_prompt_draft = prompt
+            _starting = False
+
+        if _starting or _resuming:
+            # In tutor-resume mode the prompt is the in-flight run's prompt;
+            # when re-attaching to a background run it is that run's prompt.
+            effective_prompt = prompt or _tutor_run_prompt or (_runner.prompt if _runner else "")
 
             files = []
-            saved_dir = os.path.join(self.path, "streamlit_uploads")
-            for uploaded in uploaded_files or []:
-                os.makedirs(saved_dir, exist_ok=True)
-                dest = os.path.join(saved_dir, uploaded.name)
-                with open(dest, "wb") as f:
-                    f.write(uploaded.getbuffer())
-                files.append(dest)
-
             history_messages = []
-            for msg in self.main_history_copy:
-                if msg["role"] == "user":
-                    history_messages.append(HumanMessage(content=msg["content"]))
-                elif msg["role"] == "assistant":
-                    history_messages.append(AIMessage(content=msg["content"]))
 
-            # Only append a user-message to the history if this is a *new*
-            # prompt, not a tutor-resume. Resume re-uses the same prompt.
-            if prompt:
-                self.main_history_copy += [{"role": "user", "content": prompt}]
-                user_entry = {"panel": "main", "role": "user", "content": prompt}
-                st.session_state.biomni_transcript.append(user_entry)
-                render_entry(main_col, user_entry)
+            if _starting:
+                # Start the per-task timer the moment we begin. The matching
+                # stop point is the `complete` event below. `monotonic()`
+                # is wall-clock-immune (DST / NTP jumps don't produce
+                # negative durations). The flag drives the run banner above
+                # the tabs; focus itself is moved by the Send button's
+                # `on_click` callback, which runs early enough to matter.
+                st.session_state.biomni_run_started_at = time.monotonic()
+                st.session_state.biomni_run_active = True
+                st.session_state.biomni_last_run_duration = ""
 
-            code_execution_entries = []
+                saved_dir = os.path.join(self.path, "streamlit_uploads")
+                for uploaded in uploaded_files or []:
+                    os.makedirs(saved_dir, exist_ok=True)
+                    dest = os.path.join(saved_dir, uploaded.name)
+                    with open(dest, "wb") as f:
+                        f.write(uploaded.getbuffer())
+                    files.append(dest)
+
+                for msg in self.main_history_copy:
+                    if msg["role"] == "user":
+                        history_messages.append(HumanMessage(content=msg["content"]))
+                    elif msg["role"] == "assistant":
+                        history_messages.append(AIMessage(content=msg["content"]))
+
+                # Only append a user-message to the history if this is a *new*
+                # prompt, not a tutor-resume. Resume re-uses the same prompt.
+                if prompt:
+                    self.main_history_copy += [{"role": "user", "content": prompt}]
+                    user_entry = {"panel": "main", "role": "user", "content": prompt}
+                    st.session_state.biomni_transcript.append(user_entry)
+                    render_entry(main_col, user_entry)
+
+            # Retro-titling a code block with "done in Xs" needs the code
+            # entries of *this* run. On a resume they are already in the
+            # transcript rather than in a local, so recover them from there —
+            # everything after the last user message belongs to this turn.
+            _last_user = max(
+                (i for i, e in enumerate(st.session_state.biomni_transcript) if e.get("role") == "user"),
+                default=-1,
+            )
+            code_execution_entries = [
+                e for e in st.session_state.biomni_transcript[_last_user + 1 :] if e.get("kind") == "code"
+            ]
             _live_step_tracker = _StepBoxTracker(inner_col)
 
             # Resolve the event source: a tutor wrapper if provided, otherwise
             # the default `stream_agent_events` (research mode). Picking this
             # at submit time lets the caller swap the wrapper per session.
             _stream = stream_fn if stream_fn is not None else stream_agent_events
-            for event in _stream(self, effective_prompt, files, history_messages, thread_id):
-                entry = None
-                if event.type == "status":
-                    entry = {"panel": "inner", "role": "assistant", "content": event.content}
-                elif event.type == "reasoning":
-                    entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
-                elif event.type == "solution":
-                    entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
-                    self.main_history_copy += [{"role": "assistant", "content": event.content}]
-                elif event.type == "code":
-                    entry = {
-                        "panel": "inner",
-                        "role": "assistant",
-                        "kind": "code",
-                        "content": event.content,
-                        "language": event.language,
-                        "title": event.title,
-                    }
-                    code_execution_entries.append(entry)
-                elif event.type == "observation":
-                    if code_execution_entries:
-                        code_execution_entries[-1]["title"] = f"🛠️ Code (done in {event.duration:.2f}s)"
-                    entry = {
-                        "panel": "inner",
-                        "role": "assistant",
-                        "kind": "observation",
-                        "content": event.content,
-                        "collapsible": event.collapsible,
-                    }
-                elif event.type == "file":
-                    if event.file_path is None:
-                        entry = {"panel": "inner", "role": "assistant", "content": "", "title": event.title}
-                    elif event.file_kind == "pdf":
-                        entry = {
-                            "panel": "inner",
-                            "role": "assistant",
-                            "content": event.content,
-                            "title": event.title,
-                        }
-                    else:
-                        entry = {
-                            "panel": "inner",
-                            "role": "assistant",
-                            "kind": "image",
-                            "file_path": event.file_path,
-                            "title": event.title,
-                        }
-                elif event.type == "summary":
-                    entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
-                    self.main_history_copy += [{"role": "assistant", "content": event.content}]
-                elif event.type == "complete":
-                    # End the per-task timer that the submit branch
-                    # started. We append the duration to the existing
-                    # "🔄 Complete" entry's content (title stays the
-                    # same) so the user immediately sees how long the
-                    # task took. Clearing the run-active flag swaps
-                    # the tab order back to A1 Agent on the next
-                    # rerun, completing the auto-switch cycle.
-                    _started = st.session_state.get("biomni_run_started_at")
-                    _duration = time.monotonic() - _started if _started is not None else 0.0
-                    _content = f"{event.content}  ·  total time: {format_duration(_duration)}"
-                    entry = {"panel": "inner", "role": "assistant", "content": _content, "title": event.title}
+
+            if _starting:
+                st.session_state.biomni_run_cursor = 0
+                # Journaled either way: durability and where the run executes
+                # are separate concerns, and opting out of the worker should
+                # not also opt out of having the work on disk.
+                _journal = RunJournal(
+                    effective_prompt,
+                    mode="tutor" if stream_fn is not None else "research",
+                    llm=get_llm_display_name(self.llm),
+                    files=list(files),
+                    thread_id=thread_id,
+                )
+                st.session_state.biomni_run_journal = _journal.path
+                if background_runs_enabled():
+                    # The stream is built on the worker thread, not here: the
+                    # tutor's `_create_run` parks the live generator in session
+                    # state, and creating it on the thread that will drive it
+                    # keeps creation and consumption together.
+                    _runner = start_run(
+                        _session_key,
+                        effective_prompt,
+                        lambda: _stream(self, effective_prompt, files, history_messages, thread_id),
+                        journal=_journal,
+                    )
+                else:
+                    # Opt-out path (`BIOMENTIS_BACKGROUND_RUNS=0`): drive the
+                    # stream inline on the script thread, exactly as before.
+                    _runner = None
+                    _inline_stream = journaled(
+                        _stream(self, effective_prompt, files, history_messages, thread_id), _journal
+                    )
+
+            _cursor = st.session_state.biomni_run_cursor
+            _events = _runner.events_from(_cursor) if _runner is not None else _inline_stream
+            # A run that raises must not leave `biomni_run_active` set:
+            # the flag drives the run banner, and a stuck True claims a
+            # run is in flight forever. Deliberately an `except` and not
+            # a `finally` — in tutor mode this generator legitimately
+            # exhausts after every step while the walkthrough is still
+            # going, and a `finally` would clear the flag on every pause.
+            #
+            # Note this does NOT catch the teardown a stray click causes:
+            # Streamlit's `RerunException` derives from `BaseException`
+            # precisely so user code cannot swallow it. That used to leave the
+            # flag stuck at True and the banner claiming a run was in flight
+            # forever. It no longer matters — the run really *is* still in
+            # flight on the worker thread, and the next script execution
+            # re-attaches to it and clears the flag when it genuinely ends.
+            try:
+                for event in _events:
+                    # One shared mapping with `biomentis.ui_core`, so a run
+                    # restored from a journal renders exactly like the live
+                    # one that produced it.
+                    entry = transcript_entry_for_event(event, code_execution_entries)
+
+                    if event.type in ("solution", "summary"):
+                        self.main_history_copy += [{"role": "assistant", "content": event.content}]
+                    elif event.type == "complete":
+                        # End the per-task timer that the submit branch
+                        # started, and stamp the duration onto the entry so
+                        # the user sees how long the task took.
+                        #
+                        # Three cases, because a `complete` event does not
+                        # always own the clock:
+                        #
+                        #  - The producer timed itself (`event.duration` set).
+                        #    The tutor's "✅ Done" does this: its content
+                        #    already reports agent-compute and session time,
+                        #    and those are the numbers that mean something
+                        #    for a walkthrough. Appending our own total would
+                        #    contradict them.
+                        #  - Nothing timed it and a run is in flight — the
+                        #    research-mode path. Stamp it ourselves.
+                        #  - Nothing timed it and no run is in flight: this
+                        #    is a second completion for a run that already
+                        #    ended. Render it plainly instead of stamping
+                        #    "total time: 0.0s" on it and overwriting the
+                        #    duration the real completion already recorded.
+                        _started = st.session_state.get("biomni_run_started_at")
+                        _stamp = None
+                        if event.duration is not None:
+                            _stamp = format_duration(event.duration)
+                        elif _started is not None:
+                            _elapsed = time.monotonic() - _started
+                            if entry is not None:
+                                entry["content"] = (
+                                    f"{event.content}  ·  total time: {format_duration(_elapsed)}"
+                                )
+                            _stamp = format_duration(_elapsed)
+                        # Focus is deliberately NOT moved back here. The run
+                        # ending is no reason to pull someone off the Executor
+                        # log mid-sentence; the banner above the tabs says where
+                        # the answer landed and they can move when they choose.
+                        # Stash the duration before clearing `..._started_at`,
+                        # which is what makes it unrecoverable for the banner.
+                        if _stamp is not None:
+                            st.session_state.biomni_last_run_duration = _stamp
+                        st.session_state.biomni_run_active = False
+                        st.session_state.biomni_run_started_at = None
+
+                    if entry is not None:
+                        st.session_state.biomni_transcript.append(entry)
+                        _live_step_tracker.render(entry, render_entry, main_col)
+
+                    # Advance the cursor per event, not per rendered entry:
+                    # some events produce none, and the cursor indexes the
+                    # worker's event list. Written immediately after the
+                    # transcript append so a teardown between the two can cost
+                    # at most the one event that was mid-render — and that one
+                    # is still in the journal.
+                    _cursor += 1
+                    st.session_state.biomni_run_cursor = _cursor
+            except Exception:
+                st.session_state.biomni_run_active = False
+                st.session_state.biomni_run_started_at = None
+                st.session_state.biomni_last_run_duration = ""
+                raise
+
+            # The worker raised. It cannot re-raise on the script thread by
+            # itself, so surface it here, where the old inline loop's
+            # traceback used to appear.
+            if _runner is not None and _runner.error is not None:
+                st.session_state.biomni_run_active = False
+                st.session_state.biomni_run_started_at = None
+                st.error(f"Run failed: {type(_runner.error).__name__}: {_runner.error}")
+
+            if _runner is not None and _runner.done:
+                if _runner.cancelled:
+                    st.info("Run stopped. Everything produced up to that point is kept above.")
                     st.session_state.biomni_run_active = False
                     st.session_state.biomni_run_started_at = None
-                elif event.type == "instruction":
-                    # Tutor-layer teaching card. Lands in the inner panel right
-                    # after the event it explains. `card` carries the structured
-                    # fields (what/why/prereqs/look_for/citations/bloom/dok);
-                    # the renderer in ui_tutor.py (or render_entry fallback)
-                    # handles the visual layout.
-                    entry = {
-                        "panel": "inner",
-                        "role": "assistant",
-                        "kind": "instruction",
-                        "content": event.content,
-                        "title": event.title or "🎓 Teaching note",
-                        "card": getattr(event, "card", None),
-                    }
-                elif event.type == "roadmap":
-                    # One-time, run-level plan preview yielded before the
-                    # first per-step instruction card. `card` carries the
-                    # structured fields (overview/steps); same rich/fallback
-                    # rendering pattern as "instruction".
-                    entry = {
-                        "panel": "inner",
-                        "role": "assistant",
-                        "kind": "roadmap",
-                        "content": event.content,
-                        "title": event.title or "🗺️ Roadmap for this task",
-                        "card": getattr(event, "card", None),
-                    }
-                elif event.type == "paused":
-                    # The tutor wrapper yields a "paused" event to halt the
-                    # stream. The render loop shows a Continue button when it
-                    # sees this; the run resumes on the next rerun.
-                    entry = {
-                        "panel": "inner",
-                        "role": "assistant",
-                        "kind": "paused",
-                        "content": event.content,
-                        "title": event.title or "⏸ Paused",
-                        "step_id": getattr(event, "step_id", None),
-                        "run_id": getattr(event, "run_id", None),
-                    }
-                elif event.type == "qa":
-                    entry = {
-                        "panel": "main",
-                        "role": "assistant",
-                        "kind": "qa",
-                        "content": event.content,
-                        "title": event.title or "💬 Tutor Q&A",
-                    }
-                elif event.type == "rubric_update":
-                    entry = {
-                        "panel": "inner",
-                        "role": "assistant",
-                        "kind": "text",
-                        "content": event.content,
-                        "title": event.title or "📋 Rubric updated",
-                    }
-
-                if entry is not None:
-                    # Every instruction-bearing event is tagged with the
-                    # step it belongs to before it's yielded (see
-                    # ui_tutor.py's _advance_run_live); carry that onto
-                    # the transcript entry uniformly so the render loop
-                    # can group a step's raw output with its teaching
-                    # card and Q&A box regardless of entry kind. Absent
-                    # in research mode / non-instruction-bearing events —
-                    # those just render ungrouped, as before.
-                    entry.setdefault("step_id", getattr(event, "step_id", None))
-                    entry.setdefault("run_id", getattr(event, "run_id", None))
-                    st.session_state.biomni_transcript.append(entry)
-                    _live_step_tracker.render(entry, render_entry, main_col)
+                clear_run(_session_key)

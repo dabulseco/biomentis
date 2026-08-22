@@ -178,6 +178,14 @@ def _build_user_prompt(
                 bits.append(f"what={c['what']}")
             if c.get("why"):
                 bits.append(f"why={c['why']}")
+            # The card's technical lens fills `why` above; carry the
+            # scientific lens separately when it exists, since follow-up
+            # questions ("why does this matter?", "how does this help
+            # answer my question?") are usually about that one.
+            if c.get("scientific_why"):
+                bits.append(f"scientific_why={c['scientific_why']}")
+            if c.get("impact"):
+                bits.append(f"impact_on_answer={c['impact']}")
             label = "CURRENT STEP" if i == len(cards) else f"step {i}"
             parts.append(f"{label}: " + " | ".join(bits))
 

@@ -81,7 +81,7 @@ description = [
         ],
     },
     {
-        "description": "Search using Google search and return formatted results.",
+        "description": "Search the web and return formatted results (title, URL, description). Requires no API key: uses DuckDuckGo, falling back to Google.",
         "name": "search_google",
         "optional_parameters": [
             {
@@ -133,7 +133,7 @@ description = [
         ],
     },
     {
-        "description": "Initiate an advanced web search by launching a specialized agent to collect relevant information and citations through multiple rounds of web searches for a given query.",
+        "description": "Initiate an advanced web search by launching a specialized agent to collect relevant information and citations through multiple rounds of web searches for a given query. If no valid ANTHROPIC_API_KEY is available it automatically degrades to a keyless DuckDuckGo search rather than failing.",
         "name": "advanced_web_search_claude",
         "optional_parameters": [
             {

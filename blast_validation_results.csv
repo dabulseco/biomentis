@@ -1,0 +1,7 @@
+primer,species,type,matches
+TAAGGTTACTCCTGTTGCTTCAGGC,Gracilaria_coronopifolia,fwd,0
+CCCATCTGGATGGCCAATTGTGCCT,Gracilaria_coronopifolia,rev,0
+GTAAAGTTACACCTGTAGCTTCAGGT,Gracilaria_parvispora,fwd,0
+TCCATCCGGATGGCCAATTGTACCT,Gracilaria_parvispora,rev,0
+TGGTAGAGTTGTATATGAAGGTCTTAAAGGTGGT,Gracilaria_salicornia,fwd,0
+ACCAGCCATACGCATCCACTTGCAA,Gracilaria_salicornia,rev,0

@@ -13,7 +13,7 @@ from typing import Any
 from biomentis.agent.tutor import memory as critic_memory
 from biomentis.agent.tutor.chat import TutorChat
 from biomentis.agent.tutor.critic import Critic, CritiqueCard
-from biomentis.agent.tutor.instruction import InstructionGenerator
+from biomentis.agent.tutor.instruction import ALL_MODES, InstructionGenerator, normalize_modes
 from biomentis.agent.tutor.kb import KnowledgeBase
 from biomentis.agent.tutor.log import SessionLogger
 from biomentis.agent.tutor.rubric import Rubric
@@ -45,6 +45,14 @@ class TutorEngine:
         self.session_id = session_id
         self.llm = llm
         self.enabled: bool = False
+        # Which instructional lenses the student has switched on. The
+        # master `enabled` flag gates the step-by-step walkthrough (cards
+        # + pause gates); `modes` gates WHAT each card teaches. Both on by
+        # default, but either can be turned off independently — including
+        # both, which leaves the walkthrough pacing and per-step Q&A in
+        # place while generating no teaching text (and spending no tokens
+        # on it).
+        self.modes: tuple[str, ...] = ALL_MODES
         # Per-engine Critic instance. Phase A's Critic returns a fixed card;
         # Phase B's Critic uses a real LLM. By default the Critic shares the
         # agent's LLM; the Streamlit sidebar can pass a different
@@ -69,7 +77,9 @@ class TutorEngine:
             session_id,
             path=os.path.join(path, "tutor_logs"),
         )
-        self.instruction_gen = InstructionGenerator(llm, knowledge_base=self.kb)
+        self.instruction_gen = InstructionGenerator(
+            llm, knowledge_base=self.kb, modes=self.modes
+        )
         # Chat is constructed last so it can hold references to the rubric
         # and logger (for Bloom/DOK classification and Q&A logging).
         self.chat = TutorChat(
@@ -101,6 +111,25 @@ class TutorEngine:
 
     def disable(self) -> None:
         self.enabled = False
+
+    # --- instructional modes ---------------------------------------------
+
+    def set_modes(self, modes) -> None:
+        """Set which instructional lenses the cards teach.
+
+        Called by the sidebar whenever a mode toggle flips. Kept separate
+        from `enable()/disable()` because the two answer different
+        questions: `enabled` is "walk me through this run step by step",
+        `modes` is "and explain each step technically / scientifically /
+        both / neither".
+        """
+        self.modes = normalize_modes(modes)
+        self.instruction_gen.set_modes(self.modes)
+
+    def modes_enabled(self) -> bool:
+        """True when at least one instructional lens is on, i.e. cards
+        will actually carry teaching content."""
+        return bool(self.modes)
 
     def record_run(
         self,

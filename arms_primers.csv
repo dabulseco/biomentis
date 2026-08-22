@@ -1,0 +1,6 @@
+species,fwd_primer,rev_primer,fwd_snp_pos,fwd_snp_base,rev_snp_pos,rev_snp_base,amplicon_size,fwd_gc,fwd_tm,rev_gc,rev_tm,fwd_mismatches,rev_mismatches,min_fwd_mm,min_rev_mm
+Gracilaria_coronopifolia,ACTCCTGTTGCTTCAGGC,CCCATCTGGATGGCCAAT,1125,C,1221,G,114,55.6,50.3,55.6,50.3,"{'Gracilaria_parvispora': 3, 'Gracilaria_salicornia': 2}","{'Gracilaria_parvispora': 2, 'Gracilaria_salicornia': 2}",2,2
+Gracilaria_parvispora,GTTACACCTGTAGCTTCAGGT,TCCATCCGGATGGCCAAT,1125,T,1221,A,117,47.6,52.4,55.6,50.3,"{'Gracilaria_coronopifolia': 3, 'Gracilaria_salicornia': 2}","{'Gracilaria_coronopifolia': 2, 'Gracilaria_salicornia': 3}",2,2
+Gracilaria_salicornia,GTGGATGCGTATGGCTGGT,TCCTGAAGCAACAGGTGTAAC,951,T,1125,A,193,57.9,53.2,47.6,52.4,"{'Gracilaria_coronopifolia': 2, 'Gracilaria_parvispora': 2}","{'Gracilaria_coronopifolia': 2, 'Gracilaria_parvispora': 2}",2,2
+Gracilaria_salicornia,GTGGATGCGTATGGCTGGT,TATACCTCCTGAAGCAACAGG,951,T,1131,A,199,57.9,53.2,47.6,52.4,"{'Gracilaria_coronopifolia': 2, 'Gracilaria_parvispora': 2}","{'Gracilaria_coronopifolia': 2, 'Gracilaria_parvispora': 3}",2,2
+Gracilaria_salicornia,GTGGATGCGTATGGCTGGT,ACCATCTGGATGTCCAATTGT,951,T,1221,T,289,57.9,53.2,42.9,50.5,"{'Gracilaria_coronopifolia': 2, 'Gracilaria_parvispora': 2}","{'Gracilaria_coronopifolia': 2, 'Gracilaria_parvispora': 3}",2,2

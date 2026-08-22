@@ -222,3 +222,9 @@ docs/build/
 # TODO scratch (editors create these)
 TODO.md
 NOTES.md
+
+# Step-level agent traces written by biomentis.eval.step_trace
+traces/
+
+# Per-run event journals written by biomentis.run_journal
+runs/

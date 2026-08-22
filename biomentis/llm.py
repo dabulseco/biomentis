@@ -10,6 +10,62 @@ SourceType = Literal["OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "Gemini", "
 ALLOWED_SOURCES: set[str] = set(SourceType.__args__)
 
 
+# Client classes that end up NOT applying stop sequences, and why. Anything
+# not listed here is treated as a bug by `_check_stop_sequences` below: the
+# caller asked for stop sequences and the client dropped them.
+#
+# This registry exists because the failure mode is invisible. `ChatOllama` has
+# a field named `stop` and no `stop_sequences` alias, so passing the name every
+# other branch uses is accepted with no warning, no `model_kwargs`, and the
+# value simply disappears. A branch that looks identical to its working
+# neighbours can be doing nothing at all, and nothing says so.
+STOP_SEQUENCE_EXEMPT_CLIENTS: dict[str, str] = {
+    "ChatOllama": (
+        "ChatOllama takes `stop=`, not `stop_sequences=`. Left unset deliberately: "
+        "the default local model is a reasoning model that can emit `</execute>` "
+        "while planning, and an API-side stop would cut it off mid-thought. The "
+        "generate loop truncates at the first closing tag instead — see "
+        "biomentis.utils.truncate_after_first_tag."
+    ),
+    "_ChatOpenAIResponsesNoStop": (
+        "gpt-5 models reject `stop` on the Responses API, so the subclass sets it on "
+        "the client and then drops it from the payload. Same local truncation applies."
+    ),
+}
+
+
+def stop_sequences_applied(llm: BaseChatModel) -> bool:
+    """Whether a constructed client actually carries stop sequences.
+
+    The two provider SDKs spell it differently and mirror each other:
+    `ChatOpenAI` has `stop` aliased to `stop_sequences`, `ChatAnthropic` has
+    `stop_sequences` aliased to `stop`. Checking both is what makes this
+    provider-agnostic.
+    """
+    return bool(getattr(llm, "stop", None) or getattr(llm, "stop_sequences", None))
+
+
+def _check_stop_sequences(llm: BaseChatModel, stop_sequences: list[str] | None) -> BaseChatModel:
+    """Say something when a caller asks for stop sequences and they vanish.
+
+    Only fires for an *undeclared* drop. A known one belongs in
+    `STOP_SEQUENCE_EXEMPT_CLIENTS` with its reason, which is what keeps this
+    signal worth reading; if it ever prints, an SDK renamed a field or a new
+    provider branch forgot to forward them.
+    """
+    if not stop_sequences:
+        return llm
+    name = type(llm).__name__
+    if name in STOP_SEQUENCE_EXEMPT_CLIENTS or stop_sequences_applied(llm):
+        return llm
+    print(
+        f"WARNING: {name} was given stop_sequences={stop_sequences!r} but carries none. "
+        "The kwarg was probably silently dropped — check the field name in that SDK. "
+        "Add it to biomentis.llm.STOP_SEQUENCE_EXEMPT_CLIENTS if the omission is intended."
+    )
+    return llm
+
+
 def get_llm(
     model: str | None = None,
     temperature: float | None = None,
@@ -19,12 +75,46 @@ def get_llm(
     api_key: str | None = None,
     config: Optional["BiomentisConfig"] = None,
 ) -> BaseChatModel:
+    """Build a chat model for the given source, and verify what it was given.
+
+    Takes the same arguments as `_build_llm`, which does the construction and
+    documents them. The only thing added here is `_check_stop_sequences`, so a
+    provider that drops a kwarg on the floor says so instead of looking fine.
     """
+    llm = _build_llm(
+        model=model,
+        temperature=temperature,
+        stop_sequences=stop_sequences,
+        source=source,
+        base_url=base_url,
+        api_key=api_key,
+        config=config,
+    )
+    return _check_stop_sequences(llm, stop_sequences)
+
+
+def _build_llm(
+    model: str | None = None,
+    temperature: float | None = None,
+    stop_sequences: list[str] | None = None,
+    source: SourceType | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    config: Optional["BiomentisConfig"] = None,
+) -> BaseChatModel:
+    """
+    Build a language model instance. Call `get_llm`, not this — it adds the
+    stop-sequence check.
+
     Get a language model instance based on the specified model name and source.
     This function supports models from OpenAI, Azure OpenAI, Anthropic, Ollama, Gemini, Bedrock, and custom model serving.
     Args:
         model (str): The model name to use
-        temperature (float): Temperature setting for generation
+        temperature (float): Sampling temperature. Defaults to the cold
+                      BiomentisConfig.temperature, which is what you want for
+                      code, tool calls and structured output. For divergent
+                      work, pass config.creative_temperature explicitly (see
+                      A1.creative_llm).
         stop_sequences (list): Sequences that will stop generation
         source (str): Source provider: "OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "Gemini", "Bedrock", or "Custom"
                       If None, will attempt to auto-detect from model name
@@ -35,7 +125,7 @@ def get_llm(
     # Use config values for any unspecified parameters
     if config is not None:
         if model is None:
-            model = config.llm_model
+            model = config.llm
         if temperature is None:
             temperature = config.temperature
         if source is None:
@@ -54,7 +144,9 @@ def get_llm(
         # fall through to the Ollama branch (no "/" or known-cloud prefix).
         model = "auto"
     if temperature is None:
-        temperature = 0.7
+        # Matches BiomentisConfig.temperature. Cold, because the overwhelming
+        # majority of calls through this function generate code or tool calls.
+        temperature = 0.2
     if api_key is None:
         api_key = "EMPTY"
     # Auto-detect source from model name if not specified.

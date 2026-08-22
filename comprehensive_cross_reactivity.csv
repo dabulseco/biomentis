@@ -1,0 +1,9 @@
+target,other,result,fwd_mm,rev_mm
+Gracilaria_coronopifolia,Gracilaria coronopifolia,CROSS-REACTIVITY,0.0,0.0
+Gracilaria_parvispora,Portieria hornemannii,PARTIAL,1.0,
+Gracilaria_parvispora,Dasya iridescens,PARTIAL,1.0,
+Gracilaria_parvispora,Gracilaria parvispora,CROSS-REACTIVITY,0.0,0.0
+Gracilaria_parvispora,Gracilaria tikvahiae,CROSS-REACTIVITY,0.0,1.0
+Gracilaria_salicornia,Hypnea chordacea,PARTIAL,,1.0
+Gracilaria_salicornia,Gibsmithia hawaiiensis,PARTIAL,,1.0
+Gracilaria_salicornia,Gracilaria salicornia,CROSS-REACTIVITY,0.0,0.0

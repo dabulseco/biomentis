@@ -114,9 +114,52 @@ def stream_agent_events(
     # drives `agent.app.stream` directly instead of going through either,
     # so it must set it too — `execute_self_critic` reads it back.
     agent.user_task = text_input
+    # Per-run counter for the context guard (see A1._fit_request). `go` and
+    # `go_stream` reset it themselves; this path drives the graph directly.
+    agent._context_wrap_ups = 0
+
+    # Same reasoning for the step tracer, and it had been missed. `start_run`
+    # is what gives the tracer a file to write to; every `record_generate` /
+    # `record_execute` call inside the graph early-returns while it is unset.
+    # Because only `go`/`go_stream` called it, *no UI run had ever been
+    # traced* — the graph dutifully recorded every step into the void.
+    _tracer = getattr(agent, "tracer", None)
+    if _tracer is not None:
+        try:
+            _tracer.start_run(
+                text_input,
+                llm=str(getattr(agent.llm, "model_name", None) or getattr(agent.llm, "model", "unknown")),
+                source=str(getattr(agent, "_llm_source", None) or "unknown"),
+                use_tool_retriever=bool(getattr(agent, "use_tool_retriever", False)),
+                timeout_seconds=getattr(agent, "timeout_seconds", None),
+                surface="ui",
+            )
+        except Exception as exc:  # telemetry must never break a run
+            print(f"[step_trace] could not start run: {exc}")
+            _tracer = None
 
     t = time()
+    # An agent turn can produce MORE THAN ONE <solution>. With
+    # `self_critic=True` (which `streamlit_app.py` enables), the first
+    # <solution> does not end the run: `routing_function` sends it to the
+    # `self_critic` node, which injects "this is not enough to solve the
+    # task" and routes back to `generate`. The agent then keeps working and
+    # emits a better solution later.
+    #
+    # This used to latch on the FIRST solution and ignore every later one,
+    # which silently discarded the real answer — and, because the
+    # end-of-run fallback below was also gated on the same flag, left the
+    # main panel showing nothing but that first attempt. When the model
+    # opened with its plan wrapped in <solution> (a compliant reading of
+    # "every response must include either <execute> or <solution>"), the
+    # user was left staring at a checklist labelled "Answer" while all 27
+    # steps of real work stayed buried in the executor log.
+    #
+    # So: emit every distinct solution, and track the last one so the
+    # end-of-run gate can tell "already shown" from "never shown".
     solution_found = False
+    last_solution: str | None = None
+    solution_round = 0
 
     if agent.use_tool_retriever:
         yield UIEvent(type="status", content="Retrieving relevant tools, data lake items, and libraries...")
@@ -149,10 +192,24 @@ def stream_agent_events(
                 yield UIEvent(type="reasoning", content=thinking, title="🤔 Reasoning")
 
         solution_match = re.search(r"<solution>(.*?)</solution>", content, re.DOTALL)
-        if solution_match and not solution_found:
+        if solution_match:
             solution = solution_match.group(1).strip()
-            yield UIEvent(type="solution", channel="main", content=solution, title="✅ Answer")
-            solution_found = True
+            # Dedupe: the same message can surface across consecutive state
+            # emissions, and re-posting an identical answer helps nobody.
+            if solution and solution != last_solution:
+                solution_round += 1
+                yield UIEvent(
+                    type="solution",
+                    channel="main",
+                    content=solution,
+                    title=(
+                        "✅ Answer"
+                        if solution_round == 1
+                        else f"✅ Answer (revised after self-critique #{solution_round - 1})"
+                    ),
+                )
+                last_solution = solution
+                solution_found = True
 
         execute_match = re.search(r"<execute>(.*?)</execute>", content, re.DOTALL)
         if execute_match:
@@ -217,27 +274,167 @@ def stream_agent_events(
         t = time()
 
     final_content = s["messages"][-1].content if s and s.get("messages") else ""
-    if not solution_found:
-        solution_match = re.search(r"<solution>(.*?)</solution>", final_content, re.DOTALL)
-        if solution_match:
-            yield UIEvent(
-                type="summary", channel="main", content=solution_match.group(1).strip(), title="✅ Solution"
-            )
+    final_match = re.search(r"<solution>(.*?)</solution>", final_content, re.DOTALL)
+    final_solution = final_match.group(1).strip() if final_match else ""
+
+    # Gate on "has the FINAL answer been shown", not on "was any solution
+    # ever seen". Those differ exactly when the run revised its answer, or
+    # when the closing solution only ever appeared in the terminal state.
+    if final_solution and final_solution != last_solution:
+        yield UIEvent(
+            type="summary", channel="main", content=final_solution, title="✅ Solution"
+        )
+    elif not solution_found:
+        # No solution anywhere in the run — the agent stopped without ever
+        # answering (parse-error abort, step exhaustion, a tool loop it
+        # never escaped). Salvage whatever the final message holds rather
+        # than leaving the main panel empty. `final_match` is necessarily
+        # None here: a final solution with nothing emitted yet would have
+        # been caught by the branch above.
+        cleaned = re.sub(r"<execute>.*?</execute>", "", final_content, flags=re.DOTALL)
+        cleaned = re.sub(r"<observation>.*?</observation>", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"\n\s*\n", "\n\n", cleaned).strip()
+        if cleaned:
+            yield UIEvent(type="summary", channel="main", content=cleaned, title="📝 Summary")
         else:
-            cleaned = re.sub(r"<execute>.*?</execute>", "", final_content, flags=re.DOTALL)
-            cleaned = re.sub(r"<observation>.*?</observation>", "", cleaned, flags=re.DOTALL)
-            cleaned = re.sub(r"\n\s*\n", "\n\n", cleaned).strip()
-            if cleaned:
-                yield UIEvent(type="summary", channel="main", content=cleaned, title="📝 Summary")
-            else:
-                yield UIEvent(
-                    type="summary",
-                    channel="main",
-                    content="Task completed. Please check the execution log for details.",
-                    title="📝 Summary",
-                )
+            yield UIEvent(
+                type="summary",
+                channel="main",
+                content="Task completed. Please check the execution log for details.",
+                title="📝 Summary",
+            )
+
+    if _tracer is not None:
+        try:
+            agent._trace_finish(s)
+        except Exception as exc:
+            print(f"[step_trace] could not close run: {exc}")
 
     yield UIEvent(type="complete", content="👈 Returning the result to the main interface...", title="🔄 Complete")
+
+
+def transcript_entry_for_event(
+    event: Any, code_entries: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
+    """Map one `UIEvent` to the transcript entry that renders it.
+
+    Extracted from `launch_streamlit_demo`'s dispatch so that exactly one
+    mapping exists: the live run uses it, and so does a run restored from a
+    `biomentis.run_journal` file. A restored transcript therefore renders
+    identically to the run that produced it, instead of drifting the first
+    time a new event type is added.
+
+    `code_entries` is the list of code entries produced so far in this run.
+    An `observation` retro-titles the code block it belongs to (the one
+    immediately before it), so the caller must pass the same list across the
+    whole run for the "done in Xs" stamp to appear.
+
+    The one thing this does NOT do is stamp a `complete` event with the run's
+    total time: that needs the run clock, which lives in the UI's session
+    state. The caller owns it.
+
+    Returns None for an event that produces no transcript entry.
+    """
+    kind = event.type
+    entry: dict[str, Any] | None = None
+
+    if kind == "status":
+        entry = {"panel": "inner", "role": "assistant", "content": event.content}
+    elif kind == "reasoning":
+        entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
+    elif kind == "solution":
+        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
+    elif kind == "code":
+        entry = {
+            "panel": "inner",
+            "role": "assistant",
+            "kind": "code",
+            "content": event.content,
+            "language": event.language,
+            "title": event.title,
+        }
+        if code_entries is not None:
+            code_entries.append(entry)
+    elif kind == "observation":
+        if code_entries and event.duration is not None:
+            code_entries[-1]["title"] = f"🛠️ Code (done in {event.duration:.2f}s)"
+        entry = {
+            "panel": "inner",
+            "role": "assistant",
+            "kind": "observation",
+            "content": event.content,
+            "collapsible": event.collapsible,
+        }
+    elif kind == "file":
+        if event.file_path is None:
+            entry = {"panel": "inner", "role": "assistant", "content": "", "title": event.title}
+        elif event.file_kind == "pdf":
+            entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
+        else:
+            entry = {
+                "panel": "inner",
+                "role": "assistant",
+                "kind": "image",
+                "file_path": event.file_path,
+                "title": event.title,
+            }
+    elif kind == "summary":
+        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
+    elif kind == "complete":
+        entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
+    elif kind == "instruction":
+        entry = {
+            "panel": "inner",
+            "role": "assistant",
+            "kind": "instruction",
+            "content": event.content,
+            "title": event.title or "🎓 Teaching note",
+            "card": getattr(event, "card", None),
+        }
+    elif kind == "roadmap":
+        entry = {
+            "panel": "inner",
+            "role": "assistant",
+            "kind": "roadmap",
+            "content": event.content,
+            "title": event.title or "🗺️ Roadmap for this task",
+            "card": getattr(event, "card", None),
+        }
+    elif kind == "paused":
+        entry = {
+            "panel": "inner",
+            "role": "assistant",
+            "kind": "paused",
+            "content": event.content,
+            "title": event.title or "⏸ Paused",
+            "step_id": getattr(event, "step_id", None),
+            "run_id": getattr(event, "run_id", None),
+        }
+    elif kind == "qa":
+        entry = {
+            "panel": "main",
+            "role": "assistant",
+            "kind": "qa",
+            "content": event.content,
+            "title": event.title or "💬 Tutor Q&A",
+        }
+    elif kind == "rubric_update":
+        entry = {
+            "panel": "inner",
+            "role": "assistant",
+            "kind": "text",
+            "content": event.content,
+            "title": event.title or "📋 Rubric updated",
+        }
+
+    if entry is not None:
+        # Every instruction-bearing event is tagged with the step it belongs
+        # to before it is yielded (see ui_tutor's `_advance_run_live`); carry
+        # that onto the entry uniformly so the render loop can group a step's
+        # raw output with its teaching card and Q&A box regardless of kind.
+        entry.setdefault("step_id", getattr(event, "step_id", None))
+        entry.setdefault("run_id", getattr(event, "run_id", None))
+    return entry
 
 
 def format_duration(seconds: float) -> str:

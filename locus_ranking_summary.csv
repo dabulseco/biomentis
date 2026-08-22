@@ -1,0 +1,5 @@
+locus,all_species_present,coronopifolia_discrimination,parvispora_discrimination,salicornia_discrimination,triple_diff_positions,recommendation
+rbcL,True,EXCELLENT,GOOD,GOOD,7,PRIMARY
+COI/cox1,True,EXCELLENT,POOR (complex),POOR (complex),N/A,SECONDARY
+28S/LSU,True,POOR,EXCELLENT,MODERATE,3,NOT RECOMMENDED
+ITS,False,N/A,N/A,N/A,N/A,NOT AVAILABLE

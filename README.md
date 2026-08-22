@@ -368,7 +368,8 @@ If you use Biomentis in research or teaching, please also cite the upstream Biom
 | Symptom | Fix |
 |---|---|
 | `ModuleNotFoundError: biomentis` | You forgot to `conda activate biomentis`, or didn’t `pip install -e .` / `pip install biomentis`. |
-| `ModuleNotFoundError: No module named ‘googlesearch’` when the agent calls `search_google` | Install the renamed package: `pip install googlesearch-python`. The literature module loads even if it’s missing — only `search_google` itself fails. |
+| `ModuleNotFoundError: No module named ‘googlesearch’` when the agent calls `search_google` | No longer fatal — web search runs on keyless DuckDuckGo scraping first and only reaches googlesearch-python as a last resort. Install it with `pip install googlesearch-python` if you want that extra provider. |
+| `Error performing web search ... 401 invalid x-api-key` | Your `ANTHROPIC_API_KEY` is stale or lacks web-search access. `advanced_web_search_claude` now detects 401/403 and degrades to a keyless DuckDuckGo search instead of returning an error string to the agent. To skip Anthropic for search entirely, set `BIOMENTIS_WEB_SEARCH=keyless` (or unset the key). |
 | UI opens but every prompt errors with auth | `.env` has a cloud key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) but the matching `BIOMNI_LLM` / `BIOMNI_SOURCE` is missing or wrong. Either remove the cloud key (revert to Ollama default) or set the matching pair plus `BIOMNI_DISABLE_LOCAL_FALLBACK=true`. |
 | Agent tries Anthropic but I want Ollama | Make sure no `ANTHROPIC_API_KEY` (or other cloud key) is in your shell env or `.env`. The local-first fallback in `biomentis/config.py` short-circuits only when the user hasn’t chosen a cloud model. |
 | Agent tries Ollama but I want Anthropic | Uncomment `ANTHROPIC_API_KEY` in `.env` and add `BIOMNI_LLM=claude-sonnet-4-5` + `BIOMNI_SOURCE=Anthropic` + `BIOMNI_DISABLE_LOCAL_FALLBACK=true`. |

@@ -35,8 +35,8 @@ def main():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
-        help="Temperature setting for the LLM (default: 0.7)",
+        default=None,
+        help="Temperature setting for the LLM (default: BIOMNI_TEMPERATURE, cold)",
     )
 
     args = parser.parse_args()

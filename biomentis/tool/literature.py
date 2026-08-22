@@ -2,7 +2,7 @@ import os
 import re
 import time
 from io import BytesIO
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import PyPDF2
 import requests
@@ -14,7 +14,9 @@ from bs4 import BeautifulSoup
 # if they have neither installed, a module-level `from googlesearch import search`
 # breaks the entire literature module — taking down query_pubmed, query_arxiv,
 # and advanced_web_search_claude with it. The lazy import below only fires when
-# the search_google tool is actually called.
+# that provider is actually reached, and it is no longer the only provider —
+# see `keyless_web_search` for the DuckDuckGo backends that need no extra
+# package and no API key at all.
 
 
 def fetch_supplementary_info_from_doi(doi: str, output_dir: str = "supplementary_info"):
@@ -212,66 +214,216 @@ def query_pubmed(query: str, max_papers: int = 10, max_retries: int = 3) -> str:
         return f"Error querying PubMed: {e}"
 
 
-def search_google(query: str, num_results: int = 3, language: str = "en") -> list[dict]:
-    """Search using Google search.
+# ---------------------------------------------------------------------------
+# Keyless web search backends
+# ---------------------------------------------------------------------------
+# Everything below runs with *no* API key and no account: DuckDuckGo's public
+# HTML endpoints are scraped with requests + BeautifulSoup (both already hard
+# dependencies of this module), with googlesearch-python as a last resort.
+#
+# Why this exists: `advanced_web_search_claude` used to hard-fail with
+# "Error code: 401 - invalid x-api-key" whenever ANTHROPIC_API_KEY was set but
+# stale/wrong, and the agent would happily keep reasoning on that error string.
+# Now any Anthropic failure -- and an unset key -- degrades to these providers.
+#
+# Set BIOMENTIS_WEB_SEARCH=keyless to skip Anthropic entirely.
+
+_KEYLESS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def _clean_ddg_url(href: str) -> str:
+    """DuckDuckGo wraps results in /l/?uddg=<encoded>; unwrap to the real URL."""
+    if not href:
+        return ""
+    if href.startswith("//"):
+        href = "https:" + href
+    if "duckduckgo.com/l/" in href or href.startswith("/l/"):
+        target = parse_qs(urlparse(href).query).get("uddg")
+        if target:
+            return unquote(target[0])
+    return href
+
+
+def _search_duckduckgo_html(query: str, num_results: int, timeout: int = 20) -> list[dict]:
+    """Scrape https://html.duckduckgo.com/html/ -- no key, no rate-limit token."""
+    resp = requests.post(
+        "https://html.duckduckgo.com/html/",
+        data={"q": query, "kl": "us-en"},
+        headers=_KEYLESS_HEADERS,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    results = []
+    for node in soup.select("div.result, div.web-result"):
+        link = node.select_one("a.result__a")
+        if link is None:
+            continue
+        url = _clean_ddg_url(link.get("href", ""))
+        if not url:
+            continue
+        snippet = node.select_one(".result__snippet")
+        results.append(
+            {
+                "title": link.get_text(" ", strip=True),
+                "url": url,
+                "description": snippet.get_text(" ", strip=True) if snippet else "",
+            }
+        )
+        if len(results) >= num_results:
+            break
+    return results
+
+
+def _search_duckduckgo_lite(query: str, num_results: int, timeout: int = 20) -> list[dict]:
+    """Scrape https://lite.duckduckgo.com/lite/ -- different markup, same data.
+
+    Kept as a second provider because the two endpoints are rate-limited
+    independently; when the HTML one starts returning an anomaly page this one
+    usually still answers.
+    """
+    resp = requests.post(
+        "https://lite.duckduckgo.com/lite/",
+        data={"q": query},
+        headers=_KEYLESS_HEADERS,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    results, pending = [], None
+    for row in soup.select("tr"):
+        link = row.select_one("a.result-link")
+        if link is not None:
+            if pending is not None:
+                results.append(pending)
+            pending = {
+                "title": link.get_text(" ", strip=True),
+                "url": _clean_ddg_url(link.get("href", "")),
+                "description": "",
+            }
+        elif pending is not None:
+            snippet = row.select_one("td.result-snippet")
+            if snippet is not None:
+                pending["description"] = snippet.get_text(" ", strip=True)
+        if len(results) >= num_results:
+            break
+    if pending is not None and len(results) < num_results:
+        results.append(pending)
+    return [r for r in results if r["url"]][:num_results]
+
+
+def _search_googlesearch_python(query: str, num_results: int, language: str = "en") -> list[dict]:
+    """The original googlesearch-python path, now one provider among several."""
+    # Lazy import: optional dependency, only needed when the DDG providers fail.
+    from googlesearch import search as _google_search
+
+    return [
+        {
+            "title": res.title,
+            "url": res.url,
+            "description": res.description,
+        }
+        for res in _google_search(query, num_results=num_results, lang=language, advanced=True)
+    ]
+
+
+def _format_search_results(results: list[dict]) -> str:
+    """Render provider hits in the shape the agent has always seen."""
+    return "".join(
+        f"Title: {r.get('title', '')}\nURL: {r.get('url', '')}\nDescription: {r.get('description', '')}\n\n"
+        for r in results
+    )
+
+
+def keyless_web_search(query: str, num_results: int = 5, language: str = "en") -> str:
+    """Search the web without any API key.
+
+    Tries DuckDuckGo's HTML endpoint, then its Lite endpoint, then
+    googlesearch-python, returning the first provider that yields hits.
 
     Args:
-        query (str): The search query (e.g., "protocol text or seach question")
-        num_results (int): Number of results to return (default: 10)
-        language (str): Language code for search results (default: 'en')
-        pause (float): Pause between searches to avoid rate limiting (default: 2.0 seconds)
+        query: The search query.
+        num_results: Number of results to return.
+        language: Language code (used by the googlesearch provider).
 
     Returns:
-        List[dict]: List of dictionaries containing search results with title and URL
+        Formatted "Title / URL / Description" blocks, or a diagnostic string
+        if every provider failed.
 
     """
-    # Lazy import: `googlesearch` is provided by the `googlesearch-python` PyPI
-    # package (the old `googlesearch` package was renamed in 2024). If neither
-    # is installed, only this function fails — the rest of literature.py keeps
-    # working. See the module-level comment for context.
-    try:
-        from googlesearch import search as _google_search
-    except ImportError as e:
-        raise ImportError(
-            "search_google requires the 'googlesearch-python' package. "
-            "Install it with: pip install googlesearch-python"
-        ) from e
+    providers = (
+        ("duckduckgo-html", lambda: _search_duckduckgo_html(query, num_results)),
+        ("duckduckgo-lite", lambda: _search_duckduckgo_lite(query, num_results)),
+        ("googlesearch-python", lambda: _search_googlesearch_python(query, num_results, language)),
+    )
 
-    try:
-        results_string = ""
-        search_query = f"{query}"
+    failures = []
+    for name, run in providers:
+        try:
+            results = run()
+        except ImportError:
+            failures.append(f"{name}: not installed")
+            continue
+        except Exception as e:  # network error, blocked scrape, markup change
+            failures.append(f"{name}: {e}")
+            continue
+        if results:
+            print(f"[keyless_web_search] {len(results)} result(s) from {name} for: {query}")
+            return _format_search_results(results)
+        failures.append(f"{name}: no results")
 
-        print(f"Searching for {search_query} with {num_results} results and {language} language")
+    return "No web results. Search providers tried -- " + "; ".join(failures)
 
-        for res in _google_search(search_query, num_results=num_results, lang=language, advanced=True):
-            print(f"Found result: {res.title}")
-            title = res.title
-            url = res.url
-            description = res.description
 
-            results_string += f"Title: {title}\nURL: {url}\nDescription: {description}\n\n"
+def search_google(query: str, num_results: int = 3, language: str = "en") -> str:
+    """Search the web and return formatted results. No API key required.
 
-    except Exception as e:
-        print(f"Error performing search: {str(e)}")
-    return results_string
+    Despite the name (kept for backwards compatibility with the tool registry
+    and existing prompts), this now runs the keyless provider chain in
+    `keyless_web_search`: DuckDuckGo HTML, DuckDuckGo Lite, then
+    googlesearch-python. Google alone was too easy to block — a 429 from the
+    scraper used to leave the agent with an empty string.
+
+    Args:
+        query (str): The search query (e.g., "protocol text or search question")
+        num_results (int): Number of results to return (default: 3)
+        language (str): Language code for search results (default: 'en')
+
+    Returns:
+        str: Formatted "Title / URL / Description" blocks, one per result.
+
+    """
+    return keyless_web_search(query, num_results=num_results, language=language)
 
 
 def advanced_web_search_claude(
     query: str,
     max_searches: int = 1,
     max_retries: int = 3,
-) -> tuple[str, list[dict[str, str]], list]:
+) -> str:
     """
     Initiate an advanced web search by launching a specialized agent to collect relevant information and citations through multiple rounds of web searches for a given query.
     Craft the query carefully for the search agent to find the most relevant information.
 
     Behavior:
-        - If ANTHROPIC_API_KEY is set in the environment, this tool uses
-          Anthropic's server-side web_search tool (the original behavior).
-        - If ANTHROPIC_API_KEY is NOT set, the function transparently falls
-          back to `search_google(query, num_results=5)` so the agent still
-          gets web results without an Anthropic key. The LLM sees a string
-          of the same shape, so the ReAct loop doesn't have to change.
+        - If a usable ANTHROPIC_API_KEY is set, this tool uses Anthropic's
+          server-side web_search tool (the original behavior).
+        - Otherwise — key unset, key rejected (401/403), `anthropic` not
+          installed, or BIOMENTIS_WEB_SEARCH=keyless — it transparently falls
+          back to `keyless_web_search`, which scrapes DuckDuckGo and needs no
+          API key at all. The LLM sees a string of the same shape, so the ReAct
+          loop doesn't have to change.
+
+    This function no longer returns an "Error code: 401" string to the agent:
+    a broken key degrades the search instead of poisoning the reasoning trace.
 
     Parameters
     ----------
@@ -291,20 +443,22 @@ def advanced_web_search_claude(
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
 
-    # Auto-fallback path: no Anthropic key → use search_google instead so the
-    # agent still gets web results on the Ollama default path. The LLM sees
-    # the same string shape, so the ReAct loop is unchanged.
+    # Explicit opt-out: never touch a paid API for web search.
+    if os.getenv("BIOMENTIS_WEB_SEARCH", "").strip().lower() in {"keyless", "free", "local"}:
+        return _advanced_web_search_fallback(query, reason="BIOMENTIS_WEB_SEARCH=keyless")
+
+    # Auto-fallback path: no Anthropic key → use the keyless providers so the
+    # agent still gets web results on the Ollama default path.
     if not api_key:
-        print(
-            "[advanced_web_search_claude] ANTHROPIC_API_KEY not set — "
-            "falling back to search_google instead of Claude's web_search tool."
-        )
-        return _advanced_web_search_fallback(query)
+        return _advanced_web_search_fallback(query, reason="ANTHROPIC_API_KEY not set")
 
     # The "use the key for this tool even when chat is on Ollama" path is
     # captured in reminder_consider.md — not implemented yet. When it is,
     # this is where the cost guard will live.
-    import anthropic
+    try:
+        import anthropic
+    except ImportError:
+        return _advanced_web_search_fallback(query, reason="the 'anthropic' package is not installed")
 
     try:
         from biomentis.config import default_config
@@ -346,18 +500,47 @@ def advanced_web_search_claude(
             return formatted_response
 
         except Exception as e:
+            # A bad/expired key, a key without web_search entitlement, or a
+            # model the key can't reach will fail identically on every retry —
+            # burning ~15s of backoff to arrive at the same 401. Bail out to
+            # the keyless path immediately instead.
+            if _is_non_retryable_anthropic_error(e):
+                return _advanced_web_search_fallback(query, reason=f"Anthropic rejected the request ({e})")
             if attempt < max_retries:
                 time.sleep(delay)
                 delay *= 2
                 continue
-            print(f"Error performing web search after {max_retries} attempts: {str(e)}")
-            return f"Error performing web search after {max_retries} attempts: {str(e)}"
+            print(f"Error performing web search after {max_retries} attempts: {e}")
+            return _advanced_web_search_fallback(query, reason=f"Anthropic web_search failed {max_retries}x ({e})")
 
 
-def _advanced_web_search_fallback(query: str, num_results: int = 5) -> str:
-    """Fallback for `advanced_web_search_claude` when ANTHROPIC_API_KEY is not set.
+def _is_non_retryable_anthropic_error(exc: Exception) -> bool:
+    """True when retrying the Anthropic call cannot possibly change the outcome.
 
-    Routes to `search_google` (free, no API key) and prepends a short note
+    Covers authentication (401), permission (403) and not-found (404, e.g. a
+    model the key can't reach) — as opposed to 429/5xx/timeouts, which are
+    worth the exponential backoff above.
+    """
+    status = getattr(exc, "status_code", None)
+    if status in (401, 403, 404):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "authentication_error",
+            "invalid x-api-key",
+            "permission_error",
+            "error code: 401",
+            "error code: 403",
+        )
+    )
+
+
+def _advanced_web_search_fallback(query: str, num_results: int = 5, reason: str = "") -> str:
+    """Fallback for `advanced_web_search_claude` when Anthropic is unavailable.
+
+    Routes to `keyless_web_search` (free, no API key) and prepends a short note
     so the LLM can see that this is a degraded result, not a Claude-grade
     multi-round search. The returned string keeps the same shape as the
     Anthropic path so the ReAct loop doesn't need to special-case it.
@@ -366,21 +549,18 @@ def _advanced_web_search_fallback(query: str, num_results: int = 5) -> str:
     `query_pubmed` for biomedical queries, and respect a per-tool
     fallback-policy config.
     """
+    reason = reason or "Anthropic web_search unavailable"
     note = (
-        "[advanced_web_search_claude: ANTHROPIC_API_KEY not set — "
-        f"falling back to search_google (top {num_results} results). "
-        "Set ANTHROPIC_API_KEY to use Claude's server-side web_search tool.]\n\n"
+        f"[advanced_web_search_claude: {reason} — falling back to a keyless "
+        f"DuckDuckGo search (top {num_results} results). Results are plain "
+        "search hits, not a multi-round agentic search; use extract_url_content "
+        "on the most promising URLs to read further.]\n\n"
     )
+    print(f"[advanced_web_search_claude] {reason} — using keyless web search.")
     try:
-        results = search_google(query, num_results=num_results, language="en")
-    except ImportError:
-        return (
-            note
-            + "search_google is unavailable: install the 'googlesearch-python' "
-            "package (pip install googlesearch-python) and retry."
-        )
+        results = keyless_web_search(query, num_results=num_results, language="en")
     except Exception as e:
-        return note + f"search_google failed: {e}"
+        return note + f"keyless_web_search failed: {e}"
     if not results:
         return note + "No web results returned."
     return note + results

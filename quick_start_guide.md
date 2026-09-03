@@ -95,6 +95,8 @@ NCBI_EMAIL=you@example.com
 
 Either variable name works. The bare-minimum placeholder `your-email@example.com` keeps things running but you'll hit throttling faster.
 
+You can also type an address into the sidebar's **NCBI email** field once the app is running. That applies for the current session only — including to `Bio.Entrez.email`, which is what silences the `UserWarning: Email address is not specified` you'll otherwise see when the agent writes its own Entrez code.
+
 ### Optional extras
 
 Most users don't need these. Install any of them on top of the base install:
@@ -262,7 +264,8 @@ agent.go("Summarize the tools available in this environment.")
 |---|---|
 | `conda: command not found` | Install Miniconda/Anaconda, then `conda init zsh` (or `bash`) and restart the shell. |
 | `ModuleNotFoundError: biomni` | You forgot to `conda activate biomni`, or didn't `pip install -e .` / `pip install biomni`. |
-| PubMed / NCBI tools throttled or rejected | NCBI asks for an email on every Entrez request. Set `NCBI_EMAIL=you@example.com` in `.env` (or pass `ncbi_email=` to `BiomniConfig()`). |
+| PubMed / NCBI tools throttled or rejected | NCBI asks for an email on every Entrez request. Set `NCBI_EMAIL=you@example.com` in `.env` (or pass `ncbi_email=` to `BiomniConfig()`), or type one into the sidebar's **NCBI email** field for this session. |
+| `UserWarning: Email address is not specified` from `Bio/Entrez` | Same cause, usually from code the agent wrote. Fill in the sidebar's **NCBI email** field (or set `NCBI_EMAIL` in `.env`) — the app pushes it into `Bio.Entrez.email` for the whole process. |
 | UI opens but every prompt errors with auth | `.env` has an `ANTHROPIC_API_KEY` (or other cloud key) but the corresponding `BIOMNI_LLM` / `BIOMNI_SOURCE` is missing or wrong. Either remove the cloud key (revert to Ollama default) or set the matching `BIOMNI_LLM` / `BIOMNI_SOURCE` and `BIOMNI_DISABLE_LOCAL_FALLBACK=true`. |
 | Agent tries Anthropic but I want Ollama | Make sure `ANTHROPIC_API_KEY` is **not** in your shell env or `.env`. The local-first fallback in `biomni/config.py` short-circuits when any cloud key is present. |
 | Agent tries Ollama but I want Anthropic | Uncomment `ANTHROPIC_API_KEY` in `.env` and add `BIOMNI_LLM=claude-sonnet-4-5` + `BIOMNI_SOURCE=Anthropic` + `BIOMNI_DISABLE_LOCAL_FALLBACK=true`. |

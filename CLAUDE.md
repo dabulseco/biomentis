@@ -40,6 +40,7 @@ $P -m biomentis.agent.tests.test_tool_imports       # tool import repair
 $P -m biomentis.agent.tests.test_background_run     # background runs + journal
 $P -m biomentis.agent.tests.test_stop_sequences     # turn boundaries + stop guard
 $P -m biomentis.agent.tests.test_context_budget     # context window guard
+$P -m biomentis.agent.tests.test_ncbi_email        # NCBI/Entrez email + sidebar field
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

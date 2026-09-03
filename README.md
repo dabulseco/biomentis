@@ -191,6 +191,8 @@ default_config.ncbi_email = "you@example.com"
 
 `query_pubmed`, `get_gene_coding_sequence`, and the rest of the literature / molecular-biology tools will pick this up automatically. The resolution order is: explicit function argument → `default_config.ncbi_email` → `NCBI_EMAIL` (or `BIOMNI_NCBI_EMAIL`) env var → placeholder.
 
+Or from the running app: the sidebar has an **NCBI → NCBI email** field under the model picker. That one is session-scoped — it applies immediately (and also sets `Bio.Entrez.email`, which silences Biopython's "Email address is not specified" warning in agent-written code) but is not written to disk, so use `.env` if you want it to survive a restart.
+
 For detailed configuration options, see the **[Configuration Guide](docs/configuration.md)**.
 
 ### PDF Generation
@@ -375,5 +377,6 @@ If you use Biomentis in research or teaching, please also cite the upstream Biom
 | Agent tries Ollama but I want Anthropic | Uncomment `ANTHROPIC_API_KEY` in `.env` and add `BIOMNI_LLM=claude-sonnet-4-5` + `BIOMNI_SOURCE=Anthropic` + `BIOMNI_DISABLE_LOCAL_FALLBACK=true`. |
 | `Connection refused` on `localhost:11434` | `ollama serve` isn’t running, or it crashed. Restart it. |
 | "No models available" / `ollama list` is empty | `ollama pull qwen2.5:14b` (or any other model). |
-| PubMed / NCBI tools throttled or rejected | NCBI asks for an email on every Entrez request. Set `NCBI_EMAIL=you@example.com` in `.env` (or pass `ncbi_email=` to `BiomentisConfig()`). |
+| PubMed / NCBI tools throttled or rejected | NCBI asks for an email on every Entrez request. Set `NCBI_EMAIL=you@example.com` in `.env` (or pass `ncbi_email=` to `BiomentisConfig()`), or type one into the sidebar's **NCBI email** field for this session. |
+| `UserWarning: Email address is not specified` from `Bio/Entrez` | Same cause, usually from code the agent wrote. Fill in the sidebar's **NCBI email** field (or set `NCBI_EMAIL` in `.env`) — the app pushes it into `Bio.Entrez.email` for the whole process. |
 | First run hangs for hours | It’s downloading the 11 GB data lake. Set `expected_data_lake_files=[]` to skip. |

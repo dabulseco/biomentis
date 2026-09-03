@@ -22,6 +22,7 @@ from biomentis.agent.tutor import TutorEngine
 from biomentis.config import default_config
 from biomentis.ui_core import list_available_providers
 from biomentis.ui_repl import render_repl_panel
+from biomentis.ui_settings import render_ncbi_email_field
 from biomentis.ui_tutor import (
     install_renderers,
     render_tutor_chat_panel,
@@ -100,6 +101,14 @@ with st.sidebar:
     selected_source, selected_model = choices[selected_idx]
 
     st.caption(f"Active: **{selected_model}** via **{selected_source}**")
+
+    # NCBI contact email. Rendered here (early, before the agent is built)
+    # so `Bio.Entrez.email` is in place before any Entrez-touching code runs
+    # — including the agent's own generated snippets, which `run_python_repl`
+    # execs in this process. Session-scoped; `.env` is what makes it stick.
+    st.divider()
+    st.header("NCBI")
+    render_ncbi_email_field()
 
 
 # --- Agent (rebuilt when the model changes) -----------------------------

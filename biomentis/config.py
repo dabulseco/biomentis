@@ -6,6 +6,7 @@ Maintains full backward compatibility with existing code.
 """
 
 import os
+import re
 from dataclasses import dataclass
 
 
@@ -181,3 +182,47 @@ class BiomentisConfig:
 
 # Global default config instance (optional, for convenience)
 default_config = BiomentisConfig()
+
+
+# A deliberately loose check: "something@something.tld" with no whitespace.
+# NCBI only ever uses this as a contact string, so the goal is to catch a
+# typo or an empty box, not to adjudicate RFC 5322.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def apply_ncbi_email(email: str | None) -> bool:
+    """Apply an NCBI contact email everywhere the process reads one.
+
+    Returns True if `email` looked like an address and was applied, False if
+    it was blank or malformed — in which case nothing is changed, so a bad
+    keystroke in the UI can't wipe out a working value.
+
+    Three targets, because three different code paths look in three places:
+
+      - `default_config.ncbi_email` — read by the literature tools via
+        `biomentis.tool.literature._get_ncbi_email`
+      - `os.environ["NCBI_EMAIL"]` — read directly by
+        `biomentis.tool.molecular_biology.get_gene_coding_sequence`, and
+        inherited by any subprocess
+      - `Bio.Entrez.email` — the module-level default behind Biopython's
+        "Email address is not specified" warning. This is the one that covers
+        *agent-written* code: `run_python_repl` execs those snippets in this
+        same process, so a snippet that imports Entrez and forgets the email
+        picks this up.
+
+    Biopython is imported lazily and its absence is tolerated, so `config` does
+    not become a hard dependency on it.
+    """
+    candidate = (email or "").strip()
+    if not _EMAIL_RE.match(candidate):
+        return False
+
+    default_config.ncbi_email = candidate
+    os.environ["NCBI_EMAIL"] = candidate
+    try:
+        from Bio import Entrez
+
+        Entrez.email = candidate
+    except Exception:
+        pass
+    return True

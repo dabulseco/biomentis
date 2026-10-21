@@ -1026,7 +1026,7 @@ def check_and_download_s3_files(
 
 # A model turn ends at the first closing tag. Only `</execute>` and
 # `</solution>` count: `</think>` is a preamble to one of them, not a turn.
-_FIRST_CLOSING_TAG_RE = re.compile(r"</(?:execute|solution)>", re.IGNORECASE)
+FIRST_CLOSING_TAG_RE = re.compile(r"</(?:execute|solution)>", re.IGNORECASE)
 
 
 def truncate_after_first_tag(message: str) -> tuple[str, str]:
@@ -1066,7 +1066,7 @@ def truncate_after_first_tag(message: str) -> tuple[str, str]:
         >>> truncate_after_first_tag("<solution>done</solution>")
         ('<solution>done</solution>', '')
     """
-    match = _FIRST_CLOSING_TAG_RE.search(message)
+    match = FIRST_CLOSING_TAG_RE.search(message)
     if match is None:
         return message, ""
     dropped = message[match.end() :].strip()

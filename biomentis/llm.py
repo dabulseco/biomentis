@@ -9,6 +9,13 @@ if TYPE_CHECKING:
 SourceType = Literal["OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "Gemini", "Bedrock", "Groq", "Custom"]
 ALLOWED_SOURCES: set[str] = set(SourceType.__args__)
 
+# Most tokens one Ollama reply may generate. Ollama's own default is unlimited,
+# and with no stop sequences on this client a model that never ends its turn
+# ran 8 minutes and ~41k tokens in one call. Agent turns run 1-3k tokens, but
+# a reasoning model's thinking counts toward the cap, hence the headroom.
+# Override with BIOMENTIS_OLLAMA_NUM_PREDICT.
+OLLAMA_NUM_PREDICT_DEFAULT = 8192
+
 
 # Client classes that end up NOT applying stop sequences, and why. Anything
 # not listed here is treated as a bug by `_check_stop_sequences` below: the
@@ -327,6 +334,7 @@ def _build_llm(
             model=model,
             temperature=temperature,
             base_url=base_url or os.getenv("OLLAMA_HOST"),
+            num_predict=int(os.getenv("BIOMENTIS_OLLAMA_NUM_PREDICT") or OLLAMA_NUM_PREDICT_DEFAULT),
         )
 
     elif source == "Bedrock":

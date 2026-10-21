@@ -118,6 +118,7 @@ from biomentis.ui_core import (
     ui_event_to_export_entry,
 )
 from biomentis.utils import (
+    FIRST_CLOSING_TAG_RE,
     check_and_download_s3_files,
     clean_message_content,
     convert_markdown_to_pdf,
@@ -156,8 +157,59 @@ class AgentState(TypedDict):
 # function's signature (it has two callers).
 LAST_LLM_CALL: dict[str, int] = {"attempts": 0}
 
+# What `generate` says when a reply has neither `<execute>` nor `<solution>`.
+# The parse-error guard counts these to know how many corrections it has spent.
+PARSE_ERROR_NUDGE = (
+    "Each response must include thinking process followed by either <execute> or <solution> tag. "
+    "But there are no tags in the current response. Please follow the instruction, fix and "
+    "regenerate the response again."
+)
 
-def _invoke_llm_with_retry(llm, messages, max_retries: int = 3, base_delay: float = 2.0):
+
+def _is_ollama(llm) -> bool:
+    try:
+        from langchain_ollama import ChatOllama
+    except ImportError:
+        return False
+    return isinstance(llm, ChatOllama)
+
+
+def _stream_to_first_tag(llm, messages):
+    """Read a reply only as far as its first `</execute>` or `</solution>`.
+
+    `ChatOllama` has no stop sequences (see STOP_SEQUENCE_EXEMPT_CLIENTS), so
+    nothing on the server ends a turn: a model that keeps going after its
+    closing tag runs until it chooses to stop. One such reply ran 8 minutes
+    and ~41k tokens, all of which `truncate_after_first_tag` then discarded,
+    while the UI showed nothing. Stopping the read at the tag keeps exactly the
+    turn truncation would have kept, and closing the stream cancels the request
+    so the daemon stops generating too.
+    """
+    response = None
+    text = ""
+    stream = llm.stream(messages)
+    try:
+        for chunk in stream:
+            response = chunk if response is None else response + chunk
+            piece = chunk.content if isinstance(chunk.content, str) else ""
+            # Search only the tail: a tag can straddle two chunks, and
+            # rescanning the whole reply per chunk is quadratic.
+            tail_start = max(0, len(text) - len("</solution>"))
+            text += piece
+            if FIRST_CLOSING_TAG_RE.search(text, tail_start):
+                break
+    finally:
+        stream.close()
+    if response is None:
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(content="")
+    return response
+
+
+def _invoke_llm_with_retry(
+    llm, messages, max_retries: int = 3, base_delay: float = 2.0, stop_at_first_tag: bool = False
+):
     """Invoke `llm` with a bounded retry for transient connection errors.
 
     Motivation: a cloud-signed-in Ollama model (`ollama signin`) routes
@@ -176,12 +228,18 @@ def _invoke_llm_with_retry(llm, messages, max_retries: int = 3, base_delay: floa
     normal error handling (or lack thereof) takes over. A fully local
     model (no `-cloud` suffix, no `ollama signin` involved) has no cloud
     hop to go stale in the first place and never needs this.
+
+    `stop_at_first_tag` is for agent turns only: on Ollama, which has no stop
+    sequences, it stops reading at the turn's closing tag (see
+    `_stream_to_first_tag`). Prose callers such as the critic leave it off.
     """
     last_exc: Exception | None = None
     LAST_LLM_CALL["attempts"] = 0
     for attempt in range(1, max_retries + 1):
         LAST_LLM_CALL["attempts"] = attempt
         try:
+            if stop_at_first_tag and _is_ollama(llm):
+                return _stream_to_first_tag(llm, messages)
             return llm.invoke(messages)
         except Exception as e:
             last_exc = e
@@ -1661,7 +1719,7 @@ Each library is listed with its description to help you understand its functiona
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
             messages, context_fit = self._fit_request(messages)
             trace_t0 = time.time()
-            response = _invoke_llm_with_retry(self.llm, messages)
+            response = _invoke_llm_with_retry(self.llm, messages, stop_at_first_tag=True)
             trace_latency = time.time() - trace_t0
             trace_attempts = LAST_LLM_CALL.get("attempts", 1)
             trace_coerced = False
@@ -1748,9 +1806,22 @@ Each library is listed with its description to help you understand its functiona
                 trace_parse_error = True
                 print("parsing error...")
 
-                error_count = sum(
-                    1 for m in state["messages"] if isinstance(m, AIMessage) and "There are no tags" in m.content
-                )
+                # Corrections already spent on this streak: walk back over
+                # (nudge, reply) pairs from the reply just appended. This used
+                # to look for the nudge text in AIMessages — but the nudge is a
+                # HumanMessage, so the count was always 0 and a model that never
+                # used tags was re-asked until the recursion limit. Only the
+                # current streak counts; earlier turns in the history that hit
+                # and recovered from parse errors don't.
+                error_count = 0
+                i = len(state["messages"]) - 2
+                while (
+                    i >= 0
+                    and isinstance(state["messages"][i], HumanMessage)
+                    and state["messages"][i].content == PARSE_ERROR_NUDGE
+                ):
+                    error_count += 1
+                    i -= 2
 
                 if error_count >= 2:
                     # If we've already tried to correct the model twice, just end the conversation
@@ -1765,11 +1836,7 @@ Each library is listed with its description to help you understand its functiona
                     )
                 else:
                     # Try to correct it
-                    state["messages"].append(
-                        HumanMessage(
-                            content="Each response must include thinking process followed by either <execute> or <solution> tag. But there are no tags in the current response. Please follow the instruction, fix and regenerate the response again."
-                        )
-                    )
+                    state["messages"].append(HumanMessage(content=PARSE_ERROR_NUDGE))
                     state["next_step"] = "generate"
                     trace_branch = "retry_parse_error"
 

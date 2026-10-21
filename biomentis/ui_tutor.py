@@ -338,8 +338,12 @@ def tutor_wrapped_stream(agent, text_input, files, history_messages, thread_id):
 
     tutor = st.session_state.get("biomni_tutor")
     if tutor is None or not tutor.is_enabled():
-        # Tutor not active — behave as the unwrapped stream.
-        yield from stream_agent_events(agent, text_input, files, history_messages, thread_id)
+        # Tutor not active — behave as the unwrapped stream, but still let
+        # the agent see the KB: uploads aren't only for instructional mode.
+        context, note = _kb_context_for(tutor, text_input)
+        yield from stream_agent_events(
+            agent, text_input, files, history_messages, thread_id, context=context, context_note=note
+        )
         return
 
     # Mark which prompt this run is for; the chat panel uses it.
@@ -354,7 +358,10 @@ def tutor_wrapped_stream(agent, text_input, files, history_messages, thread_id):
         run = None
 
     if run is None:
-        run = _create_run(agent, text_input, files, history_messages, thread_id)
+        context, note = _kb_context_for(tutor, text_input)
+        run = _create_run(
+            agent, text_input, files, history_messages, thread_id, context=context, context_note=note
+        )
         st.session_state[_RUN_KEY] = run
         st.session_state.biomni_tutor_run_started_at = time.monotonic()
 
@@ -397,7 +404,28 @@ def tutor_wrapped_stream(agent, text_input, files, history_messages, thread_id):
 # ----- 3. run management --------------------------------------------------
 
 
-def _create_run(agent, text_input, files, history_messages, thread_id) -> dict:
+def _kb_context_for(tutor, task: str) -> tuple[str, str]:
+    """The session KB's passages for `task`, and a status line naming them.
+
+    Returns ("", "") when there is no tutor, the KB is empty, or retrieval
+    fails — a KB problem must never stop the agent from running.
+    """
+    kb = getattr(tutor, "kb", None)
+    if kb is None:
+        return "", ""
+    try:
+        ctx = kb.context_for_task(task)
+    except Exception as e:
+        print(f"[tutor KB] retrieval for the agent failed: {e!r}")
+        return "", ""
+    if not ctx.text:
+        return "", ""
+    return ctx.text, "📚 Using knowledge base passages from: " + ", ".join(ctx.sources)
+
+
+def _create_run(
+    agent, text_input, files, history_messages, thread_id, context: str = "", context_note: str = ""
+) -> dict:
     """Create a fresh run-state dict wrapping a *live* `stream_agent_events`
     generator. Nothing is pulled from it yet — the agent does no work
     until `_advance_run_live` is called."""
@@ -407,7 +435,9 @@ def _create_run(agent, text_input, files, history_messages, thread_id) -> dict:
     return {
         "prompt": text_input,
         "thread_id": thread_id,
-        "gen": stream_agent_events(agent, text_input, files, history_messages, thread_id),
+        "gen": stream_agent_events(
+            agent, text_input, files, history_messages, thread_id, context=context, context_note=context_note
+        ),
         "events": [],
         # Unique per run (NOT per step) — step_id resets to 1 on every new
         # run, but old transcript entries are never cleared, so a stable
@@ -1033,10 +1063,31 @@ def _render_kb_panel(tutor) -> None:
 
     if add_clicked:
         _kb_add(tutor, uploaded, url_text)
+
+    # Clearing deletes every upload in the session and can't be undone, and
+    # the button sits right next to "Add to KB" — so it takes a second click.
     if clear_clicked:
-        tutor.kb.clear()
-        st.toast("Knowledge base cleared.", icon="🧹")
-        st.rerun()
+        st.session_state["biomni_tutor_kb_confirm_clear"] = True
+    if st.session_state.get("biomni_tutor_kb_confirm_clear"):
+        st.warning("Delete every document in this session's knowledge base? This can't be undone.")
+        col_yes, col_no = st.columns([1, 1])
+        with col_yes:
+            confirmed = st.button(
+                "Yes, clear it",
+                type="primary",
+                use_container_width=True,
+                key="biomni_tutor_kb_clear_confirm",
+            )
+        with col_no:
+            cancelled = st.button("Cancel", use_container_width=True, key="biomni_tutor_kb_clear_cancel")
+        if confirmed:
+            tutor.kb.clear()
+            st.session_state["biomni_tutor_kb_confirm_clear"] = False
+            st.toast("Knowledge base cleared.", icon="🧹")
+            st.rerun()
+        if cancelled:
+            st.session_state["biomni_tutor_kb_confirm_clear"] = False
+            st.rerun()
 
     # KB stats
     try:

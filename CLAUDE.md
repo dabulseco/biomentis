@@ -42,6 +42,7 @@ $P -m biomentis.agent.tests.test_stop_sequences     # turn boundaries + stop gua
 $P -m biomentis.agent.tests.test_context_budget     # context window guard
 $P -m biomentis.agent.tests.test_ncbi_email        # NCBI/Entrez email + sidebar field
 $P -m biomentis.agent.tests.test_runaway_generation # parse-error retry cap + Ollama turn cutoff
+$P -m biomentis.agent.tests.test_kb_context         # knowledge base → agent + Clear KB confirm
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

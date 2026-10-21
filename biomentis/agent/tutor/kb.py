@@ -38,6 +38,21 @@ class KBStats:
     source_names: list[str] = field(default_factory=list)
 
 
+@dataclass
+class KBContext:
+    """KB passages for an agent task, ready to append to its prompt.
+
+    `text` is empty when the KB is empty or nothing was retrieved; `sources`
+    lists the distinct source names the passages came from, for the UI note.
+    """
+
+    text: str = ""
+    sources: list[str] = field(default_factory=list)
+
+
+_AGENT_CONTEXT_K = 4
+
+
 class KnowledgeBase:
     """A per-session vector index over uploaded documents and URLs.
 
@@ -227,6 +242,36 @@ class KnowledgeBase:
         except Exception:
             # Empty index, or MMR not configured yet — fall back to similarity.
             return vs.similarity_search(query, k=k)
+
+    def context_for_task(self, task: str, k: int = _AGENT_CONTEXT_K) -> KBContext:
+        """Passages relevant to `task`, formatted for the agent's prompt.
+
+        The tutor chat and instruction cards call `retrieve` themselves; this
+        is the agent's way in. Like `stats`, an empty KB returns at once
+        without loading the embedding model.
+        """
+        docs = self.retrieve(task, k=k)
+        if not docs:
+            return KBContext()
+
+        blocks: list[str] = []
+        for i, doc in enumerate(docs, 1):
+            meta = doc.metadata or {}
+            label = str(meta.get("source", "unknown"))
+            if meta.get("page"):
+                label += f" p. {meta['page']}"
+            blocks.append(f"[{i}] {label}\n{doc.page_content.strip()}")
+
+        text = (
+            "--- Knowledge base passages ---\n"
+            "The user uploaded course materials to a knowledge base. These passages were "
+            "retrieved for this task. Use them where they are relevant, cite them as "
+            "[source, p. N] when you do, and do not assume they are complete.\n\n"
+            + "\n\n".join(blocks)
+            + "\n--- End of knowledge base passages ---"
+        )
+        sources = list(dict.fromkeys(str((d.metadata or {}).get("source", "unknown")) for d in docs))
+        return KBContext(text=text, sources=sources)
 
     def stats(self) -> KBStats:
         """Read-only stats for the sidebar panel.

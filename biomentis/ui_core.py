@@ -91,6 +91,8 @@ def stream_agent_events(
     files: list[str],
     history_messages: list[BaseMessage],
     thread_id: int,
+    context: str = "",
+    context_note: str = "",
 ) -> Generator[UIEvent, None, None]:
     """Run one turn of the agent and yield UIEvents as its response streams in.
 
@@ -101,10 +103,16 @@ def stream_agent_events(
         files: Paths to any files uploaded with this turn
         history_messages: Prior conversation turns as LangChain messages (not including this turn)
         thread_id: LangGraph checkpoint thread id
+        context: Extra material for this turn only (e.g. knowledge-base
+            passages), appended to the message the agent sees. It is not
+            part of `agent.user_task`, so the critic judges the task itself.
+        context_note: A status line announcing `context`, yielded first.
     """
     full_text_input = text_input
     for file_path in files:
         full_text_input += f"\n\n User uploaded this file: {file_path}\n Please use it if needed."
+    if context:
+        full_text_input += f"\n\n{context}"
 
     agent_messages = [*history_messages, HumanMessage(content=full_text_input)]
     inputs = {"messages": agent_messages, "next_step": None}
@@ -160,6 +168,9 @@ def stream_agent_events(
     solution_found = False
     last_solution: str | None = None
     solution_round = 0
+
+    if context_note:
+        yield UIEvent(type="status", content=context_note)
 
     if agent.use_tool_retriever:
         yield UIEvent(type="status", content="Retrieving relevant tools, data lake items, and libraries...")

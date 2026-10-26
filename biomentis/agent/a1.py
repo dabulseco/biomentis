@@ -170,6 +170,12 @@ LAST_LLM_CALL: dict[str, int] = {"attempts": 0}
 # (2026-10-26). Each repeat is pointed out; the third also asks for the answer
 # now; the fourth ends the run. Same output, not just same code: the REPL keeps
 # state, so identical code after a change elsewhere can legitimately differ.
+# Shown when the model's safety filter declined a reply (stop_reason "refusal").
+MODEL_REFUSED_MESSAGE = (
+    "The model declined to reply (its safety filter stopped the response), so the run ended here. "
+    "The work completed so far is above."
+)
+
 REPEAT_ANSWER_NOW_AT = 3
 REPEAT_STOP_AT = 4
 REPEATED_STEPS_STOPPED = (
@@ -1908,7 +1914,16 @@ Each library is listed with its description to help you understand its functiona
                     error_count += 1
                     i -= 2
 
-                if error_count >= 2:
+                refused = (getattr(response, "response_metadata", None) or {}).get("stop_reason") == "refusal"
+                if refused:
+                    # A safety refusal arrives empty. Asking again sends the
+                    # same request, which is refused again, so say so and stop.
+                    print("the model declined to reply (stop_reason=refusal); ending the run")
+                    state["next_step"] = "end"
+                    trace_branch = "abort_refusal"
+                    self.critic_count = 10**9
+                    state["messages"].append(AIMessage(content=MODEL_REFUSED_MESSAGE))
+                elif error_count >= 2:
                     # If we've already tried to correct the model twice, just end the conversation
                     print("Detected repeated parsing errors, ending conversation")
                     state["next_step"] = "end"
@@ -2368,6 +2383,8 @@ Each library is listed with its description to help you understand its functiona
             outcome = "solution"
         elif "repeated parsing errors" in last:
             outcome = "aborted_parse_errors"
+        elif last == MODEL_REFUSED_MESSAGE:
+            outcome = "aborted_refusal"
         elif "same code with the same result" in last:
             outcome = "aborted_repeated_steps"
         elif "<observation>" in last:
@@ -2972,7 +2989,7 @@ Each library is listed with its description to help you understand its functiona
             Human messages don't increment the step counter as they are not considered
             steps in the agent's process.
         """
-        if "each response must include thinking process" in clean_output.lower():
+        if clean_output.strip() == PARSE_ERROR_NUDGE:
             parsing_error_content = create_parsing_error_html()
             content += f"{parsing_error_content}\n\n"
         elif not first_human_shown:

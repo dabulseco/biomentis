@@ -32,6 +32,9 @@ What these tests pin down:
  11.  On Claude, observations go as user turns, so no request ends on an
       assistant turn (prefill is a 400 on current Claude models); other
       models' requests are unchanged
+ 12.  The correction doesn't ask for the model's "thinking process" (Claude
+      refused that as reasoning extraction), and a refusal ends the run with
+      a message instead of being asked again
 
 Run with:
     python -m biomentis.agent.tests.test_runaway_generation
@@ -361,6 +364,32 @@ def test_claude_requests_end_on_a_user_turn() -> None:
     _check("other models unchanged", isinstance(last, AIMessage), type(last).__name__)
 
 
+class _RefusingLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(content="<execute>print(1)</execute>")
+        return AIMessage(content="", response_metadata={"stop_reason": "refusal"})
+
+
+def test_refusal_ends_the_run() -> None:
+    print("\n[12] the correction wording, and refusals")
+    from biomentis.agent.a1 import MODEL_REFUSED_MESSAGE, PARSE_ERROR_NUDGE
+
+    _check("the correction doesn't ask for reasoning", "thinking" not in PARSE_ERROR_NUDGE.lower(), PARSE_ERROR_NUDGE)
+    _check("it names both tags", "<execute>" in PARSE_ERROR_NUDGE and "<solution>" in PARSE_ERROR_NUDGE)
+    llm = _RefusingLLM()
+    log, final = _agent(llm).go("anything")
+    _check("a refusal is not asked again", llm.calls == 2, str(llm.calls))
+    _check("the run says why it stopped", final == MODEL_REFUSED_MESSAGE, final)
+    _check("no correction was sent", not any(PARSE_ERROR_NUDGE in m for m in log), "")
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Runaway generation tests")
@@ -377,6 +406,7 @@ def run_all() -> int:
         test_coerce_invoke_syntax,
         test_invoke_turn_runs,
         test_claude_requests_end_on_a_user_turn,
+        test_refusal_ends_the_run,
     ):
         try:
             test()

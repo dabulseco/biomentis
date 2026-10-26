@@ -1031,10 +1031,15 @@ FIRST_CLOSING_TAG_RE = re.compile(r"</(?:execute|solution)>", re.IGNORECASE)
 # What `generate` says when a reply has neither `<execute>` nor `<solution>`.
 # The parse-error guard counts these to know how many corrections it has spent,
 # and `stream_agent_events` recognizes it so it is not shown as agent reasoning.
+#
+# It must not ask for the model's "thinking process": claude-sonnet-5-5 refused
+# every request carrying the old wording ("Each response must include thinking
+# process ...") as reasoning extraction, an empty reply each time, until the run
+# gave up (2026-10-26). This wording got a <solution> back 2 of 2 times.
 PARSE_ERROR_NUDGE = (
-    "Each response must include thinking process followed by either <execute> or <solution> tag. "
-    "But there are no tags in the current response. Please follow the instruction, fix and "
-    "regenerate the response again."
+    "Your last reply had no <execute> or <solution> tag, so nothing was run. If you have code to run, "
+    "reply with it inside <execute></execute>. If you are finished, reply with your final answer inside "
+    "<solution></solution>."
 )
 
 
@@ -1253,7 +1258,7 @@ def create_parsing_error_html() -> str:
     return """
 <div class="parsing-error-box">
     <div class="parsing-error-header">Parsing Error</div>
-    <div class="parsing-error-content">Each response must include thinking process followed by either execute or solution tag. But there are no tags in the current response.</div>
+    <div class="parsing-error-content">The reply had no execute or solution tag, so the agent asked the model to reply again.</div>
 </div>
 """
 

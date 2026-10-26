@@ -21,6 +21,10 @@ What these tests pin down:
   11. render_entry shows `plot` as an image and `plot_withheld` as a note
   12. The execute node records the current run id for the REPL thread
   13. support_tools captures figures left open after exec
+  14. A failing step owns its figure
+  15. A consumer split mid-run re-attaches with each plot/withheld/structure
+      event exactly once, and restore matches
+  16. The patched plt.show prints "Plot captured." (neutral under "student")
 
 Run with:
     python -m biomentis.agent.tests.test_step_plots
@@ -373,6 +377,77 @@ def test_failing_step_owns_its_figure():
     support_tools.clear_captured_plots()
 
 
+def test_reattach_mid_run_and_restore():
+    print("\n[15] Re-attach mid-run and restore: each figure/structure exactly once")
+    import shutil
+    import threading
+
+    from biomentis.run_journal import RunJournal, entries_for_run, load_run
+    from biomentis.run_worker import BackgroundRun
+    from biomentis.structures import STRUCTURE_MARKER, default_artifact_dir
+    from biomentis.ui_core import stream_agent_events
+
+    old = os.environ.get("BIOMENTIS_ARTIFACT_DIR")
+    os.environ["BIOMENTIS_ARTIFACT_DIR"] = tempfile.mkdtemp(prefix="step_plots_art_")
+    try:
+        pdb = os.path.join(default_artifact_dir("run-reattach"), "mini.pdb")
+        os.makedirs(os.path.dirname(pdb), exist_ok=True)
+        shutil.copyfile(os.path.join(os.path.dirname(__file__), "fixtures", "mini_xray.pdb"), pdb)
+        observation = f"{STRUCTURE_MARKER}{pdb}\ndone\n"
+
+        for mode, figure_kind in (("show", "plot"), ("student", "plot_withheld")):
+            gate = threading.Event()
+            agent = _agent(mode, [png], observation)
+
+            def produce(agent=agent, gate=gate):
+                # Hold the producer after the first file event, so the first
+                # consumer is torn down while the run is still going.
+                for event in stream_agent_events(agent, "Plot something.", [], [], thread_id=1):
+                    yield event
+                    if getattr(event, "file_kind", None):
+                        gate.wait(5)
+
+            journal = RunJournal("Plot something.", run_dir=tempfile.mkdtemp(prefix="step_plots_runs_"), plot_mode=mode)
+            run = BackgroundRun("Plot something.", journal).start(produce)
+            seen, cursor = [], 0
+            for event in run.events_from(cursor):
+                seen.append(event)
+                cursor += 1
+                if getattr(event, "file_kind", None):
+                    break  # consumer torn down mid-run
+            _check(f"{mode}: split while the run was alive", not run.done, "run already finished")
+            gate.set()
+            for event in run.events_from(cursor):  # re-attach at the cursor
+                seen.append(event)
+                cursor += 1
+            kinds = [e.file_kind for e in seen if getattr(e, "file_kind", None)]
+            _check(f"{mode}: live {figure_kind} once", kinds.count(figure_kind) == 1, f"{kinds}")
+            _check(f"{mode}: live structure once", kinds.count("structure") == 1, f"{kinds}")
+            _check(f"{mode}: no gaps or repeats", seen == run.events, f"{len(seen)} vs {len(run.events)}")
+            if mode == "student":
+                _check("student: no displayed plot live", "plot" not in kinds, f"{kinds}")
+
+            entries = entries_for_run(load_run(journal.path))
+            restored = [e["kind"] for e in entries if e.get("file_path")]
+            _check(f"{mode}: restored {figure_kind} once", restored.count(figure_kind) == 1, f"{restored}")
+            _check(f"{mode}: restored structure once", restored.count("structure") == 1, f"{restored}")
+            if mode == "student":
+                _check("student: no displayed plot restored", "plot" not in restored, f"{restored}")
+    finally:
+        if old is None:
+            os.environ.pop("BIOMENTIS_ARTIFACT_DIR", None)
+        else:
+            os.environ["BIOMENTIS_ARTIFACT_DIR"] = old
+
+
+def test_show_patch_message_is_neutral():
+    print("\n[16] The patched plt.show prints a neutral message in both modes")
+    src = inspect.getsource(__import__("biomentis.tool.support_tools", fromlist=["x"])._apply_matplotlib_patches)
+    _check("says 'Plot captured.'", 'print("Plot captured.")' in src, "")
+    _check("never claims the plot was displayed", "displayed" not in src.split("def savefig_with_capture")[0]
+           .split("def show_with_capture")[1].replace("captured for the record but never displayed", ""), "")
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Step plot tests")
@@ -393,6 +468,8 @@ def run_all() -> int:
         test_execute_sets_current_run_id,
         test_repl_captures_open_figures,
         test_failing_step_owns_its_figure,
+        test_reattach_mid_run_and_restore,
+        test_show_patch_message_is_neutral,
     ):
         try:
             test()

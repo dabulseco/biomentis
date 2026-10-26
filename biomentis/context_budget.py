@@ -250,6 +250,14 @@ def _save_learned() -> None:
         print(f"[context_budget] could not persist learned limit: {exc}")
 
 
+def _on_ollama_cloud_host(llm: Any) -> bool:
+    """A client pointed at Ollama's hosted API (the OllamaCloud source)."""
+    from biomentis.config import ollama_cloud_host
+
+    base_url = (getattr(llm, "base_url", None) or "").rstrip("/")
+    return bool(base_url) and base_url == ollama_cloud_host()
+
+
 def resolve_context_limit(llm: Any) -> int | None:
     """The model's usable context window, or None if it isn't known.
 
@@ -276,7 +284,7 @@ def resolve_context_limit(llm: Any) -> int | None:
     # enforcing the limit, which beats guessing from the family name. A
     # `qwen*:cloud` matches the "qwen" row and would be held to 32k, a
     # truncation the gateway never asked for.
-    if is_ollama_cloud(name):
+    if is_ollama_cloud(name) or _on_ollama_cloud_host(llm):
         return OLLAMA_CLOUD_LIMIT
 
     for fragment, limit in KNOWN_CONTEXT_LIMITS.items():

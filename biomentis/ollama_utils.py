@@ -40,3 +40,36 @@ def pick_default_ollama_model(host: str | None = None) -> str | None:
     """Return the first available Ollama model to use as a zero-config default, if any."""
     models = list_ollama_models(host)
     return models[0] if models else None
+
+
+# Hosted models listed with an Ollama API key, keyed by a fingerprint of the
+# key. The sidebar asks on every rerun; ollama.com is asked at most every
+# _CLOUD_LIST_TTL seconds per key. A failed listing is not cached.
+_CLOUD_LIST_TTL = 600.0
+_cloud_list_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def list_ollama_cloud_models(api_key: str | None) -> list[str]:
+    """Models on Ollama's hosted API for this key, or [] (no key, or unreachable)."""
+    import hashlib
+    import time
+
+    if not api_key:
+        return []
+    from biomentis.config import ollama_cloud_host
+
+    host = ollama_cloud_host()
+    fingerprint = hashlib.sha256(f"{host}|{api_key}".encode()).hexdigest()[:16]
+    cached = _cloud_list_cache.get(fingerprint)
+    if cached and time.monotonic() - cached[0] < _CLOUD_LIST_TTL:
+        return list(cached[1])
+    try:
+        import ollama
+
+        client = ollama.Client(host=host, headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
+        models = sorted(m.model for m in client.list().models)
+    except Exception as e:
+        print(f"Note: could not list Ollama Cloud models ({type(e).__name__})")
+        return []
+    _cloud_list_cache[fingerprint] = (time.monotonic(), models)
+    return list(models)

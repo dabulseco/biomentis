@@ -8,7 +8,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 if TYPE_CHECKING:
     from biomentis.config import BiomentisConfig
 
-SourceType = Literal["OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "Gemini", "Bedrock", "Groq", "Custom"]
+SourceType = Literal["OpenAI", "AzureOpenAI", "Anthropic", "Ollama", "OllamaCloud", "Gemini", "Bedrock", "Groq", "Custom"]
 ALLOWED_SOURCES: set[str] = set(SourceType.__args__)
 
 # Most tokens one Ollama reply may generate. Ollama's own default is unlimited,
@@ -36,14 +36,16 @@ def claude_rejects_sampling(model: str | None) -> bool:
     return family == "opus" and (major, minor) >= (4, 7)
 
 
-def _ollama_can_think(model: str, base_url: str | None) -> bool:
+def _ollama_can_think(model: str, base_url: str | None, headers: dict | None = None) -> bool:
     """Whether the daemon lists `thinking` among the model's capabilities."""
     import ollama
 
-    return "thinking" in (ollama.Client(host=base_url).show(model).capabilities or [])
+    return "thinking" in (ollama.Client(host=base_url, headers=headers).show(model).capabilities or [])
 
 
-def _ollama_reasoning(model: str, base_url: str | None) -> bool | None:
+def _ollama_reasoning(
+    model: str, base_url: str | None, cloud: bool | None = None, headers: dict | None = None
+) -> bool | None:
     """The `think` setting to send for an Ollama model, or None to send none.
 
     Leaving `think` unset lets Ollama apply its own default (on, for gemma4),
@@ -60,7 +62,8 @@ def _ollama_reasoning(model: str, base_url: str | None) -> bool | None:
         so when that can't be confirmed nothing is sent, as before
 
     BIOMENTIS_OLLAMA_THINK=true|false overrides both; `auto` (or unset) is the
-    rule above.
+    rule above. `cloud` says so for models reached on ollama.com directly,
+    whose names carry no `-cloud` tag; by default the tag decides.
     """
     override = (os.getenv("BIOMENTIS_OLLAMA_THINK") or "").strip().lower()
     if override in ("1", "true", "on", "yes"):
@@ -70,10 +73,10 @@ def _ollama_reasoning(model: str, base_url: str | None) -> bool | None:
 
     from biomentis.context_budget import is_ollama_cloud
 
-    if not is_ollama_cloud(model):
+    if not (is_ollama_cloud(model) if cloud is None else cloud):
         return False
     try:
-        return True if _ollama_can_think(model, base_url) else None
+        return True if _ollama_can_think(model, base_url, headers) else None
     except Exception as e:
         print(f"Note: could not read capabilities for {model} ({e!r}); leaving Ollama's thinking default")
         return None
@@ -431,6 +434,33 @@ def _build_llm(
             reasoning=_ollama_reasoning(model, ollama_host),
         )
 
+    elif source == "OllamaCloud":
+        # Ollama's hosted API, reached directly with an API key: no local
+        # daemon or `ollama signin` needed. Hosted names carry no `-cloud` tag.
+        try:
+            from langchain_ollama import ChatOllama
+        except ImportError:
+            raise ImportError(  # noqa: B904
+                "langchain-ollama package is required for Ollama models. Install with: pip install langchain-ollama"
+            )
+        from biomentis.config import ollama_cloud_host, resolve_ollama_key
+
+        key = resolve_ollama_key()
+        if not key:
+            raise ValueError(
+                "Ollama Cloud needs an API key: set OLLAMA_API_KEY in .env or paste it in the sidebar."
+            )
+        host = base_url or ollama_cloud_host()
+        headers = {"Authorization": f"Bearer {key}"}
+        return ChatOllama(
+            model=model,
+            temperature=temperature,
+            base_url=host,
+            client_kwargs={"headers": headers},
+            num_predict=int(os.getenv("BIOMENTIS_OLLAMA_NUM_PREDICT") or OLLAMA_NUM_PREDICT_DEFAULT),
+            reasoning=_ollama_reasoning(model, host, cloud=True, headers=headers),
+        )
+
     elif source == "Bedrock":
         try:
             from langchain_aws import ChatBedrock
@@ -466,5 +496,5 @@ def _build_llm(
 
     else:
         raise ValueError(
-            f"Invalid source: {source}. Valid options are 'OpenAI', 'AzureOpenAI', 'Anthropic', 'Gemini', 'Groq', 'Bedrock', or 'Ollama'"
+            f"Invalid source: {source}. Valid options are 'OpenAI', 'AzureOpenAI', 'Anthropic', 'Gemini', 'Groq', 'Bedrock', 'Ollama', or 'OllamaCloud'"
         )

@@ -22,7 +22,7 @@ from biomentis.agent.tutor import TutorEngine
 from biomentis.config import default_config
 from biomentis.ui_core import list_available_providers
 from biomentis.ui_repl import render_repl_panel
-from biomentis.ui_settings import render_anthropic_key_field, render_ncbi_email_field
+from biomentis.ui_settings import render_anthropic_key_field, render_ncbi_email_field, render_ollama_key_field
 from biomentis.ui_tutor import (
     install_renderers,
     render_tutor_chat_panel,
@@ -120,6 +120,12 @@ with st.sidebar:
     st.divider()
     st.header("Anthropic")
     render_anthropic_key_field()
+
+    # Ollama API key: lists Ollama's hosted models (DeepSeek, ...) under
+    # "OllamaCloud" in the picker above, reached without a local signin.
+    st.divider()
+    st.header("Ollama Cloud")
+    render_ollama_key_field()
 
 
 # --- Agent (rebuilt when the model changes) -----------------------------

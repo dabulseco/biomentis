@@ -65,7 +65,7 @@ class _Capabilities:
         self.thinking = thinking
         self.asked: list[str] = []
 
-    def __call__(self, model: str, base_url: str | None) -> bool:
+    def __call__(self, model: str, base_url: str | None, headers: dict | None = None) -> bool:
         self.asked.append(model)
         answer = self.thinking.get(model, False)
         if isinstance(answer, Exception):

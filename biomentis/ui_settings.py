@@ -19,11 +19,14 @@ import streamlit as st
 from biomentis.config import (
     apply_anthropic_key,
     apply_ncbi_email,
+    apply_ollama_key,
     default_config,
     is_placeholder_secret,
     looks_like_anthropic_key,
     resolve_anthropic_key,
+    resolve_ollama_key,
     verify_anthropic_key,
+    verify_ollama_key,
 )
 
 NCBI_EMAIL_KEY = "biomni_ncbi_email"
@@ -147,4 +150,67 @@ def render_anthropic_key_field(verify: bool = True) -> None:
         return
 
     ok, message = _verify_cached(value.strip())
+    st.caption(("✓ " if ok else "⚠️ ") + message)
+
+
+# --- Ollama API key --------------------------------------------------------
+
+OLLAMA_KEY_KEY = "biomni_ollama_key"
+_OLLAMA_VERDICT_KEY = "biomni_ollama_key_verdict"
+
+_OLLAMA_HELP = (
+    "Lists Ollama's hosted models (DeepSeek, Qwen, GLM, ...) in the model picker "
+    "as `OllamaCloud`, reached at ollama.com without a local `ollama signin`. "
+    "Create a key at ollama.com/settings/keys. Applies to this session only — "
+    "set `OLLAMA_API_KEY=...` in .env to make it stick across restarts."
+)
+
+
+def render_ollama_key_field(verify: bool = True) -> None:
+    """Render the Ollama API key input and apply whatever is currently in it.
+
+    Same shape as `render_anthropic_key_field`. The model picker is drawn
+    above this field, so a newly applied key reruns the page once to list
+    the hosted models there.
+    """
+    if OLLAMA_KEY_KEY not in st.session_state:
+        st.session_state[OLLAMA_KEY_KEY] = resolve_ollama_key() or ""
+
+    value = st.text_input(
+        "Ollama API key",
+        key=OLLAMA_KEY_KEY,
+        type="password",
+        placeholder="Ollama API key",
+        help=_OLLAMA_HELP,
+    )
+
+    if not value.strip():
+        st.caption("Not set — hosted models are available only through a signed-in local Ollama.")
+        return
+
+    if is_placeholder_secret(value):
+        st.caption(
+            "⚠️ That's the example placeholder from `.env.example`, not a key. "
+            "Paste your real key here, or set `OLLAMA_API_KEY=...` in .env."
+        )
+        return
+
+    previous = default_config.ollama_key
+    if not apply_ollama_key(value):
+        st.caption("⚠️ That doesn't look like a key — keeping the previous value.")
+        return
+
+    if not verify:
+        st.caption("✓ Key applied for this session.")
+        return
+
+    candidate = value.strip()
+    fingerprint = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:16]
+    cached = st.session_state.get(_OLLAMA_VERDICT_KEY)
+    if not (cached and cached[0] == fingerprint):
+        ok, message = verify_ollama_key(candidate)
+        st.session_state[_OLLAMA_VERDICT_KEY] = (fingerprint, ok, message)
+        if ok and previous != default_config.ollama_key:
+            st.rerun()  # list the hosted models in the picker above
+    _, ok, message = st.session_state[_OLLAMA_VERDICT_KEY]
     st.caption(("✓ " if ok else "⚠️ ") + message)

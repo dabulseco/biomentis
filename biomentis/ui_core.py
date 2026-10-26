@@ -680,7 +680,8 @@ def list_available_providers() -> dict[str, list[str]]:
     """List providers/models available for the UI's model selector.
 
     Ollama models are discovered live from the local daemon (local and
-    Ollama-Cloud-signed-in models alike). Cloud providers are only listed when
+    Ollama-Cloud-signed-in models alike), and from ollama.com when an Ollama
+    API key is set ("OllamaCloud"). Other cloud providers are only listed when
     their API key env var is present, and use a short illustrative catalog of
     model ids rather than a live lookup.
     """
@@ -691,6 +692,14 @@ def list_available_providers() -> dict[str, list[str]]:
     ollama_models = list_ollama_models()
     if ollama_models:
         providers["Ollama"] = ollama_models
+
+    # Hosted models reached directly with an Ollama API key (no daemon needed).
+    from biomentis.config import resolve_ollama_key
+    from biomentis.ollama_utils import list_ollama_cloud_models
+
+    cloud_models = list_ollama_cloud_models(resolve_ollama_key())
+    if cloud_models:
+        providers["OllamaCloud"] = cloud_models
 
     from biomentis.config import resolve_anthropic_key, secret_is_set
 

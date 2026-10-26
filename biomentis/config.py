@@ -91,6 +91,11 @@ class BiomentisConfig:
     # note there for why the environment is *not* the top tier.
     anthropic_key: str | None = None
 
+    # Ollama Cloud
+    # Session-scoped override for OLLAMA_API_KEY, set by the sidebar field.
+    # Same precedence as the Anthropic key; see `resolve_ollama_key`.
+    ollama_key: str | None = None
+
     def __post_init__(self):
         """Load any environment variable overrides if they exist."""
         # Check for environment variable overrides (optional)
@@ -313,23 +318,28 @@ def resolve_anthropic_key(env=None, dotenv_path: str = ".env") -> str | None:
 
     Every tier is passed through `_normalize_secret`.
     """
+    return _resolve_secret("ANTHROPIC_API_KEY", default_config.anthropic_key, env, dotenv_path)
+
+
+def _resolve_secret(var: str, session: str | None, env, dotenv_path: str) -> str | None:
+    """`session`, then `var` in `dotenv_path`, then `var` in `env`; normalized."""
     env = os.environ if env is None else env
 
-    session = _normalize_secret(default_config.anthropic_key)
+    session = _normalize_secret(session)
     if session:
         return session
 
     try:
         from dotenv import dotenv_values
 
-        from_file = _normalize_secret(dotenv_values(dotenv_path).get("ANTHROPIC_API_KEY"))
+        from_file = _normalize_secret(dotenv_values(dotenv_path).get(var))
         if from_file:
             return from_file
     except Exception:
         # A missing or unreadable .env is normal; fall through to the shell.
         pass
 
-    return _normalize_secret(env.get("ANTHROPIC_API_KEY")) or None
+    return _normalize_secret(env.get(var)) or None
 
 
 def apply_anthropic_key(key: str | None) -> bool:
@@ -384,3 +394,60 @@ def verify_anthropic_key(key: str | None) -> tuple[bool, str]:
         return False, "Key authenticated but lacks permission (403)."
     except Exception as e:  # network down, proxy misconfigured, SDK too old
         return False, f"Couldn't verify the key: {type(e).__name__}."
+
+
+# --- Ollama Cloud ---------------------------------------------------------
+#
+# With an Ollama API key the app talks to Ollama's hosted models (DeepSeek,
+# Qwen, GLM, ...) at ollama.com directly, without a local daemon signed in
+# via `ollama signin`. Same tiers and placeholder handling as the Anthropic key.
+
+OLLAMA_CLOUD_HOST_DEFAULT = "https://ollama.com"
+
+
+def ollama_cloud_host() -> str:
+    """Where Ollama's hosted API lives: `OLLAMA_CLOUD_HOST`, else ollama.com."""
+    return (os.getenv("OLLAMA_CLOUD_HOST") or OLLAMA_CLOUD_HOST_DEFAULT).rstrip("/")
+
+
+def resolve_ollama_key(env=None, dotenv_path: str = ".env") -> str | None:
+    """The Ollama API key to use: the sidebar, then `.env`, then the shell."""
+    return _resolve_secret("OLLAMA_API_KEY", default_config.ollama_key, env, dotenv_path)
+
+
+def apply_ollama_key(key: str | None) -> bool:
+    """Apply an Ollama API key for this session; False (and no change) if unusable.
+
+    Also sets `OLLAMA_API_KEY`, which the `ollama` package itself reads.
+    """
+    candidate = _normalize_secret(key)
+    if not candidate or any(c.isspace() for c in candidate):
+        return False
+
+    default_config.ollama_key = candidate
+    os.environ["OLLAMA_API_KEY"] = candidate
+    return True
+
+
+def verify_ollama_key(key: str | None) -> tuple[bool, str]:
+    """Check a key with `POST /api/me` (who am I); no inference, no cost.
+
+    Not by listing models: ollama.com lists its hosted models, and describes
+    them, for any caller, so a made-up key "worked" there (checked 2026-10-26).
+    """
+    candidate = _normalize_secret(key)
+    if not candidate:
+        return False, "No key set."
+    try:
+        import httpx
+
+        response = httpx.post(
+            f"{ollama_cloud_host()}/api/me", headers={"Authorization": f"Bearer {candidate}"}, timeout=10
+        )
+    except Exception as e:
+        return False, f"Couldn't verify the key: {type(e).__name__}."
+    if response.status_code == 200:
+        return True, "Key accepted by Ollama Cloud."
+    if response.status_code in (401, 403):
+        return False, f"Ollama Cloud rejected this key ({response.status_code}). It may be revoked or mistyped."
+    return False, f"Couldn't verify the key (HTTP {response.status_code})."

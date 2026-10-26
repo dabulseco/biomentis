@@ -331,7 +331,7 @@ def test_repl_captures_open_figures():
     from biomentis.tool import support_tools
 
     src = inspect.getsource(support_tools.run_python_repl)
-    _check("capture enabled", "\n            _capture_matplotlib_plots()" in src and "# _capture_matplotlib_plots()" not in src, "")
+    _check("capture enabled", "_capture_matplotlib_plots()" in src and "# _capture_matplotlib_plots()" not in src, "")
     try:
         import matplotlib
 
@@ -343,6 +343,33 @@ def test_repl_captures_open_figures():
     support_tools.run_python_repl("import matplotlib.pyplot as plt\nplt.figure()\nplt.plot([1, 2, 3])")
     plots = support_tools.get_captured_plots()
     _check("one figure captured", len(plots) == 1 and plots[0].startswith("data:image/png;base64,"), f"{len(plots)}")
+    support_tools.clear_captured_plots()
+
+
+def test_failing_step_owns_its_figure():
+    print("\n[14] A step that raises owns its partial figure; the next step shows none")
+    from biomentis.tool import support_tools
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+    except ImportError:
+        print("  (matplotlib unavailable; skipping)")
+        return
+    # Step 1: draws, then raises. The execute node clears before each step.
+    support_tools.clear_captured_plots()
+    out = support_tools.run_python_repl(
+        "import matplotlib.pyplot as plt\nplt.figure()\nplt.plot([1, 2])\nraise ValueError('boom')"
+    )
+    step1 = support_tools.get_captured_plots()
+    _check("the failing step reports its error", out.startswith("Error:"), out)
+    _check("the failing step's figure is attributed to it", len(step1) == 1, f"{len(step1)}")
+    # Step 2: no plotting at all.
+    support_tools.clear_captured_plots()
+    support_tools.run_python_repl("x = 1 + 1")
+    step2 = support_tools.get_captured_plots()
+    _check("a non-plotting next step captures nothing", step2 == [], f"{len(step2)}")
     support_tools.clear_captured_plots()
 
 
@@ -365,6 +392,7 @@ def run_all() -> int:
         test_render_entry_branches,
         test_execute_sets_current_run_id,
         test_repl_captures_open_figures,
+        test_failing_step_owns_its_figure,
     ):
         try:
             test()

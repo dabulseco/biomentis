@@ -31,14 +31,15 @@ def run_python_repl(command: str) -> str:
             exec(command, _persistent_namespace)
             output = mystdout.getvalue()
 
-            # Capture figures the code left open (no plt.show / savefig);
-            # they are shown in the step, or withheld, per the plot setting.
-            _capture_matplotlib_plots()
-
         except Exception as e:
             output = f"Error: {str(e)}"
         finally:
             sys.stdout = old_stdout
+            # Capture figures the code left open (no plt.show / savefig);
+            # they are shown in the step, or withheld, per the plot setting.
+            # In `finally` so a step that raises still owns its partial
+            # figure, instead of it surfacing under the next step.
+            _capture_matplotlib_plots()
         return output
 
     command = command.strip("```").strip()

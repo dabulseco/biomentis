@@ -11,6 +11,7 @@ If that script cannot load, the frame shows a message and the download button st
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 
 import streamlit as st
@@ -26,6 +27,8 @@ from biomentis.structures import format_for_path, inspect_structure
 THREEDMOL_URL = "https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.4.2/3Dmol-min.js"
 
 _FALLBACK_TEXT = "The 3D viewer could not load. Use the download button below."
+# How long the frame waits for 3Dmol before showing the fallback message.
+_VIEWER_TIMEOUT_MS = 8000
 _MACROMOLECULES = {"protein", "nucleic_acid", "complex"}
 
 
@@ -64,12 +67,17 @@ _PAGE = """<!DOCTYPE html>
 <body>
 <div id="viewer"></div>
 <div class="viewer-fallback">{fallback}</div>
-<script src="{url}" onerror="showFallback()"></script>
 <script>
+// Defined before the CDN tag so its onerror can call it. The watchdog covers
+// a CDN request that hangs instead of failing: never leave a blank frame.
 function showFallback() {{
   document.getElementById("viewer").style.display = "none";
   document.querySelector(".viewer-fallback").style.display = "block";
 }}
+var fallbackTimer = setTimeout(showFallback, {timeout_ms});
+</script>
+<script src="{url}" onerror="clearTimeout(fallbackTimer); showFallback()"></script>
+<script>
 (function () {{
   var views = {views};
   try {{
@@ -86,7 +94,9 @@ function showFallback() {{
     }});
     viewer.zoomTo();
     viewer.render();
+    clearTimeout(fallbackTimer);
   }} catch (e) {{
+    clearTimeout(fallbackTimer);
     showFallback();
   }}
 }})();
@@ -102,6 +112,7 @@ def viewer_html(views: list[MoleculeView], height: int = 420) -> str:
         height=int(height),
         fallback=_FALLBACK_TEXT,
         url=THREEDMOL_URL,
+        timeout_ms=_VIEWER_TIMEOUT_MS,
         views=_js_json(payload),
     )
 
@@ -116,6 +127,44 @@ def _metadata_table(rows: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+# Parsing runs on every rerun of every transcript entry, so it is cached per
+# (path, mtime, record). The cache lives here, not in structure_info, which
+# stays free of Streamlit.
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return -1.0
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_record_count(path: str, mtime: float) -> int:
+    return sdf_record_count(path)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_viewer_model(path: str, mtime: float, record: int):
+    return viewer_model(path, record)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_metadata(path: str, mtime: float, record: int):
+    return structure_metadata(path, record)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_depiction(path: str, mtime: float, record: int):
+    return depiction_png(path, record)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_style(path: str, mtime: float) -> str:
+    try:
+        return default_style(inspect_structure(path).molecule_class)
+    except Exception:  # noqa: BLE001
+        return "stick"
+
+
 def render_structure(path: str, *, key: str, container=None) -> None:
     """Draw `path` (PDB, SDF or SMILES): viewer, metadata, depiction, download.
 
@@ -124,10 +173,11 @@ def render_structure(path: str, *, key: str, container=None) -> None:
     """
     box = container if container is not None else st
     fmt = format_for_path(path)
+    mtime = _mtime(path)
 
     record = 0
     if fmt == "sdf":
-        count = sdf_record_count(path)
+        count = _cached_record_count(path, mtime)
         if count > 1:
             record = box.selectbox(
                 "Record",
@@ -138,23 +188,20 @@ def render_structure(path: str, *, key: str, container=None) -> None:
 
     left, right = box.columns(2)
 
-    model = viewer_model(path, record)
+    model = _cached_viewer_model(path, mtime, record)
     with left:
         if model is None:
             st.info("This structure could not be drawn.")
         else:
             text, model_fmt = model
-            try:
-                style = default_style(inspect_structure(path).molecule_class)
-            except Exception:  # noqa: BLE001
-                style = "stick"
+            style = _cached_style(path, mtime)
             # st.iframe replaces the deprecated st.components.v1.html.
             st.iframe(viewer_html([MoleculeView(text, model_fmt, style)]), height=440)
 
     with right:
-        st.markdown(_metadata_table(structure_metadata(path, record)))
+        st.markdown(_metadata_table(_cached_metadata(path, mtime, record)))
         if fmt in ("sdf", "smi"):
-            png = depiction_png(path, record)
+            png = _cached_depiction(path, mtime, record)
             if png:
                 st.image(png)
 
@@ -165,6 +212,21 @@ def render_structure(path: str, *, key: str, container=None) -> None:
         return
     name = path.replace("\\", "/").rsplit("/", 1)[-1]
     box.download_button("Download structure file", data, file_name=name, key=f"dl-{key}")
+
+
+MISSING_IMAGE_NOTE = "Plot file no longer available."
+
+
+def render_image_file(path: str) -> None:
+    """`st.image(path)`, or a caption when the file is gone.
+
+    Transcript replay draws saved figures from disk; a deleted run directory
+    must not raise and break the rest of the transcript.
+    """
+    if isinstance(path, str) and os.path.isfile(path):
+        st.image(path)
+    else:
+        st.caption(MISSING_IMAGE_NOTE)
 
 
 # --- Class plot setting ---------------------------------------------------

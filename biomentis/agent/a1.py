@@ -3808,7 +3808,11 @@ Each library is listed with its description to help you understand its functiona
                 if entry.get("kind") == "code":
                     st.code(entry["content"], language=entry.get("language") or "python")
                 elif entry.get("kind") in ("image", "plot"):
-                    st.image(entry["file_path"])
+                    # A missing file (run dir deleted) shows a caption
+                    # instead of raising and breaking transcript replay.
+                    from biomentis.ui_visuals import render_image_file
+
+                    render_image_file(entry["file_path"])
                 elif entry.get("kind") == "structure":
                     # Not governed by the plot setting. The key follows render
                     # order, which is stable across reruns for a transcript.

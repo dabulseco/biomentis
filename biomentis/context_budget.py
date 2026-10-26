@@ -60,6 +60,7 @@ __all__ = [
     "OLLAMA_CLOUD_LIMIT",
     "WRAP_UP_INSTRUCTION",
     "estimate_messages_tokens",
+    "is_ollama_cloud",
     "estimate_tokens",
     "fit_messages",
     "is_context_length_error",
@@ -208,7 +209,7 @@ def model_name(llm: Any) -> str:
     return ""
 
 
-def _is_ollama_cloud(name: str) -> bool:
+def is_ollama_cloud(name: str) -> bool:
     """Whether a model name is one of Ollama's hosted models.
 
     Ollama tags them two ways — `glm-5.1:cloud` and `gemma4:31b-cloud` — and
@@ -275,7 +276,7 @@ def resolve_context_limit(llm: Any) -> int | None:
     # enforcing the limit, which beats guessing from the family name. A
     # `qwen*:cloud` matches the "qwen" row and would be held to 32k, a
     # truncation the gateway never asked for.
-    if _is_ollama_cloud(name):
+    if is_ollama_cloud(name):
         return OLLAMA_CLOUD_LIMIT
 
     for fragment, limit in KNOWN_CONTEXT_LIMITS.items():

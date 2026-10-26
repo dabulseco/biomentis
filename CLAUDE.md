@@ -44,6 +44,8 @@ $P -m biomentis.agent.tests.test_ncbi_email        # NCBI/Entrez email + sidebar
 $P -m biomentis.agent.tests.test_anthropic_key     # Anthropic key resolution + web-search fallback
 $P -m biomentis.agent.tests.test_runaway_generation # parse-error retry cap + Ollama turn cutoff
 $P -m biomentis.agent.tests.test_kb_context         # knowledge base → agent + Clear KB confirm
+$P -m biomentis.agent.tests.test_tutor_card_cache   # failed cards not cached + loop messages not shown as steps
+$P -m biomentis.agent.tests.test_ollama_thinking    # per-model Ollama `think` setting (cloud on, local off)
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

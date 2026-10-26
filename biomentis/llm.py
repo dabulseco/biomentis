@@ -17,6 +17,49 @@ ALLOWED_SOURCES: set[str] = set(SourceType.__args__)
 OLLAMA_NUM_PREDICT_DEFAULT = 8192
 
 
+def _ollama_can_think(model: str, base_url: str | None) -> bool:
+    """Whether the daemon lists `thinking` among the model's capabilities."""
+    import ollama
+
+    return "thinking" in (ollama.Client(host=base_url).show(model).capabilities or [])
+
+
+def _ollama_reasoning(model: str, base_url: str | None) -> bool | None:
+    """The `think` setting to send for an Ollama model, or None to send none.
+
+    Leaving `think` unset lets Ollama apply its own default (on, for gemma4),
+    and that failed both ways on the agent's ~46k-token first turn:
+    `gemma4:31b-cloud` returned empty content every time unless thinking was
+    explicitly on, and `gemma4:26b-mlx` degenerated into repeated words until
+    the output cap unless it was explicitly off. So:
+
+      * local models get `think=false` — accepted by every model, thinking
+        or not, and it is also the difference between a 23 s turn and a
+        70 s one on a laptop
+      * cloud models get `think=true`, but only if the daemon says the model
+        can think: Ollama answers `think=true` with a 400 for one that can't,
+        so when that can't be confirmed nothing is sent, as before
+
+    BIOMENTIS_OLLAMA_THINK=true|false overrides both; `auto` (or unset) is the
+    rule above.
+    """
+    override = (os.getenv("BIOMENTIS_OLLAMA_THINK") or "").strip().lower()
+    if override in ("1", "true", "on", "yes"):
+        return True
+    if override in ("0", "false", "off", "no"):
+        return False
+
+    from biomentis.context_budget import is_ollama_cloud
+
+    if not is_ollama_cloud(model):
+        return False
+    try:
+        return True if _ollama_can_think(model, base_url) else None
+    except Exception as e:
+        print(f"Note: could not read capabilities for {model} ({e!r}); leaving Ollama's thinking default")
+        return None
+
+
 # Client classes that end up NOT applying stop sequences, and why. Anything
 # not listed here is treated as a bug by `_check_stop_sequences` below: the
 # caller asked for stop sequences and the client dropped them.
@@ -325,11 +368,13 @@ def _build_llm(
             )
         # Falls back to OLLAMA_HOST for consistency with the `ollama` package's own
         # convention; needed to reach a remote daemon or an Ollama Cloud sign-in.
+        ollama_host = base_url or os.getenv("OLLAMA_HOST")
         return ChatOllama(
             model=model,
             temperature=temperature,
-            base_url=base_url or os.getenv("OLLAMA_HOST"),
+            base_url=ollama_host,
             num_predict=int(os.getenv("BIOMENTIS_OLLAMA_NUM_PREDICT") or OLLAMA_NUM_PREDICT_DEFAULT),
+            reasoning=_ollama_reasoning(model, ollama_host),
         )
 
     elif source == "Bedrock":

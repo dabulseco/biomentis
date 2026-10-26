@@ -562,7 +562,7 @@ def query_alphafold(
                             "prediction", "summary", or "annotations"
     residue_range (str, optional): Specific residue range in format "start-end" (e.g., "1-100")
     download (bool): Whether to download structure files
-    output_dir (str, optional): Directory to save downloaded files (default: current directory)
+    output_dir (str, optional): Directory to save downloaded files (default: the run-scoped artifact directory)
     file_format (str): Format of the structure file to download - "pdb" or "cif"
     model_version (str): AlphaFold model version - "v4" (latest) or "v3", "v2", "v1"
     model_number (int): Model number (1-5, with 1 being the highest confidence model)

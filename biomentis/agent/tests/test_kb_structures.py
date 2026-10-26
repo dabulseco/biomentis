@@ -50,6 +50,22 @@ def test_kb_indexes_metadata_only():
     _check("sources named", {"mini_xray.pdb", "two_mols.sdf", "aspirin.smi"} <= set(kb.stats().source_names))
 
 
+def test_unreadable_structure_not_indexed():
+    from biomentis.agent.tutor.kb import KnowledgeBase
+
+    root = tempfile.mkdtemp()
+    kb = KnowledgeBase("kbbad", path=root)
+    bad = os.path.join(root, "garbage.pdb")
+    with open(bad, "w") as f:
+        f.write("this is not a structure\n")
+    empty = os.path.join(root, "empty.sdf")
+    open(empty, "w").close()
+    n = kb.add_files([bad, empty])
+    _check("garbage adds no chunks", n == 0, str(n))
+    names = kb.stats().source_names
+    _check("garbage not listed", "garbage.pdb" not in names and "empty.sdf" not in names, str(names))
+
+
 def test_uploader_accepts_structure_types():
     src = open(os.path.join(os.path.dirname(__file__), "..", "..", "ui_tutor.py")).read()
     _check(
@@ -60,7 +76,7 @@ def test_uploader_accepts_structure_types():
 
 
 def run_all() -> int:
-    for test in (test_kb_indexes_metadata_only, test_uploader_accepts_structure_types):
+    for test in (test_kb_indexes_metadata_only, test_unreadable_structure_not_indexed, test_uploader_accepts_structure_types):
         try:
             test()
         except Exception as e:

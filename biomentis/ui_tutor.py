@@ -1519,6 +1519,15 @@ def _kb_add(tutor, uploaded_files, url_text: str) -> None:
         try:
             n_chunks += tutor.kb.add_files(saved_paths)
             print(f"[tutor KB] add_files returned {n_chunks} chunks", file=sys.stderr)
+            indexed = set(tutor.kb.stats().source_names)
+            skipped = [
+                os.path.basename(p) for p in saved_paths
+                if os.path.basename(p) not in indexed
+            ]
+            if skipped:
+                st.warning(
+                    "Skipped (unreadable or unsupported): " + ", ".join(skipped)
+                )
         except Exception as e:
             print(f"[tutor KB] add_files raised: {e!r}", file=sys.stderr)
             st.error(f"KB file ingest failed: {e!r}")

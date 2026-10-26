@@ -140,7 +140,8 @@ class KnowledgeBase:
     def add_files(self, files: Iterable[str]) -> int:
         """Index a batch of file paths. Returns the number of chunks added.
 
-        Accepts .pdf, .pptx, .docx, .txt. Unsupported extensions are skipped
+        Accepts .pdf, .pptx, .docx, .txt and the structure files .pdb, .sdf,
+        .smi (indexed by descriptive metadata only). Unsupported extensions are skipped
         with a printed warning rather than raising — the UI is interactive
         and we don't want one bad file to abort an upload batch.
 
@@ -378,8 +379,12 @@ class KnowledgeBase:
             return "\n\n".join(p.text for p in doc.paragraphs if p.text)
         if ext in (".pdb", ".sdf", ".smi"):
             # Index descriptive metadata only -- never atom coordinates.
-            from biomentis.structure_info import metadata_text
+            from biomentis.structure_info import metadata_text, structure_metadata
 
+            rows = structure_metadata(file_path)
+            if len(rows) == 1 and rows[0][0] == "Error":
+                # Don't index an error message (or a server path) as content.
+                raise ValueError(f"Could not read structure file: {rows[0][1]}")
             return metadata_text(file_path)
         raise ValueError(f"Unsupported file type: {ext}")
 

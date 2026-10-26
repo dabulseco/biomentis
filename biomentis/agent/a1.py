@@ -105,9 +105,12 @@ from biomentis.model.retriever import ToolRetriever
 from biomentis.tool.support_tools import run_python_repl
 from biomentis.tool.tool_registry import ToolRegistry
 from biomentis.run_journal import RunJournal, journaled
+from biomentis.plots import plot_guidance, save_plot_pngs
+from biomentis.structures import default_artifact_dir, set_current_run_id
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
     ExportEntry,
+    export_kind,
     format_duration,
     get_llm_display_name,
     list_available_providers,
@@ -157,6 +160,38 @@ class AgentState(TypedDict):
 # generate node can record how many attempts it took without changing the
 # function's signature (it has two callers).
 LAST_LLM_CALL: dict[str, int] = {"attempts": 0}
+
+# Repeated-step guard. A step that repeats an earlier step of the same run
+# exactly (same code, same output) cannot teach the agent anything new.
+# gemma4:26b-mlx re-ran one plotting block 108 times in a 32-minute run
+# (2026-10-26). Each repeat is pointed out; the third also asks for the answer
+# now; the fourth ends the run. Same output, not just same code: the REPL keeps
+# state, so identical code after a change elsewhere can legitimately differ.
+REPEAT_ANSWER_NOW_AT = 3
+REPEAT_STOP_AT = 4
+REPEATED_STEPS_STOPPED = (
+    "Run stopped: the agent ran the same code with the same result {n} times without "
+    "changing anything, so it was not making progress. The work completed so far is above."
+)
+
+
+def _normalize_code(code: str) -> str:
+    """Code with trailing spaces and blank lines removed, for repeat detection."""
+    return "\n".join(line.rstrip() for line in code.strip().splitlines() if line.strip())
+
+
+def _repeat_note(first_step: int, repeats: int) -> str:
+    note = (
+        f"\nNOTE: this step repeated step {first_step} exactly (same code, same output). "
+        "Running it again will not change anything: fix the code, try a different approach, "
+        "or give your <solution>."
+    )
+    if repeats >= REPEAT_ANSWER_NOW_AT:
+        note += (
+            f" This is repeat number {repeats}; one more and the run is stopped. "
+            "Give your <solution> now, based on the results you already have."
+        )
+    return note
 
 
 def _is_ollama(llm) -> bool:
@@ -454,6 +489,10 @@ class A1:
 
         # Add timeout parameter
         self.timeout_seconds = timeout_seconds  # 10 minutes default timeout
+
+        # Set per run by launch_streamlit_demo; defaults serve non-UI callers.
+        self.plot_mode = "show"
+        self.current_run_id = None
 
         # Step-level tracing. Cheap (a few JSON lines per step, no extra LLM
         # calls), so it defaults on -- the failures worth studying are the
@@ -1708,6 +1747,9 @@ Each library is listed with its description to help you understand its functiona
                 "gpt" in str(self.llm.model_name).lower() or "openai" in str(type(self.llm)).lower()
             ):
                 system_prompt += "\n\nIMPORTANT FOR GPT MODELS: You MUST use XML tags <execute> or <solution> in EVERY response. Do not use markdown code blocks (```) - use <execute> tags instead."
+            # Per call, not baked into self.system_prompt, so the next run
+            # follows a changed plot setting without re-running configure().
+            system_prompt += "\n\n" + plot_guidance(getattr(self, "plot_mode", "show"))
 
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
             messages, context_fit = self._fit_request(messages)
@@ -1867,6 +1909,7 @@ Each library is listed with its description to help you understand its functiona
             return state
 
         def execute(state: AgentState) -> AgentState:
+            state["next_step"] = "generate"
             last_message = state["messages"][-1].content
             # Only add the closing tag if it's not already there
             if "<execute>" in last_message and "</execute>" not in last_message:
@@ -1881,45 +1924,55 @@ Each library is listed with its description to help you understand its functiona
                 trace_t0 = time.time()
                 trace_lang = "python"
 
-                # Check if the code is R code
-                if (
-                    code.strip().startswith("#!R")
-                    or code.strip().startswith("# R code")
-                    or code.strip().startswith("# R script")
-                ):
-                    # Remove the R marker and run as R code
-                    r_code = re.sub(r"^#!R|^# R code|^# R script", "", code, count=1).strip()
-                    trace_lang = "r"
-                    result = run_with_timeout(run_r_code, [r_code], timeout=timeout)
-                # Check if the code is a Bash script or CLI command
-                elif (
-                    code.strip().startswith("#!BASH")
-                    or code.strip().startswith("# Bash script")
-                    or code.strip().startswith("#!CLI")
-                ):
-                    # Handle both Bash scripts and CLI commands with the same function
-                    if code.strip().startswith("#!CLI"):
-                        # For CLI commands, extract the command and run it as a simple bash script
-                        cli_command = re.sub(r"^#!CLI", "", code, count=1).strip()
-                        # Remove any newlines to ensure it's a single command
-                        cli_command = cli_command.replace("\n", " ")
-                        trace_lang = "cli"
-                        result = run_with_timeout(run_bash_script, [cli_command], timeout=timeout)
+                # Code runs on a REPL worker thread that cannot see this agent;
+                # tools that save files read the run id from here.
+                set_current_run_id(self.current_run_id)
+                # Clear before every language, not just Python, so an R or
+                # Bash step never inherits the previous Python step's figures.
+                self._clear_execution_plots()
+
+                try:
+                    # Check if the code is R code
+                    if (
+                        code.strip().startswith("#!R")
+                        or code.strip().startswith("# R code")
+                        or code.strip().startswith("# R script")
+                    ):
+                        # Remove the R marker and run as R code
+                        r_code = re.sub(r"^#!R|^# R code|^# R script", "", code, count=1).strip()
+                        trace_lang = "r"
+                        result = run_with_timeout(run_r_code, [r_code], timeout=timeout)
+                    # Check if the code is a Bash script or CLI command
+                    elif (
+                        code.strip().startswith("#!BASH")
+                        or code.strip().startswith("# Bash script")
+                        or code.strip().startswith("#!CLI")
+                    ):
+                        # Handle both Bash scripts and CLI commands with the same function
+                        if code.strip().startswith("#!CLI"):
+                            # For CLI commands, extract the command and run it as a simple bash script
+                            cli_command = re.sub(r"^#!CLI", "", code, count=1).strip()
+                            # Remove any newlines to ensure it's a single command
+                            cli_command = cli_command.replace("\n", " ")
+                            trace_lang = "cli"
+                            result = run_with_timeout(run_bash_script, [cli_command], timeout=timeout)
+                        else:
+                            # For Bash scripts, remove the marker and run as a bash script
+                            bash_script = re.sub(r"^#!BASH|^# Bash script", "", code, count=1).strip()
+                            trace_lang = "bash"
+                            result = run_with_timeout(run_bash_script, [bash_script], timeout=timeout)
+                    # Otherwise, run as Python code
                     else:
-                        # For Bash scripts, remove the marker and run as a bash script
-                        bash_script = re.sub(r"^#!BASH|^# Bash script", "", code, count=1).strip()
-                        trace_lang = "bash"
-                        result = run_with_timeout(run_bash_script, [bash_script], timeout=timeout)
-                # Otherwise, run as Python code
-                else:
-                    # Clear any previous plots before execution
-                    self._clear_execution_plots()
+                        # Inject custom functions into the Python execution environment
+                        self._inject_custom_functions_to_repl()
+                        result = run_with_timeout(run_python_repl, [code], timeout=timeout)
 
-                    # Inject custom functions into the Python execution environment
-                    self._inject_custom_functions_to_repl()
-                    result = run_with_timeout(run_python_repl, [code], timeout=timeout)
-
-                    # Plots are now captured directly in the execution entry above
+                        # Plots are now captured directly in the execution entry above
+                finally:
+                    # Code run outside an agent run (the sidebar REPL) must
+                    # not save into this run, so the id lives only as long
+                    # as this execution.
+                    set_current_run_id(None)
 
                 if len(result) > 10000:
                     result = (
@@ -1946,6 +1999,9 @@ Each library is listed with its description to help you understand its functiona
                 execution_entry = {
                     "triggering_message": last_message,  # The AI message that contained <execute>
                     "images": execution_plots,  # Base64 encoded images from this execution
+                    # The same figures as PNG files under the run's artifact
+                    # dir; `stream_agent_events` turns these into plot events.
+                    "image_paths": self._save_execution_plots(execution_plots),
                     "timestamp": datetime.now().isoformat(),
                 }
                 self._execution_results.append(execution_entry)
@@ -1968,8 +2024,29 @@ Each library is listed with its description to help you understand its functiona
                     plots=len(execution_plots),
                 )
 
+                # Repeated-step guard (see REPEAT_STOP_AT). After the tracer,
+                # which records what the code itself printed.
+                self._step_count = getattr(self, "_step_count", 0) + 1
+                seen = getattr(self, "_seen_steps", None)
+                if seen is None:
+                    seen = self._seen_steps = {}
+                step_key = (_normalize_code(code), result)
+                stop_for_repeats = False
+                if step_key in seen:
+                    self._repeat_steps = getattr(self, "_repeat_steps", 0) + 1
+                    stop_for_repeats = self._repeat_steps >= REPEAT_STOP_AT
+                    result += _repeat_note(seen[step_key], self._repeat_steps)
+                else:
+                    seen[step_key] = self._step_count
+
                 observation = f"\n<observation>{result}</observation>"
                 state["messages"].append(AIMessage(content=observation.strip()))
+                if stop_for_repeats:
+                    print(f"repeat guard: {self._repeat_steps} repeated steps — ending the run")
+                    state["messages"].append(
+                        AIMessage(content=REPEATED_STEPS_STOPPED.format(n=self._repeat_steps))
+                    )
+                    state["next_step"] = "end"
             else:
                 # Routed here, but nothing to run: the step is consumed without
                 # producing an observation. Invisible in the transcript, so record it.
@@ -2067,7 +2144,13 @@ Each library is listed with its description to help you understand its functiona
                 routing_function,
                 path_map={"execute": "execute", "generate": "generate", "end": END},
             )
-        workflow.add_edge("execute", "generate")
+        # Back to generate, unless the repeated-step guard ended the run. Not
+        # via self_critic: its feedback would only restart the loop.
+        workflow.add_conditional_edges(
+            "execute",
+            lambda state: "end" if state.get("next_step") == "end" else "generate",
+            path_map={"generate": "generate", "end": END},
+        )
         workflow.add_edge(START, "generate")
 
         # Compile the workflow
@@ -2210,6 +2293,12 @@ Each library is listed with its description to help you understand its functiona
             return [*fit.messages, HumanMessage(content=WRAP_UP_INSTRUCTION)], fit
         return fit.messages, fit
 
+    def _reset_step_guard(self) -> None:
+        """Start a run with no steps seen, for the repeated-step guard."""
+        self._step_count = 0
+        self._seen_steps = {}
+        self._repeat_steps = 0
+
     def _trace_finish(self, final_state, error: Exception | None = None) -> None:
         """Close the trace, labelling how the run actually ended.
 
@@ -2229,6 +2318,8 @@ Each library is listed with its description to help you understand its functiona
             outcome = "solution"
         elif "repeated parsing errors" in last:
             outcome = "aborted_parse_errors"
+        elif "same code with the same result" in last:
+            outcome = "aborted_repeated_steps"
         elif "<observation>" in last:
             outcome = "stopped_after_execution"
         else:
@@ -2258,6 +2349,7 @@ Each library is listed with its description to help you understand its functiona
         self.critic_count = 0
         self.user_task = prompt
         self._context_wrap_ups = 0
+        self._reset_step_guard()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
@@ -2313,6 +2405,7 @@ Each library is listed with its description to help you understand its functiona
         self.critic_count = 0
         self.user_task = prompt
         self._context_wrap_ups = 0
+        self._reset_step_guard()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
@@ -3048,6 +3141,27 @@ Each library is listed with its description to help you understand its functiona
         """
         convert_markdown_to_pdf(markdown_path, pdf_path)
 
+    def _save_execution_plots(self, data_uris: list[str]) -> list[str]:
+        """Write one execution's captured figures under the run's artifact dir.
+
+        Numbering continues across steps: it starts after the highest
+        `plot-<NNN>.png` already in the directory. Never raises — a figure that
+        cannot be saved must not fail the step that drew it.
+        """
+        if not data_uris:
+            return []
+        try:
+            out_dir = default_artifact_dir(getattr(self, "current_run_id", None))
+            highest = 0
+            for existing in glob.glob(os.path.join(glob.escape(out_dir), "plot-*.png")):
+                match = re.fullmatch(r"plot-(\d+)\.png", os.path.basename(existing))
+                if match:
+                    highest = max(highest, int(match.group(1)))
+            return save_plot_pngs(data_uris, out_dir, start_index=highest + 1)
+        except Exception as e:
+            print(f"Warning: Could not save execution plots: {e}")
+            return []
+
     def _clear_execution_plots(self):
         """Clear execution plots before new execution.
 
@@ -3304,9 +3418,19 @@ Each library is listed with its description to help you understand its functiona
                                 metadata={"title": event.title, "log": "Files generated by the agent"},
                             )
                         )
-                    elif event.file_kind == "pdf":
+                    elif event.file_kind in ("pdf", "plot_withheld"):
+                        # A withheld plot is its note, never the image.
                         inner_history.append(
                             ChatMessage(role="assistant", content=event.content, metadata={"title": event.title})
+                        )
+                    elif event.file_kind == "structure":
+                        # No 3D viewer here; name the file rather than feed it to gr.Image.
+                        inner_history.append(
+                            ChatMessage(
+                                role="assistant",
+                                content=f"Structure saved to: {event.file_path}",
+                                metadata={"title": event.title},
+                            )
                         )
                     else:
                         inner_history.append(
@@ -3680,7 +3804,8 @@ Each library is listed with its description to help you understand its functiona
                 out.append(
                     ExportEntry(
                         role=e.get("role", "assistant"),
-                        kind=e.get("kind", "text"),
+                        # "plot" → "image"; "plot_withheld" and "structure" keep their kind.
+                        kind=export_kind(e.get("kind", "text")),
                         title=e.get("title"),
                         content=e.get("content", ""),
                         language=e.get("language"),
@@ -3743,14 +3868,35 @@ Each library is listed with its description to help you understand its functiona
             except Exception as e:
                 inner_col.error(f"Failed to export: {e}")
 
+        # Counts structure viewers drawn in this script run, for unique keys.
+        _structure_keys = {"n": 0}
+
         def render_entry(container, entry):
             with container.chat_message(entry.get("role", "assistant")):
                 if entry.get("title"):
                     st.markdown(f"**{entry['title']}**")
                 if entry.get("kind") == "code":
                     st.code(entry["content"], language=entry.get("language") or "python")
-                elif entry.get("kind") == "image":
-                    st.image(entry["file_path"])
+                elif entry.get("kind") in ("image", "plot"):
+                    # A missing file (run dir deleted) shows a caption
+                    # instead of raising and breaking transcript replay.
+                    from biomentis.ui_visuals import render_image_file
+
+                    render_image_file(entry["file_path"])
+                elif entry.get("kind") == "structure":
+                    # Not governed by the plot setting. The key follows render
+                    # order, which is stable across reruns for a transcript.
+                    _structure_keys["n"] += 1
+                    from biomentis.ui_visuals import render_structure
+
+                    render_structure(
+                        entry["file_path"],
+                        key=f"structure-{_structure_keys['n']}-{os.path.basename(entry['file_path'])}",
+                    )
+                elif entry.get("kind") == "plot_withheld":
+                    # Students run the code themselves: the note only, never
+                    # the figure (it stays on disk for the instructor's export).
+                    st.info(entry.get("content") or "Run this code to see the plot.")
                 elif entry.get("kind") == "observation":
                     with st.expander("Observation", expanded=not entry.get("collapsible", False)):
                         st.code(entry["content"])
@@ -3962,6 +4108,8 @@ Each library is listed with its description to help you understand its functiona
                 st.session_state.biomni_last_run_duration = ""
 
                 saved_dir = os.path.join(self.path, "streamlit_uploads")
+                # The tutor chat looks structure file names up here.
+                st.session_state["biomni_upload_dir"] = saved_dir
                 for uploaded in uploaded_files or []:
                     os.makedirs(saved_dir, exist_ok=True)
                     dest = os.path.join(saved_dir, uploaded.name)
@@ -4006,13 +4154,18 @@ Each library is listed with its description to help you understand its functiona
                 # Journaled either way: durability and where the run executes
                 # are separate concerns, and opting out of the worker should
                 # not also opt out of having the work on disk.
+                from biomentis.ui_visuals import current_plot_mode
+
+                self.plot_mode = current_plot_mode()
                 _journal = RunJournal(
                     effective_prompt,
                     mode="tutor" if stream_fn is not None else "research",
                     llm=get_llm_display_name(self.llm),
                     files=list(files),
                     thread_id=thread_id,
+                    plot_mode=self.plot_mode,
                 )
+                self.current_run_id = _journal.run_id
                 st.session_state.biomni_run_journal = _journal.path
                 if background_runs_enabled():
                     # The stream is built on the worker thread, not here: the

@@ -69,8 +69,113 @@ class UIEvent:
     status: str | None = None
     duration: float | None = None
     file_path: str | None = None
-    file_kind: Literal["image", "pdf"] | None = None
+    # "plot" / "plot_withheld" are figures the agent's code drew. The class
+    # plot setting is baked in here by the producer, so a recorded run always
+    # displays the way it was recorded, whatever the sidebar says later.
+    # "structure" is a molecule for the 3D viewer; the plot setting does not
+    # apply to it.
+    file_kind: Literal["image", "pdf", "plot", "plot_withheld", "structure"] | None = None
     collapsible: bool = False
+
+
+PLOT_TITLE = "📈 Plot"
+PLOT_WITHHELD_NOTE = "Run this code to see the plot."
+PLOT_WITHHELD_EXPORT_TITLE = "📈 Plot (withheld from students)"
+
+_SAVEFIG_LINE = "Plot saved to:"
+
+
+def _plot_event(file_path: str, mode: str) -> UIEvent:
+    """A figure event, shown or withheld per the class plot setting."""
+    if mode == "student":
+        return UIEvent(
+            type="file",
+            file_kind="plot_withheld",
+            title=PLOT_TITLE,
+            content=PLOT_WITHHELD_NOTE,
+            file_path=file_path,
+        )
+    return UIEvent(type="file", file_kind="plot", title=PLOT_TITLE, file_path=file_path)
+
+
+def _structure_event(file_path: str) -> UIEvent:
+    """A structure-viewer event for an absolute path."""
+    return UIEvent(
+        type="file",
+        file_kind="structure",
+        title=f"🧬 {os.path.basename(file_path)}",
+        file_path=file_path,
+    )
+
+
+def _under_artifact_root(path: str) -> bool:
+    """True when `path` (symlinks resolved) is inside the structure artifact tree."""
+    from biomentis.structures import default_artifact_dir
+
+    root = os.path.realpath(os.path.dirname(default_artifact_dir(None)))
+    real = os.path.realpath(path)
+    try:
+        return os.path.commonpath([root, real]) == root
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def _structure_marker_paths(observation: str) -> list[str]:
+    """Structure files named by `show_structure`'s marker lines, in order, once each.
+
+    The observation can echo arbitrary text (a web page, a file), so a marker is
+    honoured only for an existing .pdb/.sdf/.smi file inside the artifact root,
+    which is where `show_structure` always saves.
+    """
+    from biomentis.structures import STRUCTURE_MARKER, format_for_path
+
+    paths: list[str] = []
+    for line in observation.splitlines():
+        line = line.strip()
+        if not line.startswith(STRUCTURE_MARKER):
+            continue
+        path = os.path.abspath(line[len(STRUCTURE_MARKER) :].strip().strip("\"'"))
+        if (
+            os.path.isfile(path)
+            and format_for_path(path) != "unknown"
+            and _under_artifact_root(path)
+            and path not in paths
+        ):
+            paths.append(path)
+    return paths
+
+
+def _uploaded_structure_events(agent: Any, files: list[str]) -> list[UIEvent]:
+    """Import each uploaded PDB/SDF/SMILES file into the run and open it.
+
+    Imported by the producer, before the agent starts, so the event is
+    journaled like any other and the viewer survives re-attach and restore.
+    """
+    from biomentis.structures import default_artifact_dir, format_for_path, import_file
+
+    run_id = getattr(agent, "current_run_id", None)
+    events: list[UIEvent] = []
+    for file_path in files:
+        if format_for_path(file_path) not in ("pdb", "sdf", "smi"):
+            continue
+        try:
+            artifact = import_file(file_path, "upload", run_id=run_id)
+        except Exception as exc:  # an unreadable upload must not stop the run
+            print(f"Warning: could not open uploaded structure {file_path}: {exc}")
+            continue
+        events.append(_structure_event(os.path.abspath(os.path.join(default_artifact_dir(run_id), artifact.path))))
+    return events
+
+
+def _savefig_paths(observation: str) -> set[str]:
+    """Paths printed by the patched `plt.savefig` ("Plot saved to: <path>")."""
+    paths = set()
+    for line in observation.splitlines():
+        if _SAVEFIG_LINE in line:
+            path = line.split(_SAVEFIG_LINE, 1)[1].strip().strip("\"'").strip()
+            if path:
+                paths.add(path)
+    return paths
 
 
 def _resolve_file_path(agent: Any, file_path: str) -> str | None:
@@ -127,6 +232,10 @@ def stream_agent_events(
     # Per-run counter for the context guard (see A1._fit_request). `go` and
     # `go_stream` reset it themselves; this path drives the graph directly.
     agent._context_wrap_ups = 0
+    # Same for the repeated-step guard: each turn starts with no steps seen.
+    reset_step_guard = getattr(agent, "_reset_step_guard", None)
+    if callable(reset_step_guard):
+        reset_step_guard()
 
     # Same reasoning for the step tracer, and it had been missed. `start_run`
     # is what gives the tracer a file to write to; every `record_generate` /
@@ -174,6 +283,10 @@ def stream_agent_events(
     if context_note:
         yield UIEvent(type="status", content=context_note)
 
+    # Uploaded structures open before the agent starts. Not governed by the
+    # plot setting: a molecule viewer is not a figure students must draw.
+    yield from _uploaded_structure_events(agent, files)
+
     if agent.use_tool_retriever:
         yield UIEvent(type="status", content="Retrieving relevant tools, data lake items, and libraries...")
         try:
@@ -184,6 +297,12 @@ def stream_agent_events(
             print(f"Warning: Tool retrieval failed: {e}")
             print("Continuing without tool retrieval...")
             yield UIEvent(type="status", content="Tool retrieval unavailable, proceeding with all tools...")
+
+    # The execute node appends one entry to `_execution_results` per step,
+    # before the observation is emitted. Only an entry appended since the
+    # previous observation belongs to this one; anything older (an earlier
+    # turn, or a step that produced no entry) must not be shown again.
+    seen_executions = len(getattr(agent, "_execution_results", None) or [])
 
     s = None
     for s in agent.app.stream(inputs, stream_mode="values", config=config):
@@ -260,12 +379,21 @@ def stream_agent_events(
         observation_match = re.search(r"<observation>(.*?)</observation>", content, re.DOTALL)
         if observation_match:
             observation = observation_match.group(1).strip()
-            yield UIEvent(
-                type="observation",
-                content=observation,
-                duration=t_step,
-                collapsible=True,
-            )
+
+            plot_mode = getattr(agent, "plot_mode", "show")
+            results = getattr(agent, "_execution_results", None) or []
+            captured: list[str] = []
+            if len(results) > seen_executions:
+                captured = [p for p in (results[-1].get("image_paths") or []) if p]
+            seen_executions = len(results)
+
+            # A step's figures and molecules are yielded BEFORE its
+            # observation. The tutor pauses on the observation, and a paused
+            # student must already see the figure the step drew.
+            visuals: list[UIEvent] = [_plot_event(plot_path, plot_mode) for plot_path in captured]
+            # `show_structure` prints a marker line per molecule it saved.
+            visuals += [_structure_event(path) for path in _structure_marker_paths(observation)]
+            files_after: list[UIEvent] = []
 
             if any(ext in observation for ext in SUPPORTED_FILE_EXTENSIONS):
                 matches = re.findall(r"(\S+?(?:\.png|\.jpg|\.jpeg|\.gif|\.bmp|\.webp|\.pdf))", observation)
@@ -275,29 +403,56 @@ def stream_agent_events(
                     if not (m.startswith("Warning:") or m.startswith("Error:") or m.startswith("'"))
                     and not m.startswith(".")
                 ]
+                # A figure that was captured AND saved with plt.savefig would
+                # otherwise show twice: once captured, once scraped from the
+                # "Plot saved to:" line. The captured copy is the one kept.
+                if captured:
+                    saved = _savefig_paths(observation)
+                    valid_matches = [
+                        m
+                        for m in valid_matches
+                        if m.lower().endswith(".pdf") or m.strip("\"'").strip() not in saved
+                    ]
 
-                if valid_matches:
-                    yield UIEvent(type="file", title="📁 Files")
-                    for raw_path in valid_matches:
-                        file_path = raw_path.strip("\"'").strip()
-                        abs_path = _resolve_file_path(agent, file_path)
-                        if not abs_path:
-                            continue
-                        if file_path.lower().endswith(".pdf"):
-                            yield UIEvent(
+                for raw_path in valid_matches:
+                    file_path = raw_path.strip("\"'").strip()
+                    abs_path = _resolve_file_path(agent, file_path)
+                    if not abs_path:
+                        continue
+                    if file_path.lower().endswith(".pdf"):
+                        files_after.append(
+                            UIEvent(
                                 type="file",
                                 title="📄 PDF File",
                                 content=f"Found PDF at: {abs_path}",
                                 file_path=abs_path,
                                 file_kind="pdf",
                             )
-                        else:
-                            yield UIEvent(
+                        )
+                    elif plot_mode == "student":
+                        # Every image in the step is withheld, not just
+                        # captured figures: a scraped PNG is a plot too.
+                        visuals.append(_plot_event(abs_path, plot_mode))
+                    else:
+                        files_after.append(
+                            UIEvent(
                                 type="file",
                                 title="🖼️ Image Preview",
                                 file_path=abs_path,
                                 file_kind="image",
                             )
+                        )
+
+            yield from visuals
+            yield UIEvent(
+                type="observation",
+                content=observation,
+                duration=t_step,
+                collapsible=True,
+            )
+            if files_after:
+                yield UIEvent(type="file", title="📁 Files")
+                yield from files_after
 
         t = time()
 
@@ -398,6 +553,33 @@ def transcript_entry_for_event(
             entry = {"panel": "inner", "role": "assistant", "content": "", "title": event.title}
         elif event.file_kind == "pdf":
             entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
+        elif event.file_kind == "plot":
+            entry = {
+                "panel": "inner",
+                "role": "assistant",
+                "kind": "plot",
+                "file_path": event.file_path,
+                "title": event.title,
+            }
+        elif event.file_kind == "structure":
+            entry = {
+                "panel": "inner",
+                "role": "assistant",
+                "kind": "structure",
+                "file_path": event.file_path,
+                "title": event.title,
+            }
+        elif event.file_kind == "plot_withheld":
+            # The path is kept for the instructor's HTML export; the live
+            # renderer shows only the note.
+            entry = {
+                "panel": "inner",
+                "role": "assistant",
+                "kind": "plot_withheld",
+                "file_path": event.file_path,
+                "title": event.title,
+                "content": event.content or PLOT_WITHHELD_NOTE,
+            }
         else:
             entry = {
                 "panel": "inner",
@@ -519,7 +701,20 @@ def list_available_providers() -> dict[str, list[str]]:
 
 # --- HTML export -------------------------------------------------------
 
-ExportEntryKind = Literal["text", "code", "observation", "image", "pdf", "instruction", "qa"]
+ExportEntryKind = Literal[
+    "text", "code", "observation", "image", "pdf", "plot_withheld", "structure", "instruction", "qa"
+]
+
+
+def export_kind(kind: str | None) -> ExportEntryKind:
+    """The export kind for a transcript entry or file event kind.
+
+    A shown plot exports as an ordinary image. A withheld plot keeps its own
+    kind so the export can label it — the instructor still gets the figure.
+    """
+    if kind == "plot":
+        return "image"
+    return kind or "text"  # type: ignore[return-value]
 
 
 @dataclass
@@ -566,7 +761,7 @@ def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
             return ExportEntry(role="assistant", kind="text", title=event.title, content=event.content, step_id=step_id)
         return ExportEntry(
             role="assistant",
-            kind=event.file_kind or "text",
+            kind=export_kind(event.file_kind),
             title=event.title,
             content=event.content,
             file_path=event.file_path,
@@ -637,6 +832,25 @@ def _embed_image_html(file_path: str) -> str:
         return f'<img src="data:{mime};base64,{data}" class="img-fluid rounded" alt="{html.escape(os.path.basename(file_path))}">'
     except Exception:
         return f'<div class="text-danger">Image not found: {html.escape(file_path)}</div>'
+
+
+def _structure_metadata_html(file_path: str) -> str:
+    """A structure as its metadata table: no viewer, and never its coordinates."""
+    try:
+        from biomentis.structure_info import structure_metadata
+
+        rows = structure_metadata(file_path)
+    except Exception as exc:  # the export must not fail on one structure
+        rows = [("Error", f"{type(exc).__name__}: {exc}")]
+    body = "".join(
+        f"<tr><th scope='row' class='text-nowrap'>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>"
+        for label, value in rows
+    )
+    return (
+        f"<div class='text-muted small mb-1'>{html.escape(os.path.basename(file_path))}</div>"
+        f"<div class='table-responsive'><table class='table table-sm table-bordered align-middle mb-0'>"
+        f"<tbody>{body}</tbody></table></div>"
+    )
 
 
 def _render_markdown(text: str) -> str:
@@ -730,10 +944,12 @@ def _entry_body_html(entry: ExportEntry) -> str:
         return f'<pre class="bg-dark text-light p-3 rounded"><code class="language-{html.escape(language)}">{html.escape(entry.content)}</code></pre>'
     if entry.kind == "observation":
         return f'<pre class="bg-secondary-subtle p-3 rounded small text-wrap">{html.escape(entry.content)}</pre>'
-    if entry.kind == "image" and entry.file_path:
+    if entry.kind in ("image", "plot_withheld") and entry.file_path:
         return _embed_image_html(entry.file_path)
     if entry.kind == "pdf":
         return _render_markdown(entry.content) if entry.content else ""
+    if entry.kind == "structure" and entry.file_path:
+        return _structure_metadata_html(entry.file_path)
     if entry.kind in ("instruction", "qa"):
         # Tutor-layer exports: a left "Tutor" badge, then markdown body,
         # then (for qa) a Sources list and a metadata line if the entry
@@ -754,7 +970,8 @@ def _render_entry_card(entry: ExportEntry) -> str:
     is_user = entry.role == "user"
     bubble_class = "bg-primary text-white" if is_user else "bg-white"
     align_class = "ms-auto" if is_user else "me-auto"
-    title_html = f'<div class="fw-semibold small mb-1">{html.escape(entry.title)}</div>' if entry.title else ""
+    title = PLOT_WITHHELD_EXPORT_TITLE if entry.kind == "plot_withheld" else entry.title
+    title_html = f'<div class="fw-semibold small mb-1">{html.escape(title)}</div>' if title else ""
     body = _entry_body_html(entry)
     return f"""
       <div class="d-flex mb-3 {align_class}" style="max-width: 85%;">

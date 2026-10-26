@@ -27,6 +27,8 @@ dependencies = [
     "mcp",
     "python-dotenv",
     "markdown",
+    "biopython",
+    "rdkit",
 ]
 
 [project.urls]

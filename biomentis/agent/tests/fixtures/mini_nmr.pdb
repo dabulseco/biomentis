@@ -1,0 +1,19 @@
+HEADER    SIGNALING PROTEIN                       01-JAN-21   9YYY
+TITLE     MINI NMR ENSEMBLE
+COMPND    MOL_ID: 1;
+COMPND   2 MOLECULE: NMR PEPTIDE;
+COMPND   3 CHAIN: A;
+SOURCE    MOL_ID: 1;
+SOURCE   2 ORGANISM_SCIENTIFIC: MUS MUSCULUS;
+EXPDTA    SOLUTION NMR
+MODEL        1
+ATOM      1 N    GLY A   1       1.500   0.000   0.000  1.00 20.00           N
+ATOM      2 CA   GLY A   1       2.900   0.000   0.000  1.00 20.00           C
+TER
+ENDMDL
+MODEL        2
+ATOM      1 N    GLY A   1       1.600   0.000   0.000  1.00 20.00           N
+ATOM      2 CA   GLY A   1       3.000   0.000   0.000  1.00 20.00           C
+TER
+ENDMDL
+END

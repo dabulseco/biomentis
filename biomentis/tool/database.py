@@ -2,6 +2,7 @@ import json
 import os
 import pickle
 import time
+from dataclasses import asdict
 from typing import Any
 
 import requests
@@ -10,6 +11,7 @@ from Bio.Seq import Seq
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from biomentis.llm import get_llm
+from biomentis.structures import current_run_id, default_artifact_dir, record_download
 from biomentis.utils import parse_hpo_obo
 
 
@@ -560,7 +562,7 @@ def query_alphafold(
                             "prediction", "summary", or "annotations"
     residue_range (str, optional): Specific residue range in format "start-end" (e.g., "1-100")
     download (bool): Whether to download structure files
-    output_dir (str, optional): Directory to save downloaded files (default: current directory)
+    output_dir (str, optional): Directory to save downloaded files (default: the run-scoped artifact directory)
     file_format (str): Format of the structure file to download - "pdb" or "cif"
     model_version (str): AlphaFold model version - "v4" (latest) or "v3", "v2", "v1"
     model_number (int): Model number (1-5, with 1 being the highest confidence model)
@@ -609,10 +611,16 @@ def query_alphafold(
 
         # Handle download request if specified
         download_info = None
+        artifacts: list[dict] = []
         if download:
-            # Ensure output directory exists
+            # Default to the run-scoped artifact directory. This used to be
+            # ".", which is why loose AF-*.pdb files accumulate wherever the
+            # app happens to be started from.
+            # The run whose code called this (None outside a run); an explicit
+            # output_dir still decides where the file lands.
+            run_id = current_run_id()
             if not output_dir:
-                output_dir = "."
+                output_dir = default_artifact_dir(run_id)
             os.makedirs(output_dir, exist_ok=True)
 
             # Generate standard AlphaFold filename
@@ -633,6 +641,11 @@ def query_alphafold(
                     "file_path": file_path,
                     "url": download_url,
                 }
+                artifacts.append(
+                    asdict(record_download(file_path, source_db="alphafold", accession=uniprot_id, run_id=run_id))
+                )
+                # Printed so the UI's file-detection seam can find it.
+                print(f"Downloaded structure: {os.path.abspath(file_path)}")
             else:
                 download_info = {
                     "success": False,
@@ -653,6 +666,8 @@ def query_alphafold(
 
         if download_info:
             response_data["download"] = download_info
+        if artifacts:
+            response_data["artifacts"] = artifacts
 
         return response_data
 
@@ -914,7 +929,12 @@ def query_pdb(
     return api_result
 
 
-def query_pdb_identifiers(identifiers, return_type="entry", download=False, attributes=None):
+# Default for `query_pdb_identifiers(run_id=...)`: file downloads under the run
+# whose code is executing now (`current_run_id()`).
+_CURRENT_RUN = object()
+
+
+def query_pdb_identifiers(identifiers, return_type="entry", download=False, attributes=None, run_id=_CURRENT_RUN):
     """Retrieve detailed data and/or download files for PDB identifiers.
 
     Parameters
@@ -923,6 +943,9 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
     return_type (str): Type of results: "entry", "assembly", "polymer_entity", etc.
     download (bool): Whether to download PDB structure files
     attributes (list, optional): List of specific attributes to retrieve
+    run_id (str | None, optional): Run whose artifact directory receives the
+        downloads. Defaults to the run whose code is executing now; pass None
+        explicitly for the unattached directory (the tutor chat does).
 
     Returns
     -------
@@ -961,7 +984,7 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                     data_url = f"https://data.rcsb.org/rest/v1/core/chem_comp/{identifier}"
 
                 # Fetch data
-                data_response = requests.get(data_url)
+                data_response = requests.get(data_url, timeout=30)
                 data_response.raise_for_status()
                 entity_data = data_response.json()
 
@@ -984,7 +1007,12 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                 detailed_results.append({"identifier": identifier, "error": str(e)})
 
         # Download structure files if requested
+        downloaded: list[dict] = []
         if download:
+            # The run whose code called this (None outside a run), unless the
+            # caller named one: the tutor chat resolves into its own directory.
+            if run_id is _CURRENT_RUN:
+                run_id = current_run_id()
             for identifier in identifiers:
                 if "_" in identifier or "." in identifier or "-" in identifier:
                     # For non-entry identifiers, extract the PDB ID
@@ -1000,11 +1028,13 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                 try:
                     # Download PDB file
                     pdb_url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
-                    pdb_response = requests.get(pdb_url)
+                    pdb_response = requests.get(pdb_url, timeout=30)
 
                     if pdb_response.status_code == 200:
-                        # Create data directory if it doesn't exist
-                        data_dir = os.path.join(os.path.dirname(__file__), "data", "pdb")
+                        # This used to write inside the installed package
+                        # (biomentis/tool/data/pdb/), which is not a place a
+                        # user's downloads belong and is not configurable.
+                        data_dir = default_artifact_dir(run_id)
                         os.makedirs(data_dir, exist_ok=True)
 
                         # Save PDB file
@@ -1016,12 +1046,20 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                         for result in detailed_results:
                             if result["identifier"] == identifier or result["identifier"].startswith(pdb_id):
                                 result["pdb_file_path"] = pdb_file_path
+                        downloaded.append(
+                            asdict(record_download(pdb_file_path, source_db="rcsb", accession=pdb_id, run_id=run_id))
+                        )
+                        # Printed so the UI's file-detection seam can find it.
+                        print(f"Downloaded structure: {os.path.abspath(pdb_file_path)}")
                 except Exception as e:
                     for result in detailed_results:
                         if result["identifier"] == identifier or result["identifier"].startswith(pdb_id):
                             result["download_error"] = str(e)
 
-        return {"detailed_results": detailed_results}
+        payload = {"detailed_results": detailed_results}
+        if downloaded:
+            payload["artifacts"] = downloaded
+        return payload
 
     except Exception as e:
         return {"error": f"Error retrieving PDB details: {str(e)}"}

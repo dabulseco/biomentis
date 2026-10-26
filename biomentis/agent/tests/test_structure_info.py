@@ -1,0 +1,230 @@
+"""Tests for structure metadata and viewer input (biomentis/structure_info.py).
+
+What these tests pin down:
+
+  1.  PDB metadata comes from the header, with the labels in a fixed order
+  2.  Coordinate records are never shown as text, for any format
+  3.  A header field the file lacks is omitted, not filled with "None"
+  4.  SDF: record count, computed formula, and every data field by its tag
+  5.  SMILES: descriptors, a 3D model for the viewer, a 2D depiction
+  6.  Bad input degrades to an "Error" row and no model; nothing raises
+
+Run with:
+    python -m biomentis.agent.tests.test_structure_info
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+import tempfile
+
+from rdkit import RDLogger
+
+from biomentis.structure_info import (
+    depiction_png,
+    metadata_text,
+    sdf_record_count,
+    structure_metadata,
+    viewer_model,
+)
+
+RDLogger.DisableLog("rdApp.*")
+
+# --- Tiny test harness (matches test_smoke_e2e.py) -----------------------
+
+_PASSED: list[str] = []
+_FAILED: list[tuple[str, str]] = []
+
+
+def _check(name: str, cond: bool, detail: str = "") -> None:
+    if cond:
+        _PASSED.append(name)
+        print(f"  ✓ {name}")
+    else:
+        _FAILED.append((name, detail))
+        print(f"  ✗ {name}: {detail}")
+
+
+# --- Fixtures --------------------------------------------------------------
+
+_FIX = os.path.join(os.path.dirname(__file__), "fixtures")
+XRAY = os.path.join(_FIX, "mini_xray.pdb")
+NMR = os.path.join(_FIX, "mini_nmr.pdb")
+SDF = os.path.join(_FIX, "two_mols.sdf")
+SMI = os.path.join(_FIX, "aspirin.smi")
+
+
+def _tmp(text: str, ext: str) -> str:
+    handle = tempfile.NamedTemporaryFile("w", suffix=ext, delete=False, encoding="utf-8")
+    handle.write(text)
+    handle.close()
+    return handle.name
+
+
+# --- Tests -----------------------------------------------------------------
+
+def test_pdb_metadata():
+    print("\n[pdb metadata]")
+    md = structure_metadata(XRAY)
+    labels = dict(md)
+    for k in ("Title", "Experimental method", "Resolution (Å)", "Organism", "Chains",
+              "Ligands / heteroatoms", "Authors", "Reference"):
+        _check(f"has {k}", k in labels, list(labels))
+    _check("released after deposited", [k for k, _ in md].index("Released") == [k for k, _ in md].index("Deposited") + 1)
+    _check("release date parsed", labels.get("Released") == "2020-01-15", labels.get("Released"))
+    _check("resolution parsed", labels["Resolution (Å)"] == "1.80", labels.get("Resolution (Å)"))
+    _check("chains listed", labels["Chains"] == "A, B", labels.get("Chains"))
+    _check("waters excluded from ligands", "HOH" not in labels["Ligands / heteroatoms"],
+           labels["Ligands / heteroatoms"])
+    order = [k for k, _ in md]
+    _check("title before method before chains",
+           order.index("Title") < order.index("Experimental method") < order.index("Chains"), order)
+
+
+def test_no_coordinates_anywhere():
+    print("\n[no coordinates]")
+    for p in (XRAY, NMR, SDF, SMI):
+        name = os.path.basename(p)
+        blob = metadata_text(p)
+        _check(f"{name}: has text", bool(blob.strip()))
+        _check(f"{name}: no ATOM/HETATM line", not re.search(r"^(ATOM|HETATM)\s", blob, re.M))
+        _check(f"{name}: no SDF atom-block line",
+               not re.search(r"^\s*-?\d+\.\d{4}\s+-?\d+\.\d{4}\s+-?\d+\.\d{4}\s+[A-Z]", blob, re.M))
+
+
+def test_nmr_is_not_none_filled():
+    print("\n[nmr]")
+    md = structure_metadata(NMR)
+    _check("no resolution row", "Resolution (Å)" not in dict(md))
+    _check("no 'None' values", all(v and v != "None" for _, v in md), md)
+    _check("method is NMR", "NMR" in dict(md)["Experimental method"])
+    _check("NMR has no Released row", "Released" not in dict(md))
+    _check("NMR has no fabricated 1909 date", not any("1909" in v for _, v in md), md)
+    p = _tmp("HEADER    PROTEIN\nATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 20.00           C\nEND\n", ".pdb")
+    try:
+        _check("no HEADER date -> no Deposited row", "Deposited" not in dict(structure_metadata(p)),
+               structure_metadata(p))
+    finally:
+        os.unlink(p)
+    _check("no reference row", "Reference" not in dict(md))
+
+
+def test_sdf_records_and_fields():
+    print("\n[sdf]")
+    _check("two records", sdf_record_count(SDF) == 2)
+    md = dict(structure_metadata(SDF))
+    _check("data fields shown", "PUBCHEM_COMPOUND_CID" in md, list(md))
+    _check("formula computed", bool(md.get("Formula")), list(md))
+    md1 = dict(structure_metadata(SDF, record=1))
+    _check("record 1 name", md1.get("Name") == "methanol", md1)
+    _check("record 1 CID", md1.get("PUBCHEM_COMPOUND_CID") == "887", md1)
+    blob = metadata_text(SDF)
+    _check("text has Record headers", "Record 1" in blob and "Record 2" in blob, blob)
+    _check("text has record 1 CID", "PUBCHEM_COMPOUND_CID: 887" in blob, blob)
+    _check("records separated by blank line", "\n\nRecord 2" in blob, blob)
+    _check("out-of-range metadata is Error", structure_metadata(SDF, record=9)[0][0] == "Error")
+    second = dict(structure_metadata(SDF)) if False else None
+    model = viewer_model(SDF, record=1)
+    _check("record 1 model is sdf", model is not None and model[1] == "sdf")
+    _check("record 1 is methanol", model is not None and model[0].startswith("methanol"),
+           model[0][:20] if model else None)
+    _check("out-of-range record is None", viewer_model(SDF, record=5) is None)
+    _check("sdf depiction", (depiction_png(SDF) or b"")[:4] == b"\x89PNG")
+
+
+def test_sdf_bad_record_does_not_hide_later_ones():
+    print("\n[sdf bad record]")
+    with open(SDF, encoding="utf-8") as fh:
+        good = fh.read().split("$$$$\n")[1] + "$$$$\n"
+    p = _tmp("garbage\nmore garbage\n\n  x\nM  END\n$$$$\n" + good, ".sdf")
+    try:
+        _check("two records counted", sdf_record_count(p) == 2, sdf_record_count(p))
+        _check("record 0 is Error", structure_metadata(p, 0)[0][0] == "Error")
+        _check("record 1 still reads", dict(structure_metadata(p, 1)).get("Name") == "methanol",
+               structure_metadata(p, 1))
+        _check("record 1 has a model", viewer_model(p, 1) is not None)
+        _check("record 0 has no model", viewer_model(p, 0) is None)
+        _check("text still has methanol", "methanol" in metadata_text(p))
+    finally:
+        os.unlink(p)
+
+
+def test_smiles():
+    print("\n[smiles]")
+    md = dict(structure_metadata(SMI))
+    _check("name", md.get("Name") == "aspirin", list(md))
+    _check("formula", md["Formula"] == "C9H8O4", md.get("Formula"))
+    _check("MW", md["Molecular weight (g/mol)"].startswith("180.1"), md.get("Molecular weight (g/mol)"))
+    model = viewer_model(SMI)
+    _check("3D model built as sdf", model is not None and model[1] == "sdf")
+    _check("3D model has 3D coordinates", model is not None and "V2000" in model[0])
+    _check("2D depiction", (depiction_png(SMI) or b"")[:4] == b"\x89PNG")
+
+
+def test_pdb_viewer_and_depiction():
+    print("\n[pdb viewer]")
+    model = viewer_model(XRAY)
+    _check("pdb model passes through", model is not None and model[1] == "pdb" and "ATOM" in model[0])
+    _check("no depiction for pdb", depiction_png(XRAY) is None)
+
+
+def test_bad_input_degrades():
+    print("\n[bad input]")
+    for text, ext in (("not_a_smiles(((", ".smi"), ("", ".pdb"), ("garbage\n", ".sdf"), ("x", ".xyz")):
+        p = _tmp(text, ext)
+        try:
+            md = structure_metadata(p)
+            _check(f"{ext}: error row, no raise", bool(md) and md[0][0] == "Error", md)
+            _check(f"{ext}: no model", viewer_model(p) is None)
+            _check(f"{ext}: metadata_text ok", isinstance(metadata_text(p), str))
+        finally:
+            os.unlink(p)
+    md = structure_metadata("/nonexistent/file.pdb")
+    _check("missing file: error row", md and md[0][0] == "Error", md)
+
+
+def test_title_text_kept_as_written():
+    print("\n[title and classification keep the file's text]")
+    with open(XRAY, encoding="utf-8") as handle:
+        text = handle.read()
+    text = text.replace(
+        "TITLE     MINI TEST PROTEIN IN COMPLEX WITH A LIGAND",
+        "TITLE     HIV-1 PROTEASE IN A VLP\nTITLE    2 WITH pH-SENSITIVE LIGAND",
+    ).replace("HEADER    HYDROLASE   ", "HEADER    VIRAL PROTEIN/HIV-1")
+    p = _tmp(text, ".pdb")
+    try:
+        md = dict(structure_metadata(p))
+    finally:
+        os.unlink(p)
+    _check("HIV-1 survives unchanged", md.get("Title") == "HIV-1 PROTEASE IN A VLP WITH pH-SENSITIVE LIGAND", md.get("Title"))
+    _check("classification kept as written", md.get("Classification") == "VIRAL PROTEIN/HIV-1", md.get("Classification"))
+    _check("fixture title unchanged", dict(structure_metadata(XRAY)).get("Title") ==
+           "MINI TEST PROTEIN IN COMPLEX WITH A LIGAND", dict(structure_metadata(XRAY)).get("Title"))
+
+
+def run_all() -> int:
+    print("=" * 60)
+    print("Structure info tests")
+    print("=" * 60)
+    test_pdb_metadata()
+    test_no_coordinates_anywhere()
+    test_nmr_is_not_none_filled()
+    test_sdf_records_and_fields()
+    test_sdf_bad_record_does_not_hide_later_ones()
+    test_smiles()
+    test_pdb_viewer_and_depiction()
+    test_bad_input_degrades()
+    test_title_text_kept_as_written()
+
+    print("\n" + "=" * 60)
+    print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")
+    print("=" * 60)
+    for name, detail in _FAILED:
+        print(f"  ✗ {name}: {detail}")
+    return 1 if _FAILED else 0
+
+
+if __name__ == "__main__":
+    sys.exit(run_all())

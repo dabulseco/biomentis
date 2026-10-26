@@ -58,6 +58,21 @@ from typing import Any
 # pass-through — they don't carry new pedagogical content.
 _INSTRUCTION_BEARING = {"reasoning", "code", "observation", "solution", "file", "summary"}
 
+# File events that are visuals of a step, not steps of their own: a figure the
+# step's code drew, or a molecule it showed. They get no pause, no teaching
+# card and never trigger the roadmap; they join the current step's box
+# (`step_id` of the step in progress). An uploaded structure arrives before any
+# step and so renders ungrouped. Plain images and PDFs are unaffected.
+_STEP_VISUAL_FILE_KINDS = {"plot", "plot_withheld", "structure"}
+
+
+def _is_step_visual(event) -> bool:
+    return event.type == "file" and getattr(event, "file_kind", None) in _STEP_VISUAL_FILE_KINDS
+
+
+def _is_instruction_bearing(event) -> bool:
+    return event.type in _INSTRUCTION_BEARING and not _is_step_visual(event)
+
 # Sub-captions for the per-mode expanders. They exist because
 # "prerequisites" means something different under each lens, and a student
 # reading both boxes needs to know which is which at a glance.
@@ -492,8 +507,15 @@ def _advance_run_live(run: dict, tutor):
         # This must happen before the yield, not after, since the raw
         # event has already left this generator by the time we'd
         # otherwise know its step_id.
-        if event.type in _INSTRUCTION_BEARING:
+        if _is_instruction_bearing(event):
             run["step_id"] += 1
+            try:
+                event.step_id = run["step_id"]
+                event.run_id = run["run_id"]
+            except Exception:
+                pass
+        elif _is_step_visual(event) and run["step_id"] > 0:
+            # A figure or molecule belongs to the step in progress.
             try:
                 event.step_id = run["step_id"]
                 event.run_id = run["run_id"]
@@ -502,7 +524,7 @@ def _advance_run_live(run: dict, tutor):
 
         yield event
 
-        if event.type not in _INSTRUCTION_BEARING:
+        if not _is_instruction_bearing(event):
             continue
 
         try:
@@ -930,6 +952,10 @@ def render_tutor_sidebar(tutor) -> None:
             key="biomni_tutor_enabled",
         )
 
+        from biomentis.ui_visuals import render_plot_mode_control
+
+        render_plot_mode_control(logger=tutor.logger)
+
         if tutor.enabled:
             _render_mode_toggles(tutor)
 
@@ -1033,6 +1059,24 @@ def _render_mode_toggles(tutor) -> None:
 # ----- 6a. Knowledge-base panel ------------------------------------------
 
 
+def _kb_structure_dialog(name: str, path: str) -> None:
+    """Open a knowledge-base structure file in the 3D viewer."""
+    import streamlit as st
+
+    st.caption(name)
+    from biomentis.ui_visuals import render_structure
+
+    render_structure(path, key=f"kb-{name}")
+
+
+try:
+    import streamlit as _st
+
+    _kb_structure_dialog = _st.dialog("Structure", width="large")(_kb_structure_dialog)
+except Exception:  # Streamlit absent or too old: View falls back to inline
+    pass
+
+
 def _render_kb_panel(tutor) -> None:
     """KB uploader + URL ingest + Clear button + stats."""
     import streamlit as st
@@ -1043,10 +1087,14 @@ def _render_kb_panel(tutor) -> None:
     )
     uploaded = st.file_uploader(
         "Upload course materials",
-        type=["pdf", "pptx", "docx", "txt"],
+        type=["pdf", "pptx", "docx", "txt", "pdb", "sdf", "smi"],
         accept_multiple_files=True,
         key="biomni_tutor_kb_uploader",
-        help="PDF, PowerPoint, Word, or plain text. Each file is chunked and embedded locally.",
+        help=(
+            "PDF, PowerPoint, Word, or plain text. Each file is chunked and embedded locally. "
+            "Structure files (PDB, SDF, SMILES) are indexed by their descriptive "
+            "metadata only, never atom coordinates; open them with View."
+        ),
     )
     url_text = st.text_area(
         "Or paste URLs (one per line)",
@@ -1112,8 +1160,16 @@ def _render_kb_panel(tutor) -> None:
                 + (f" · last updated {stats.last_updated}" if stats.last_updated else "")
             )
             with st.expander("Indexed sources", expanded=False):
-                for s in stats.source_names:
-                    st.markdown(f"- {s}")
+                for name in stats.source_names:
+                    if name.lower().endswith((".pdb", ".sdf", ".smi")):
+                        name_col, view_col = st.columns([3, 1])
+                        name_col.markdown(f"- {name}")
+                        if view_col.button("View", key=f"kbview-{name}"):
+                            _kb_structure_dialog(
+                                name, os.path.join(tutor.kb.path, "raw", name)
+                            )
+                    else:
+                        st.markdown(f"- {name}")
 
 
 # ----- 6b. Rubric panel ---------------------------------------------------
@@ -1463,6 +1519,15 @@ def _kb_add(tutor, uploaded_files, url_text: str) -> None:
         try:
             n_chunks += tutor.kb.add_files(saved_paths)
             print(f"[tutor KB] add_files returned {n_chunks} chunks", file=sys.stderr)
+            indexed = set(tutor.kb.stats().source_names)
+            skipped = [
+                os.path.basename(p) for p in saved_paths
+                if os.path.basename(p) not in indexed
+            ]
+            if skipped:
+                st.warning(
+                    "Skipped (unreadable or unsupported): " + ", ".join(skipped)
+                )
         except Exception as e:
             print(f"[tutor KB] add_files raised: {e!r}", file=sys.stderr)
             st.error(f"KB file ingest failed: {e!r}")
@@ -1585,7 +1650,9 @@ def render_tutor_chat_panel(tutor) -> None:
                     get_llm_display_name,
                     render_transcript_html,
                 )
-                _entries = [
+                _entries = []
+                for turn in _history:
+                    _entries.append(
                     ExportEntry(
                         role=turn.get("role", "assistant"),
                         kind="qa" if turn.get("role") == "assistant" else "text",
@@ -1598,8 +1665,11 @@ def render_tutor_chat_panel(tutor) -> None:
                         confidence=turn.get("confidence"),
                         also_consider=turn.get("also_consider") or None,
                     )
-                    for turn in _history
-                ]
+                    )
+                    if turn.get("plot_code"):
+                        _entries.append(ExportEntry(role="assistant", kind="code", language="python", content=turn["plot_code"]))
+                        if turn.get("plot_png") and os.path.exists(turn["plot_png"]):
+                            _entries.append(ExportEntry(role="assistant", kind="image", file_path=turn["plot_png"]))
                 _model_name = "KB + LLM hybrid"
                 try:
                     _model_name = get_llm_display_name(getattr(tutor, "llm", None))
@@ -1625,9 +1695,10 @@ def render_tutor_chat_panel(tutor) -> None:
         # what's powering the chat at the moment.
         st.caption(f"{kb_status}  ·  {tutor_status}")
 
-        for turn in st.session_state.biomni_tutor_chat_history:
+        for _idx, turn in enumerate(st.session_state.biomni_tutor_chat_history):
             with st.chat_message(turn["role"]):
                 st.markdown(turn["content"])
+                _render_visuals(turn, key=f"chat-panel-{_idx}")
                 if turn.get("citations"):
                     with st.expander(
                         f"Sources ({len(turn['citations'])})", expanded=False
@@ -1701,6 +1772,51 @@ def render_tutor_chat_panel(tutor) -> None:
         if user_q:
             with st.spinner("🎓 Thinking..."):
                 _handle_chat_turn(tutor, user_q)
+
+
+def _visuals_dict(turn) -> dict:
+    """The plot and structure fields of a `ChatTurn`, as stored on a UI turn dict."""
+    return {
+        "plot_code": turn.plot_code,
+        "plot_png": turn.plot_png,
+        "plot_error": turn.plot_error,
+        "structure_path": turn.structure_path,
+        "plot_mode": turn.plot_mode,
+    }
+
+
+def _chat_search_dirs(tutor) -> list[str]:
+    """Folders where a bare structure file name in a tutor reply is looked up."""
+    import streamlit as st
+
+    dirs: list[str] = []
+    kb_path = getattr(getattr(tutor, "kb", None), "path", None)
+    if kb_path:
+        dirs.append(os.path.join(kb_path, "raw"))
+    uploads = st.session_state.get("biomni_upload_dir")
+    if uploads:
+        dirs.append(uploads)
+    return dirs
+
+
+def _render_visuals(turn: dict, key: str) -> None:
+    """Show a stored turn's code, figure and structure. Reads only the dict:
+    how an answer is shown never depends on the current plot setting."""
+    import streamlit as st
+
+    code = turn.get("plot_code")
+    if code:
+        st.code(code, language="python")
+        if turn.get("plot_png"):
+            st.image(turn["plot_png"])
+        elif turn.get("plot_error"):
+            st.caption("⚠️ " + turn["plot_error"])
+        else:
+            st.info("Run this code to see the plot.")
+    if turn.get("structure_path"):
+        from biomentis.ui_visuals import render_structure
+
+        render_structure(turn["structure_path"], key=key)
 
 
 def _handle_chat_turn(tutor, question: str) -> None:
@@ -1784,6 +1900,8 @@ def _handle_chat_turn(tutor, question: str) -> None:
         if last_answer and len(last_answer) > 2000:
             last_answer = last_answer[:2000] + "…"
 
+    from biomentis.ui_visuals import current_plot_mode
+
     _t_chat_start = time.monotonic()
     try:
         turn = tutor.chat.ask(
@@ -1794,6 +1912,8 @@ def _handle_chat_turn(tutor, question: str) -> None:
             last_answer=last_answer,
             mode="chat",  # KB + LLM hybrid; chat panel is decoupled from tutor
             step_id=run.get("step_id") if run else None,
+            plot_mode=current_plot_mode(),
+            search_dirs=_chat_search_dirs(tutor),
         )
     except Exception as e:
         # Defensive: TutorChat.ask is supposed to handle its own errors,
@@ -1828,6 +1948,7 @@ def _handle_chat_turn(tutor, question: str) -> None:
             "confidence": turn.confidence,
             "failed": turn.failed,
             "also_consider": list(turn.also_consider),
+            **_visuals_dict(turn),
         }
     )
     st.rerun()
@@ -1865,9 +1986,10 @@ def _render_step_qa(container: Any, step_id: int, run: dict, tutor, run_id: str 
             with st.expander(
                 f"💬 Questions about this step ({len(qa_list)})", expanded=True
             ):
-                for turn in qa_list:
+                for _qi, turn in enumerate(qa_list):
                     st.markdown(f"**Q:** {turn['question']}")
                     st.markdown(f"**A:** {turn['answer']}")
+                    _render_visuals(turn, key=f"chat-step-{_key_suffix}-{_qi}")
                     if turn.get("also_consider"):
                         with st.expander("Also worth knowing", expanded=False):
                             for item in turn["also_consider"]:
@@ -1905,12 +2027,16 @@ def _handle_step_qa(tutor, run: dict, step_id: int, question: str) -> None:
     attached — all stay consistent), but the result is stored on
     `run["step_qa"][step_id]` instead of the page-level chat history, so
     it re-renders attached to that step's card."""
+    from biomentis.ui_visuals import current_plot_mode
+
     turn = tutor.chat.ask(
         question=question,
         context=f"step_id={step_id}",
         task=run.get("prompt", ""),
         mode="chat",
         step_id=step_id,
+        plot_mode=current_plot_mode(),
+        search_dirs=_chat_search_dirs(tutor),
     )
     run.setdefault("step_qa", {}).setdefault(step_id, []).append(
         {
@@ -1923,6 +2049,7 @@ def _handle_step_qa(tutor, run: dict, step_id: int, question: str) -> None:
             "rubric_hit": list(turn.rubric_hit),
             "confidence": turn.confidence,
             "failed": turn.failed,
+            **_visuals_dict(turn),
         }
     )
 

@@ -23,6 +23,9 @@ What these tests pin down:
   4.  What it keeps is exactly what truncation would have kept
   5.  A reply with no closing tag is read to the end
   6.  The Ollama client carries an output cap, overridable by env var
+  7.  turn_from_reasoning finds the block a model wrote in its thinking
+  8.  A reply with empty content and the turn in its thinking runs that turn,
+      with no "no tag" retry (deepseek-v4.1-flash:cloud, 2026-10-26)
 
 Run with:
     python -m biomentis.agent.tests.test_runaway_generation
@@ -227,6 +230,51 @@ def test_ollama_client_has_an_output_cap() -> None:
     _check("the env var overrides it", overridden.num_predict == 1234, str(overridden.num_predict))
 
 
+def test_turn_from_reasoning() -> None:
+    print("\n[7] the turn is found in the thinking")
+    from biomentis.utils import turn_from_reasoning
+
+    code = "<execute>print(1)</execute>"
+    _check("block after thinking", turn_from_reasoning("Let me compute.\n" + code) == code)
+    _check("a plan that mentions <execute> is skipped",
+           turn_from_reasoning("I'll write an <execute> block.\n" + code) == code)
+    _check("solution", turn_from_reasoning("Done.\n<solution>ZnTe</solution>") == "<solution>ZnTe</solution>")
+    _check("only up to the first closing tag",
+           turn_from_reasoning(code + " more <solution>x</solution>") == code)
+    _check("no closing tag, nothing", turn_from_reasoning("thinking <execute>print(1)") == "")
+    _check("mismatched tags, nothing", turn_from_reasoning("<execute>x</solution>") == "")
+    _check("empty", turn_from_reasoning(None) == "" and turn_from_reasoning("") == "")
+
+
+class _ThinkingLLM:
+    """Content empty, the turn in reasoning_content; then a normal answer."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(content="", additional_kwargs={
+                "reasoning_content": "Plan: compute it.\n<execute>print(6 * 7)</execute>"})
+        return AIMessage(content="<solution>42</solution>")
+
+
+def test_turn_in_thinking_runs() -> None:
+    print("\n[8] a turn written in the thinking is run, not retried")
+    from biomentis.agent.a1 import PARSE_ERROR_NUDGE
+
+    llm = _ThinkingLLM()
+    agent = _agent(llm)
+    log, final = agent.go("multiply")
+    _check("the code ran", any("<observation>42" in m for m in log), str(log[-3:])[:300])
+    _check("no retry nudge", not any(PARSE_ERROR_NUDGE[:40] in m for m in log), "")
+    _check("two calls, not three", llm.calls == 2, str(llm.calls))
+    _check("answered", "<solution>42</solution>" in final, final)
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Runaway generation tests")
@@ -238,6 +286,8 @@ def run_all() -> int:
         test_what_is_kept_matches_truncation,
         test_reply_without_a_tag_is_read_to_the_end,
         test_ollama_client_has_an_output_cap,
+        test_turn_from_reasoning,
+        test_turn_in_thinking_runs,
     ):
         try:
             test()

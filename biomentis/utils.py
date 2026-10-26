@@ -1084,6 +1084,36 @@ def truncate_after_first_tag(message: str) -> tuple[str, str]:
     return message[: match.end()], dropped
 
 
+_OPENING_TAG_RE = re.compile(r"<(?:execute|solution)>", re.IGNORECASE)
+
+
+def turn_from_reasoning(reasoning: str | None) -> str:
+    """The `<execute>`/`<solution>` block a model wrote in its thinking, or "".
+
+    deepseek-v4.1-flash:cloud, with thinking on, sometimes writes its whole
+    turn, closing tag included, into the thinking channel and returns empty
+    content: every other turn in a 2026-10-26 run, each costing a wasted
+    call and a "no tag" retry. The block is the one ending at the first
+    closing tag, starting at the last opening tag before it, so a plan that
+    merely mentions `<execute>` earlier in the thinking is not taken for it.
+    """
+    match = FIRST_CLOSING_TAG_RE.search(reasoning or "")
+    if match is None:
+        return ""
+    head = reasoning[: match.end()]
+    openings = list(_OPENING_TAG_RE.finditer(head))
+    if not openings:
+        return ""
+    block = head[openings[-1].start() :]
+    # The closing tag must match the opening one: "<execute>...</solution>"
+    # is not a turn.
+    if block[1:8].lower() == "execute" and not block.lower().endswith("</execute>"):
+        return ""
+    if block[1:9].lower() == "solution" and not block.lower().endswith("</solution>"):
+        return ""
+    return block
+
+
 def clean_message_content(content: str) -> str:
     """Clean message content by removing ANSI escape codes.
 

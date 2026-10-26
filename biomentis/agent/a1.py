@@ -144,6 +144,7 @@ from biomentis.utils import (
     should_skip_message,
     textify_api_dict,
     truncate_after_first_tag,
+    turn_from_reasoning,
 )
 
 if os.path.exists(".env"):
@@ -1779,6 +1780,18 @@ Each library is listed with its description to help you understand its functiona
             else:
                 # Fallback to string conversion for legacy content
                 msg = str(content)
+
+            # A thinking model can leave content empty and put the whole turn,
+            # tag and all, in its thinking (deepseek-v4.1-flash:cloud did, every
+            # other turn). Take the turn from there rather than asking again.
+            if not re.search(r"<(?:execute|solution)>", msg, re.IGNORECASE):
+                salvaged = turn_from_reasoning(
+                    (getattr(response, "additional_kwargs", None) or {}).get("reasoning_content")
+                )
+                if salvaged:
+                    print("took the turn from the model's thinking: its reply had no tag")
+                    msg = (msg.strip() + "\n" + salvaged).strip()
+                    trace_coerced = True
 
             # Enhanced parsing for better OpenAI compatibility
             # Check for incomplete tags and fix them

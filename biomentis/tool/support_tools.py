@@ -42,7 +42,9 @@ def run_python_repl(command: str) -> str:
             # they are shown in the step, or withheld, per the plot setting.
             # In `finally` so a step that raises still owns its partial
             # figure, instead of it surfacing under the next step.
-            _capture_matplotlib_plots()
+            summary = _capture_matplotlib_plots()
+        if summary:
+            output = output.rstrip("\n") + "\nPlot captured.\n" + "\n".join(summary) + "\n"
         return output
 
     command = command.strip("```").strip()
@@ -57,11 +59,18 @@ def run_python_repl(command: str) -> str:
     return execute_in_repl(command)
 
 
-def _capture_matplotlib_plots():
-    """Capture any matplotlib plots that might have been generated during execution."""
+def _capture_matplotlib_plots() -> list[str]:
+    """Capture and close every open matplotlib figure.
+
+    Returns a text summary of the figures captured (see `describe_figure`),
+    so the observation tells the agent what it drew; it never sees the image.
+    """
     global _captured_plots
+    summary: list[str] = []
     try:
         import matplotlib.pyplot as plt
+
+        from biomentis.plots import describe_figure
 
         # Check if there are any active figures
         if plt.get_fignums():
@@ -80,6 +89,10 @@ def _capture_matplotlib_plots():
                 # Add to captured plots if not already there
                 if plot_data not in _captured_plots:
                     _captured_plots.append(plot_data)
+                try:
+                    summary.extend(describe_figure(fig))
+                except Exception as e:
+                    summary.append(f"(could not summarize the figure: {e})")
 
                 # Close the figure to free memory
                 plt.close(fig)
@@ -89,6 +102,7 @@ def _capture_matplotlib_plots():
         pass
     except Exception as e:
         print(f"Warning: Could not capture matplotlib plots: {e}")
+    return summary
 
 
 def _apply_matplotlib_patches():
@@ -107,10 +121,12 @@ def _apply_matplotlib_patches():
         def show_with_capture(*args, **kwargs):
             """Enhanced show function that captures plots before displaying them."""
             # Capture any plots before showing
-            _capture_matplotlib_plots()
+            summary = _capture_matplotlib_plots()
             # Neutral on purpose: under plot mode "student" the figure is
             # captured for the record but never displayed.
             print("Plot captured.")
+            for line in summary:
+                print(line)
             # Call the original show function
             return original_show(*args, **kwargs)
 
@@ -121,9 +137,11 @@ def _apply_matplotlib_patches():
             # Call the original savefig function
             result = original_savefig(*args, **kwargs)
             # Capture the plot after saving
-            _capture_matplotlib_plots()
+            summary = _capture_matplotlib_plots()
             # Print a message to indicate plot was saved
             print(f"Plot saved to: {filename}")
+            for line in summary:
+                print(line)
             return result
 
         # Replace functions with enhanced versions

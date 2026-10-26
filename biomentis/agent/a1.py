@@ -161,6 +161,38 @@ class AgentState(TypedDict):
 # function's signature (it has two callers).
 LAST_LLM_CALL: dict[str, int] = {"attempts": 0}
 
+# Repeated-step guard. A step that repeats an earlier step of the same run
+# exactly (same code, same output) cannot teach the agent anything new.
+# gemma4:26b-mlx re-ran one plotting block 108 times in a 32-minute run
+# (2026-10-26). Each repeat is pointed out; the third also asks for the answer
+# now; the fourth ends the run. Same output, not just same code: the REPL keeps
+# state, so identical code after a change elsewhere can legitimately differ.
+REPEAT_ANSWER_NOW_AT = 3
+REPEAT_STOP_AT = 4
+REPEATED_STEPS_STOPPED = (
+    "Run stopped: the agent ran the same code with the same result {n} times without "
+    "changing anything, so it was not making progress. The work completed so far is above."
+)
+
+
+def _normalize_code(code: str) -> str:
+    """Code with trailing spaces and blank lines removed, for repeat detection."""
+    return "\n".join(line.rstrip() for line in code.strip().splitlines() if line.strip())
+
+
+def _repeat_note(first_step: int, repeats: int) -> str:
+    note = (
+        f"\nNOTE: this step repeated step {first_step} exactly (same code, same output). "
+        "Running it again will not change anything: fix the code, try a different approach, "
+        "or give your <solution>."
+    )
+    if repeats >= REPEAT_ANSWER_NOW_AT:
+        note += (
+            f" This is repeat number {repeats}; one more and the run is stopped. "
+            "Give your <solution> now, based on the results you already have."
+        )
+    return note
+
 
 def _is_ollama(llm) -> bool:
     try:
@@ -1877,6 +1909,7 @@ Each library is listed with its description to help you understand its functiona
             return state
 
         def execute(state: AgentState) -> AgentState:
+            state["next_step"] = "generate"
             last_message = state["messages"][-1].content
             # Only add the closing tag if it's not already there
             if "<execute>" in last_message and "</execute>" not in last_message:
@@ -1991,8 +2024,29 @@ Each library is listed with its description to help you understand its functiona
                     plots=len(execution_plots),
                 )
 
+                # Repeated-step guard (see REPEAT_STOP_AT). After the tracer,
+                # which records what the code itself printed.
+                self._step_count = getattr(self, "_step_count", 0) + 1
+                seen = getattr(self, "_seen_steps", None)
+                if seen is None:
+                    seen = self._seen_steps = {}
+                step_key = (_normalize_code(code), result)
+                stop_for_repeats = False
+                if step_key in seen:
+                    self._repeat_steps = getattr(self, "_repeat_steps", 0) + 1
+                    stop_for_repeats = self._repeat_steps >= REPEAT_STOP_AT
+                    result += _repeat_note(seen[step_key], self._repeat_steps)
+                else:
+                    seen[step_key] = self._step_count
+
                 observation = f"\n<observation>{result}</observation>"
                 state["messages"].append(AIMessage(content=observation.strip()))
+                if stop_for_repeats:
+                    print(f"repeat guard: {self._repeat_steps} repeated steps — ending the run")
+                    state["messages"].append(
+                        AIMessage(content=REPEATED_STEPS_STOPPED.format(n=self._repeat_steps))
+                    )
+                    state["next_step"] = "end"
             else:
                 # Routed here, but nothing to run: the step is consumed without
                 # producing an observation. Invisible in the transcript, so record it.
@@ -2090,7 +2144,13 @@ Each library is listed with its description to help you understand its functiona
                 routing_function,
                 path_map={"execute": "execute", "generate": "generate", "end": END},
             )
-        workflow.add_edge("execute", "generate")
+        # Back to generate, unless the repeated-step guard ended the run. Not
+        # via self_critic: its feedback would only restart the loop.
+        workflow.add_conditional_edges(
+            "execute",
+            lambda state: "end" if state.get("next_step") == "end" else "generate",
+            path_map={"generate": "generate", "end": END},
+        )
         workflow.add_edge(START, "generate")
 
         # Compile the workflow
@@ -2233,6 +2293,12 @@ Each library is listed with its description to help you understand its functiona
             return [*fit.messages, HumanMessage(content=WRAP_UP_INSTRUCTION)], fit
         return fit.messages, fit
 
+    def _reset_step_guard(self) -> None:
+        """Start a run with no steps seen, for the repeated-step guard."""
+        self._step_count = 0
+        self._seen_steps = {}
+        self._repeat_steps = 0
+
     def _trace_finish(self, final_state, error: Exception | None = None) -> None:
         """Close the trace, labelling how the run actually ended.
 
@@ -2252,6 +2318,8 @@ Each library is listed with its description to help you understand its functiona
             outcome = "solution"
         elif "repeated parsing errors" in last:
             outcome = "aborted_parse_errors"
+        elif "same code with the same result" in last:
+            outcome = "aborted_repeated_steps"
         elif "<observation>" in last:
             outcome = "stopped_after_execution"
         else:
@@ -2281,6 +2349,7 @@ Each library is listed with its description to help you understand its functiona
         self.critic_count = 0
         self.user_task = prompt
         self._context_wrap_ups = 0
+        self._reset_step_guard()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
@@ -2336,6 +2405,7 @@ Each library is listed with its description to help you understand its functiona
         self.critic_count = 0
         self.user_task = prompt
         self._context_wrap_ups = 0
+        self._reset_step_guard()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)

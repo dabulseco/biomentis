@@ -232,6 +232,10 @@ def stream_agent_events(
     # Per-run counter for the context guard (see A1._fit_request). `go` and
     # `go_stream` reset it themselves; this path drives the graph directly.
     agent._context_wrap_ups = 0
+    # Same for the repeated-step guard: each turn starts with no steps seen.
+    reset_step_guard = getattr(agent, "_reset_step_guard", None)
+    if callable(reset_step_guard):
+        reset_step_guard()
 
     # Same reasoning for the step tracer, and it had been missed. `start_run`
     # is what gives the tracer a file to write to; every `record_generate` /

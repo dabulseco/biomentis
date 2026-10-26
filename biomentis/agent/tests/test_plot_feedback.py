@@ -12,7 +12,8 @@ What these tests pin down:
       a horizontal reference line, or that it NEVER does
   2.  ...flags curves that are all ~0, constant, or contain NaN/inf
   3.  ...summarizes scatter, bars, images and vertical reference lines, skips
-      colorbars, and flags empty axes
+      colorbars, and flags empty axes; single points are listed as marked
+      points, not as curves
   4.  The observation carries the summary after plt.show() and for figures
       left open
   5.  The plotting guidance asks for a plot on comparisons, reference lines,
@@ -135,6 +136,17 @@ def test_other_marks() -> None:
     text = "\n".join(describe_figure(fig))
     plt.close(fig)
     _check("empty axes warned", "axes are empty" in text, text)
+
+    fig, ax = plt.subplots()
+    ax.plot([2, 4, 6], [500, 530, 545], label="ZnTe")
+    ax.plot([4.0], [530.0], "o")
+    ax.scatter([3.5], [530], label="Selected")
+    ax.axhline(530)
+    lines = describe_figure(fig)
+    plt.close(fig)
+    text = "\n".join(lines)
+    _check("single points listed as marked points", "marked points: line 2 (4, 530), Selected (3.5, 530)" in text, text)
+    _check("and not as curves", not any("1 points" in ln for ln in lines), text)
 
 
 # --- 4: the observation -----------------------------------------------------

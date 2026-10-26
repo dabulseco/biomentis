@@ -212,6 +212,7 @@ def describe_figure(fig) -> list[str]:
     Per axes: title, axis labels and limits. Per curve: its range, and where
     it meets each horizontal/vertical reference line (axhline/axvline), or
     that it never does. Flags curves that are all ~0, constant, or NaN/inf.
+    Single points are listed as marked points, not as curves.
     """
     import numpy as np
     from matplotlib.collections import PathCollection
@@ -228,7 +229,7 @@ def describe_figure(fig) -> list[str]:
             f"Figure '{name}': x = {ax.get_xlabel() or 'x'} [{_num(x0)} to {_num(x1)}], "
             f"y = {ax.get_ylabel() or 'y'} [{_num(y0)} to {_num(y1)}]"
         )
-        hlines, vlines, series = [], [], []
+        hlines, vlines, series, markers = [], [], [], []
         for k, line in enumerate(ax.get_lines(), 1):
             x, y, bad = _finite_xy(line.get_xdata(), line.get_ydata())
             if x is None or not len(x):
@@ -237,7 +238,10 @@ def describe_figure(fig) -> list[str]:
             label = f"line {k}" if not label or label.startswith("_") else label
             # axhline/axvline (and any two-point flat line) are reference lines;
             # a long flat curve stays a series so its warning shows.
-            if len(y) == 2 and y[0] == y[1] and x[0] != x[1]:
+            # A single point is a marker (e.g. the chosen design), not a curve.
+            if len(x) == 1:
+                markers.append((label, float(x[0]), float(y[0])))
+            elif len(y) == 2 and y[0] == y[1] and x[0] != x[1]:
                 hlines.append((label, float(y[0])))
             elif len(x) == 2 and x[0] == x[1] and y[0] != y[1]:
                 vlines.append((label, float(x[0])))
@@ -253,6 +257,10 @@ def describe_figure(fig) -> list[str]:
             if x is None or not len(x):
                 continue
             label = coll.get_label()
+            if len(x) == 1:
+                label = "point" if not label or label.startswith("_") else label
+                markers.append((label, float(x[0]), float(y[0])))
+                continue
             label = "points" if not label or label.startswith("_") else label
             series.append((f"{label} (scatter)", x, y, bad))
         for container in ax.containers:
@@ -276,9 +284,13 @@ def describe_figure(fig) -> list[str]:
             lines.append(_series_line(label, x, y, bad, hlines, vlines))
         if len(series) > _SUMMARY_MAX_SERIES:
             lines.append(f"  … {len(series) - _SUMMARY_MAX_SERIES} more series")
+        if markers:
+            shown = ", ".join(f"{lab} ({_num(mx)}, {_num(my)})" for lab, mx, my in markers[:_SUMMARY_MAX_SERIES])
+            more = f", … {len(markers) - _SUMMARY_MAX_SERIES} more" if len(markers) > _SUMMARY_MAX_SERIES else ""
+            lines.append(f"  marked points: {shown}{more}")
         if not series and hlines and not ax.containers and not ax.images:
             lines.append("  reference lines only: " + ", ".join(f"y={_num(v)}" for _, v in hlines))
-        if not (series or hlines or vlines or ax.containers or ax.images or ax.patches):
+        if not (series or markers or hlines or vlines or ax.containers or ax.images or ax.patches):
             lines.append("  WARNING: these axes are empty, nothing was drawn")
     if len(lines) > _SUMMARY_MAX_LINES:
         lines = lines[:_SUMMARY_MAX_LINES] + ["  … summary truncated"]

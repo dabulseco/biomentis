@@ -105,13 +105,16 @@ def append_artifact(artifact: StructureArtifact, artifact_dir: str) -> None:
 
 
 def read_registry(artifact_dir: str) -> list[StructureArtifact]:
-    """Every complete record in the registry.
+    """Every complete record in the registry, one per artifact id.
+
+    The log is append-only (crash-safe), so a re-fetch appends again; the last
+    record for an id wins, which is what makes `make_artifact_id` idempotent.
 
     An unparseable line is skipped rather than raising: a registry truncated
     mid-write by a hard kill costs one record, not the file.
     """
     path = registry_path(artifact_dir)
-    out: list[StructureArtifact] = []
+    out: dict[str, StructureArtifact] = {}
     try:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
@@ -123,14 +126,15 @@ def read_registry(artifact_dir: str) -> list[StructureArtifact]:
                 except json.JSONDecodeError:
                     continue
                 try:
-                    out.append(StructureArtifact(**record))
+                    art = StructureArtifact(**record)
                 except TypeError:
                     # A record written by a newer version with extra fields.
                     known = {k: v for k, v in record.items() if k in StructureArtifact.__dataclass_fields__}
-                    out.append(StructureArtifact(**known))
+                    art = StructureArtifact(**known)
+                out[art.artifact_id] = art
     except OSError:
         return []
-    return out
+    return list(out.values())
 
 
 def resolve_artifact_path(artifact: StructureArtifact, artifact_dir: str) -> str:

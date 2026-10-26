@@ -16,6 +16,8 @@ Run with:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -127,7 +129,6 @@ def test_registry_survives_a_truncated_final_line() -> None:
 
     back = read_registry(d)
     _check("complete record survives", len(back) == 1, f"got {len(back)}")
-    _check("no exception raised", True)
 
 
 def _atom(serial: int, name: str, resname: str, chain: str, resseq: int, record: str = "ATOM  ") -> str:
@@ -225,7 +226,6 @@ def test_classification_degrades_without_biopython() -> None:
             sys.modules["Bio.PDB"] = prev
 
     _check("class is unknown", stats.molecule_class == "unknown", stats.molecule_class)
-    _check("did not raise", True)
 
 
 class _FakeResponse:
@@ -277,7 +277,8 @@ def test_alphafold_writes_to_the_artifact_dir() -> None:
     db.requests = _fake_requests(handler)
     os.environ["BIOMENTIS_ARTIFACT_DIR"] = root
     try:
-        out = db.query_alphafold("P04637", download=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = db.query_alphafold("P04637", download=True)
     finally:
         db.requests = prev_req
         if prev_env is None:
@@ -313,7 +314,9 @@ def test_pdb_identifiers_never_writes_into_the_package() -> None:
     db.requests = _fake_requests(handler)
     os.environ["BIOMENTIS_ARTIFACT_DIR"] = root
     try:
-        out = db.query_pdb_identifiers(["6NK5"], download=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = db.query_pdb_identifiers(["6NK5"], download=True)
+            dup = db.query_pdb_identifiers(["6NK5_1", "6NK5_2"], download=True)
     finally:
         db.requests = prev_req
         if prev_env is None:
@@ -333,6 +336,8 @@ def test_pdb_identifiers_never_writes_into_the_package() -> None:
     _check("new artifacts key present",
            isinstance(out.get("artifacts"), list) and len(out["artifacts"]) == 1,
            str(out.get("artifacts")))
+    _check("duplicate downloads register once", len(read_registry(art_dir)) == 1,
+           f"{len(read_registry(art_dir))} records; dup artifacts={len(dup.get('artifacts', []))}")
 
 
 def test_import_file_copies_into_artifact_dir() -> None:
@@ -344,6 +349,7 @@ def test_import_file_copies_into_artifact_dir() -> None:
     _check("source and accession recorded", (art.source_db, art.accession, art.fmt) == ("upload", "aspirin", "smi"))
     again = import_file(src, source_db="upload", artifact_dir=d)
     _check("re-importing the same file reuses it", again.path == art.path)
+    _check("re-import does not duplicate the record", len(read_registry(d)) == 1, str(read_registry(d)))
     open(src, "w").write("CCO ethanol\n")
     other = import_file(src, source_db="upload", artifact_dir=d)
     _check("a different file with the same name is not overwritten", other.path != art.path)

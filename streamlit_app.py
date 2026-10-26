@@ -67,9 +67,13 @@ def _default_selection(choices: list[tuple[str, str]]) -> tuple[str, str] | None
     if not choices:
         return None
     configured = os.getenv("BIOMNI_LLM") or os.getenv("BIOMNI_LLM_MODEL")
+    # The environment, not default_config: that was built when biomentis.config
+    # was imported, before the agent module loaded .env, so it had already
+    # resolved to a local Ollama model and its source said "Ollama".
+    source = os.getenv("BIOMNI_SOURCE")
     if configured:
         for c in choices:
-            if c[1] == configured and (not default_config.source or c[0] == default_config.source):
+            if c[1] == configured and (not source or c[0] == source):
                 return c
     return choices[0]
 

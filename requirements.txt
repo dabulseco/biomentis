@@ -14,6 +14,8 @@ statsmodels
 scikit-learn
 seaborn
 networkx
+rdkit>=2024.3
+biopython>=1.80
 
 # --- LangChain / agent runtime ---
 pydantic

@@ -105,7 +105,6 @@ from biomentis.model.retriever import ToolRetriever
 from biomentis.tool.support_tools import run_python_repl
 from biomentis.tool.tool_registry import ToolRegistry
 from biomentis.run_journal import RunJournal, journaled
-from biomentis.ui_visuals import current_plot_mode
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
     ExportEntry,
@@ -4011,6 +4010,8 @@ Each library is listed with its description to help you understand its functiona
                 # Journaled either way: durability and where the run executes
                 # are separate concerns, and opting out of the worker should
                 # not also opt out of having the work on disk.
+                from biomentis.ui_visuals import current_plot_mode
+
                 self.plot_mode = current_plot_mode()
                 _journal = RunJournal(
                     effective_prompt,

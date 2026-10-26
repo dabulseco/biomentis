@@ -172,6 +172,14 @@ def test_agent_defaults():
     _check("launch sets run id", "self.current_run_id = _journal.run_id" in launch)
 
 
+def test_a1_import_does_not_load_streamlit():
+    import subprocess
+
+    code = "import sys, biomentis.agent.a1; print('streamlit' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    _check("importing a1 leaves streamlit unloaded", out.stdout.strip().endswith("False"), out.stdout + out.stderr[-300:])
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Plot mode tests")
@@ -183,6 +191,7 @@ def run_all() -> int:
     test_current_plot_mode()
     test_control_logs_changes()
     test_agent_defaults()
+    test_a1_import_does_not_load_streamlit()
 
     print("\n" + "=" * 60)
     print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")

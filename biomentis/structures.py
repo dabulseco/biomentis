@@ -30,6 +30,7 @@ __all__ = [
     "StructureArtifact",
     "StructureStats",
     "append_artifact",
+    "current_run_id",
     "default_artifact_dir",
     "format_for_path",
     "import_file",
@@ -39,6 +40,7 @@ __all__ = [
     "record_download",
     "registry_path",
     "resolve_artifact_path",
+    "set_current_run_id",
 ]
 
 # Downloads that happen outside a run — the sidebar REPL, or a programmatic
@@ -55,6 +57,24 @@ def default_artifact_dir(run_id: str | None = None) -> str:
     """
     root = os.getenv("BIOMENTIS_ARTIFACT_DIR") or default_run_dir()
     return os.path.join(root, run_id or UNATTACHED_RUN_DIR)
+
+
+# The run whose code is executing now. The execute node sets it before each
+# execution; code in the REPL runs on a worker thread that cannot see the agent,
+# so tools that save files (the structure downloads) read it from here. A plain
+# module global, not thread-local, precisely so that other thread sees it.
+_CURRENT_RUN_ID: str | None = None
+
+
+def set_current_run_id(run_id: str | None) -> None:
+    """Record the run whose code is about to execute (None outside a run)."""
+    global _CURRENT_RUN_ID
+    _CURRENT_RUN_ID = run_id
+
+
+def current_run_id() -> str | None:
+    """The run id set by the execute node, or None."""
+    return _CURRENT_RUN_ID
 
 
 def registry_path(artifact_dir: str) -> str:

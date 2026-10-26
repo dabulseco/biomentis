@@ -50,6 +50,7 @@ $P -m biomentis.agent.tests.test_tutor_card_cache   # failed cards/empty chat an
 $P -m biomentis.agent.tests.test_ollama_thinking    # per-model Ollama `think` setting (cloud on, local off)
 $P -m biomentis.agent.tests.test_viewer            # 3Dmol viewer page + render_structure smoke
 $P -m biomentis.agent.tests.test_plot_mode         # class plot setting + run_start record
+$P -m biomentis.agent.tests.test_step_plots        # plots shown in their step, or withheld under "student"
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

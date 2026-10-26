@@ -69,8 +69,42 @@ class UIEvent:
     status: str | None = None
     duration: float | None = None
     file_path: str | None = None
-    file_kind: Literal["image", "pdf"] | None = None
+    # "plot" / "plot_withheld" are figures the agent's code drew. The class
+    # plot setting is baked in here by the producer, so a recorded run always
+    # displays the way it was recorded, whatever the sidebar says later.
+    file_kind: Literal["image", "pdf", "plot", "plot_withheld"] | None = None
     collapsible: bool = False
+
+
+PLOT_TITLE = "📈 Plot"
+PLOT_WITHHELD_NOTE = "Run this code to see the plot."
+PLOT_WITHHELD_EXPORT_TITLE = "📈 Plot (withheld from students)"
+
+_SAVEFIG_LINE = "Plot saved to:"
+
+
+def _plot_event(file_path: str, mode: str) -> UIEvent:
+    """A figure event, shown or withheld per the class plot setting."""
+    if mode == "student":
+        return UIEvent(
+            type="file",
+            file_kind="plot_withheld",
+            title=PLOT_TITLE,
+            content=PLOT_WITHHELD_NOTE,
+            file_path=file_path,
+        )
+    return UIEvent(type="file", file_kind="plot", title=PLOT_TITLE, file_path=file_path)
+
+
+def _savefig_paths(observation: str) -> set[str]:
+    """Paths printed by the patched `plt.savefig` ("Plot saved to: <path>")."""
+    paths = set()
+    for line in observation.splitlines():
+        if _SAVEFIG_LINE in line:
+            path = line.split(_SAVEFIG_LINE, 1)[1].strip().strip("\"'").strip()
+            if path:
+                paths.add(path)
+    return paths
 
 
 def _resolve_file_path(agent: Any, file_path: str) -> str | None:
@@ -185,6 +219,12 @@ def stream_agent_events(
             print("Continuing without tool retrieval...")
             yield UIEvent(type="status", content="Tool retrieval unavailable, proceeding with all tools...")
 
+    # The execute node appends one entry to `_execution_results` per step,
+    # before the observation is emitted. Only an entry appended since the
+    # previous observation belongs to this one; anything older (an earlier
+    # turn, or a step that produced no entry) must not be shown again.
+    seen_executions = len(getattr(agent, "_execution_results", None) or [])
+
     s = None
     for s in agent.app.stream(inputs, stream_mode="values", config=config):
         t_step = time() - t
@@ -267,6 +307,16 @@ def stream_agent_events(
                 collapsible=True,
             )
 
+            plot_mode = getattr(agent, "plot_mode", "show")
+            results = getattr(agent, "_execution_results", None) or []
+            captured: list[str] = []
+            if len(results) > seen_executions:
+                captured = [p for p in (results[-1].get("image_paths") or []) if p]
+            seen_executions = len(results)
+
+            for plot_path in captured:
+                yield _plot_event(plot_path, plot_mode)
+
             if any(ext in observation for ext in SUPPORTED_FILE_EXTENSIONS):
                 matches = re.findall(r"(\S+?(?:\.png|\.jpg|\.jpeg|\.gif|\.bmp|\.webp|\.pdf))", observation)
                 valid_matches = [
@@ -275,6 +325,16 @@ def stream_agent_events(
                     if not (m.startswith("Warning:") or m.startswith("Error:") or m.startswith("'"))
                     and not m.startswith(".")
                 ]
+                # A figure that was captured AND saved with plt.savefig would
+                # otherwise show twice: once captured, once scraped from the
+                # "Plot saved to:" line. The captured copy is the one kept.
+                if captured:
+                    saved = _savefig_paths(observation)
+                    valid_matches = [
+                        m
+                        for m in valid_matches
+                        if m.lower().endswith(".pdf") or m.strip("\"'").strip() not in saved
+                    ]
 
                 if valid_matches:
                     yield UIEvent(type="file", title="📁 Files")
@@ -291,6 +351,10 @@ def stream_agent_events(
                                 file_path=abs_path,
                                 file_kind="pdf",
                             )
+                        elif plot_mode == "student":
+                            # Every image in the step is withheld, not just
+                            # captured figures: a scraped PNG is a plot too.
+                            yield _plot_event(abs_path, plot_mode)
                         else:
                             yield UIEvent(
                                 type="file",
@@ -398,6 +462,25 @@ def transcript_entry_for_event(
             entry = {"panel": "inner", "role": "assistant", "content": "", "title": event.title}
         elif event.file_kind == "pdf":
             entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
+        elif event.file_kind == "plot":
+            entry = {
+                "panel": "inner",
+                "role": "assistant",
+                "kind": "plot",
+                "file_path": event.file_path,
+                "title": event.title,
+            }
+        elif event.file_kind == "plot_withheld":
+            # The path is kept for the instructor's HTML export; the live
+            # renderer shows only the note.
+            entry = {
+                "panel": "inner",
+                "role": "assistant",
+                "kind": "plot_withheld",
+                "file_path": event.file_path,
+                "title": event.title,
+                "content": event.content or PLOT_WITHHELD_NOTE,
+            }
         else:
             entry = {
                 "panel": "inner",
@@ -519,7 +602,18 @@ def list_available_providers() -> dict[str, list[str]]:
 
 # --- HTML export -------------------------------------------------------
 
-ExportEntryKind = Literal["text", "code", "observation", "image", "pdf", "instruction", "qa"]
+ExportEntryKind = Literal["text", "code", "observation", "image", "pdf", "plot_withheld", "instruction", "qa"]
+
+
+def export_kind(kind: str | None) -> ExportEntryKind:
+    """The export kind for a transcript entry or file event kind.
+
+    A shown plot exports as an ordinary image. A withheld plot keeps its own
+    kind so the export can label it — the instructor still gets the figure.
+    """
+    if kind == "plot":
+        return "image"
+    return kind or "text"  # type: ignore[return-value]
 
 
 @dataclass
@@ -566,7 +660,7 @@ def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
             return ExportEntry(role="assistant", kind="text", title=event.title, content=event.content, step_id=step_id)
         return ExportEntry(
             role="assistant",
-            kind=event.file_kind or "text",
+            kind=export_kind(event.file_kind),
             title=event.title,
             content=event.content,
             file_path=event.file_path,
@@ -730,7 +824,7 @@ def _entry_body_html(entry: ExportEntry) -> str:
         return f'<pre class="bg-dark text-light p-3 rounded"><code class="language-{html.escape(language)}">{html.escape(entry.content)}</code></pre>'
     if entry.kind == "observation":
         return f'<pre class="bg-secondary-subtle p-3 rounded small text-wrap">{html.escape(entry.content)}</pre>'
-    if entry.kind == "image" and entry.file_path:
+    if entry.kind in ("image", "plot_withheld") and entry.file_path:
         return _embed_image_html(entry.file_path)
     if entry.kind == "pdf":
         return _render_markdown(entry.content) if entry.content else ""
@@ -754,7 +848,8 @@ def _render_entry_card(entry: ExportEntry) -> str:
     is_user = entry.role == "user"
     bubble_class = "bg-primary text-white" if is_user else "bg-white"
     align_class = "ms-auto" if is_user else "me-auto"
-    title_html = f'<div class="fw-semibold small mb-1">{html.escape(entry.title)}</div>' if entry.title else ""
+    title = PLOT_WITHHELD_EXPORT_TITLE if entry.kind == "plot_withheld" else entry.title
+    title_html = f'<div class="fw-semibold small mb-1">{html.escape(title)}</div>' if title else ""
     body = _entry_body_html(entry)
     return f"""
       <div class="d-flex mb-3 {align_class}" style="max-width: 85%;">

@@ -31,8 +31,9 @@ def run_python_repl(command: str) -> str:
             exec(command, _persistent_namespace)
             output = mystdout.getvalue()
 
-            # Capture any matplotlib plots that were generated
-            # _capture_matplotlib_plots()
+            # Capture figures the code left open (no plt.show / savefig);
+            # they are shown in the step, or withheld, per the plot setting.
+            _capture_matplotlib_plots()
 
         except Exception as e:
             output = f"Error: {str(e)}"

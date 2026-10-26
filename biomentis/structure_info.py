@@ -137,6 +137,7 @@ def _pdb_metadata(path: str) -> list[tuple[str, str]]:
         ("Title", _record_text(lines, "TITLE").capitalize() if _record_text(lines, "TITLE") else ""),
         ("Classification", (header.get("head") or "").strip().capitalize()),
         ("Deposited", header.get("deposition_date") or ""),
+        ("Released", header.get("release_date") or ""),
         ("Experimental method", _record_text(lines, "EXPDTA")),
         ("Resolution (Å)", f"{resolution:.2f}" if isinstance(resolution, (int, float)) else ""),
         ("Organism", ", ".join(_unique([v for k, v in source if k == "ORGANISM_SCIENTIFIC"]))),
@@ -178,11 +179,13 @@ def _formula_weight(mol) -> list[tuple[str, str]]:
     ]
 
 
-def _sdf_metadata(path: str) -> list[tuple[str, str]]:
+def _sdf_metadata(path: str, record: int = 0) -> list[tuple[str, str]]:
     mols = _sdf_mols(path)
-    mol = mols[0] if mols else None
+    if not 0 <= record < len(mols):
+        return _error(f"SDF record {record} does not exist")
+    mol = mols[record]
     if mol is None:
-        return _error("no readable molecule in SDF file")
+        return _error(f"SDF record {record} could not be read")
     name = mol.GetProp("_Name").strip() if mol.HasProp("_Name") else ""
     rows = [("Name", name)] + _formula_weight(mol) + [
         ("Atoms", str(mol.GetNumAtoms())),
@@ -224,25 +227,38 @@ def _smiles_metadata(path: str) -> list[tuple[str, str]]:
 
 # --- Public ------------------------------------------------------------------
 
-def structure_metadata(path: str) -> list[tuple[str, str]]:
+def structure_metadata(path: str, record: int = 0) -> list[tuple[str, str]]:
     """Ordered (label, value) rows describing the file. Never raises.
 
     Fields the file does not carry are omitted rather than shown empty or as
     "None". An unreadable file yields a single `("Error", reason)` row.
+    `record` selects the molecule in a multi-record SDF; other formats ignore it.
     """
-    readers = {"pdb": _pdb_metadata, "sdf": _sdf_metadata, "smi": _smiles_metadata}
-    reader = readers.get(format_for_path(path))
-    if reader is None:
-        return _error(f"unsupported structure format: {path}")
+    fmt = format_for_path(path)
     try:
+        if fmt == "sdf":
+            return _sdf_metadata(path, record) or _error("no metadata found")
+        reader = {"pdb": _pdb_metadata, "smi": _smiles_metadata}.get(fmt)
+        if reader is None:
+            return _error(f"unsupported structure format: {path}")
         return reader(path) or _error("no metadata found")
     except Exception as exc:
         return _error(f"{type(exc).__name__}: {exc}")
 
 
 def metadata_text(path: str) -> str:
-    """`label: value` lines from `structure_metadata`, for knowledge-base indexing."""
-    return "\n".join(f"{label}: {value}" for label, value in structure_metadata(path))
+    """`label: value` lines from `structure_metadata`, for knowledge-base indexing.
+
+    A multi-record SDF yields every record, each under a "Record N" header and
+    separated by a blank line, so a search can find molecule 2 as well as 1.
+    """
+    def lines(record: int) -> str:
+        return "\n".join(f"{label}: {value}" for label, value in structure_metadata(path, record))
+
+    count = sdf_record_count(path) if format_for_path(path) == "sdf" else 0
+    if count <= 1:
+        return lines(0)
+    return "\n\n".join(f"Record {i + 1}\n{lines(i)}" for i in range(count))
 
 
 def _embed_3d(mol):

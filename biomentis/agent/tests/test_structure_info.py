@@ -72,6 +72,8 @@ def test_pdb_metadata():
     for k in ("Title", "Experimental method", "Resolution (Å)", "Organism", "Chains",
               "Ligands / heteroatoms", "Authors", "Reference"):
         _check(f"has {k}", k in labels, list(labels))
+    _check("released after deposited", [k for k, _ in md].index("Released") == [k for k, _ in md].index("Deposited") + 1)
+    _check("release date parsed", labels.get("Released") == "2020-01-15", labels.get("Released"))
     _check("resolution parsed", labels["Resolution (Å)"] == "1.80", labels.get("Resolution (Å)"))
     _check("chains listed", labels["Chains"] == "A, B", labels.get("Chains"))
     _check("waters excluded from ligands", "HOH" not in labels["Ligands / heteroatoms"],
@@ -107,6 +109,14 @@ def test_sdf_records_and_fields():
     md = dict(structure_metadata(SDF))
     _check("data fields shown", "PUBCHEM_COMPOUND_CID" in md, list(md))
     _check("formula computed", bool(md.get("Formula")), list(md))
+    md1 = dict(structure_metadata(SDF, record=1))
+    _check("record 1 name", md1.get("Name") == "methanol", md1)
+    _check("record 1 CID", md1.get("PUBCHEM_COMPOUND_CID") == "887", md1)
+    blob = metadata_text(SDF)
+    _check("text has Record headers", "Record 1" in blob and "Record 2" in blob, blob)
+    _check("text has record 1 CID", "PUBCHEM_COMPOUND_CID: 887" in blob, blob)
+    _check("records separated by blank line", "\n\nRecord 2" in blob, blob)
+    _check("out-of-range metadata is Error", structure_metadata(SDF, record=9)[0][0] == "Error")
     second = dict(structure_metadata(SDF)) if False else None
     model = viewer_model(SDF, record=1)
     _check("record 1 model is sdf", model is not None and model[1] == "sdf")
@@ -114,6 +124,23 @@ def test_sdf_records_and_fields():
            model[0][:20] if model else None)
     _check("out-of-range record is None", viewer_model(SDF, record=5) is None)
     _check("sdf depiction", (depiction_png(SDF) or b"")[:4] == b"\x89PNG")
+
+
+def test_sdf_bad_record_does_not_hide_later_ones():
+    print("\n[sdf bad record]")
+    with open(SDF, encoding="utf-8") as fh:
+        good = fh.read().split("$$$$\n")[1] + "$$$$\n"
+    p = _tmp("garbage\nmore garbage\n\n  x\nM  END\n$$$$\n" + good, ".sdf")
+    try:
+        _check("two records counted", sdf_record_count(p) == 2, sdf_record_count(p))
+        _check("record 0 is Error", structure_metadata(p, 0)[0][0] == "Error")
+        _check("record 1 still reads", dict(structure_metadata(p, 1)).get("Name") == "methanol",
+               structure_metadata(p, 1))
+        _check("record 1 has a model", viewer_model(p, 1) is not None)
+        _check("record 0 has no model", viewer_model(p, 0) is None)
+        _check("text still has methanol", "methanol" in metadata_text(p))
+    finally:
+        os.unlink(p)
 
 
 def test_smiles():
@@ -158,6 +185,7 @@ def run_all() -> int:
     test_no_coordinates_anywhere()
     test_nmr_is_not_none_filled()
     test_sdf_records_and_fields()
+    test_sdf_bad_record_does_not_hide_later_ones()
     test_smiles()
     test_pdb_viewer_and_depiction()
     test_bad_input_degrades()

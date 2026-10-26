@@ -353,12 +353,6 @@ def stream_agent_events(
         observation_match = re.search(r"<observation>(.*?)</observation>", content, re.DOTALL)
         if observation_match:
             observation = observation_match.group(1).strip()
-            yield UIEvent(
-                type="observation",
-                content=observation,
-                duration=t_step,
-                collapsible=True,
-            )
 
             plot_mode = getattr(agent, "plot_mode", "show")
             results = getattr(agent, "_execution_results", None) or []
@@ -367,12 +361,13 @@ def stream_agent_events(
                 captured = [p for p in (results[-1].get("image_paths") or []) if p]
             seen_executions = len(results)
 
-            for plot_path in captured:
-                yield _plot_event(plot_path, plot_mode)
-
+            # A step's figures and molecules are yielded BEFORE its
+            # observation. The tutor pauses on the observation, and a paused
+            # student must already see the figure the step drew.
+            visuals: list[UIEvent] = [_plot_event(plot_path, plot_mode) for plot_path in captured]
             # `show_structure` prints a marker line per molecule it saved.
-            for structure_path in _structure_marker_paths(observation):
-                yield _structure_event(structure_path)
+            visuals += [_structure_event(path) for path in _structure_marker_paths(observation)]
+            files_after: list[UIEvent] = []
 
             if any(ext in observation for ext in SUPPORTED_FILE_EXTENSIONS):
                 matches = re.findall(r"(\S+?(?:\.png|\.jpg|\.jpeg|\.gif|\.bmp|\.webp|\.pdf))", observation)
@@ -393,32 +388,45 @@ def stream_agent_events(
                         if m.lower().endswith(".pdf") or m.strip("\"'").strip() not in saved
                     ]
 
-                if valid_matches:
-                    yield UIEvent(type="file", title="📁 Files")
-                    for raw_path in valid_matches:
-                        file_path = raw_path.strip("\"'").strip()
-                        abs_path = _resolve_file_path(agent, file_path)
-                        if not abs_path:
-                            continue
-                        if file_path.lower().endswith(".pdf"):
-                            yield UIEvent(
+                for raw_path in valid_matches:
+                    file_path = raw_path.strip("\"'").strip()
+                    abs_path = _resolve_file_path(agent, file_path)
+                    if not abs_path:
+                        continue
+                    if file_path.lower().endswith(".pdf"):
+                        files_after.append(
+                            UIEvent(
                                 type="file",
                                 title="📄 PDF File",
                                 content=f"Found PDF at: {abs_path}",
                                 file_path=abs_path,
                                 file_kind="pdf",
                             )
-                        elif plot_mode == "student":
-                            # Every image in the step is withheld, not just
-                            # captured figures: a scraped PNG is a plot too.
-                            yield _plot_event(abs_path, plot_mode)
-                        else:
-                            yield UIEvent(
+                        )
+                    elif plot_mode == "student":
+                        # Every image in the step is withheld, not just
+                        # captured figures: a scraped PNG is a plot too.
+                        visuals.append(_plot_event(abs_path, plot_mode))
+                    else:
+                        files_after.append(
+                            UIEvent(
                                 type="file",
                                 title="🖼️ Image Preview",
                                 file_path=abs_path,
                                 file_kind="image",
                             )
+                        )
+
+            yield from visuals
+            yield UIEvent(
+                type="observation",
+                content=observation,
+                duration=t_step,
+                collapsible=True,
+            )
+            if files_after:
+                yield UIEvent(type="file", title="📁 Files")
+                yield from files_after
 
         t = time()
 

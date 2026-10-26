@@ -25,6 +25,8 @@ What these tests pin down:
   14. The execute node clears the run id after each execution
   15. Tutor: an uploaded structure starts no step; the roadmap comes from the plan
   16. Tutor: plots and structures join the current step with no card or pause
+  17. Tutor: a step's figure is yielded before its observation, so a paused
+      student sees it (stream, tutor and journal order)
 
 Run with:
     python -m biomentis.agent.tests.test_show_structure
@@ -139,7 +141,9 @@ def _marker_path(out: str) -> str | None:
     return None
 
 
-def _events(observation: str = "done\n", files: list[str] | None = None, mode: str = "show") -> list:
+def _events(
+    observation: str = "done\n", files: list[str] | None = None, mode: str = "show", image_paths: list[str] | None = None
+) -> list:
     """Run a scripted one-step turn through stream_agent_events."""
     from biomentis.ui_core import stream_agent_events
 
@@ -157,7 +161,8 @@ def _events(observation: str = "done\n", files: list[str] | None = None, mode: s
         history.extend(inputs["messages"])
         history.append(AIMessage(content="Show it.\n<execute>show_structure('6NK5')</execute>"))
         yield {"messages": list(history)}
-        agent._execution_results.append({"images": [], "image_paths": []})
+        paths = list(image_paths or [])
+        agent._execution_results.append({"images": ["data:image/png;base64,"] * len(paths), "image_paths": paths})
         history.append(AIMessage(content=f"<observation>{observation}</observation>"))
         yield {"messages": list(history)}
 
@@ -311,7 +316,7 @@ def test_marker_becomes_event():
     _check("absolute path", files and files[0].file_path == os.path.abspath(path), "")
     obs_i = next(i for i, e in enumerate(ev) if e.type == "observation")
     st_i = next(i for i, e in enumerate(ev) if e.file_kind == "structure")
-    _check("after its observation", st_i > obs_i, f"{obs_i} {st_i}")
+    _check("before its observation (a paused student sees it)", st_i < obs_i, f"{obs_i} {st_i}")
 
     ev = _events(observation=f"{STRUCTURE_MARKER}{path}\n{STRUCTURE_MARKER}{path}\n")
     _check("same structure twice in one step: one event", len([e for e in ev if e.file_path]) == 1, "")
@@ -518,6 +523,46 @@ def test_tutor_plot_joins_its_step():
     _check("two pauses: code, image", len(pauses) == 2, f"{len(pauses)}")
 
 
+def test_tutor_pause_on_observation_shows_the_figure():
+    print("\n[17] Tutor: pausing on the observation, the step's plot is already shown")
+    from biomentis.structures import STRUCTURE_MARKER, default_artifact_dir
+
+    png = os.path.join(_UPLOADS, "plot-001.png")
+    open(png, "wb").close()
+    mol = os.path.join(default_artifact_dir(RUN), "6NK5.pdb")
+    stream = _events(observation=f"{STRUCTURE_MARKER}{mol}\n", image_paths=[png])
+    order = [e.type if not e.file_path else e.file_kind for e in stream]
+    _check(
+        "stream order: code, plot, structure, observation",
+        [k for k in order if k in ("code", "plot", "structure", "observation")] == ["code", "plot", "structure", "observation"],
+        f"{order}",
+    )
+    out, _, cards = _drive_tutor(stream)
+    code = next(e for e in out if getattr(e, "type", None) == "code")
+    plot = next(e for e in out if getattr(e, "file_kind", None) == "plot")
+    obs = next(e for e in out if getattr(e, "type", None) == "observation")
+    obs_pause = next(
+        i for i, e in enumerate(out) if getattr(e, "type", None) == "paused" and i > out.index(obs)
+    )
+    _check("plot yielded before the observation's pause", out.index(plot) < out.index(obs) < obs_pause, "")
+    _check("plot sits in the code step's box", plot.step_id == code.step_id, f"{plot.step_id} {code.step_id}")
+    _check("no card for the plot", plot not in cards, "")
+
+    from biomentis.run_journal import RunJournal, entries_for_run, load_run
+
+    journal = RunJournal("Plot.", run_dir=tempfile.mkdtemp(prefix="show_structure_runs_"), plot_mode="show")
+    for event in out:
+        if hasattr(event, "content") and not isinstance(event, SimpleNamespace):
+            journal.append(event)
+    journal.finish("complete")
+    kinds = [e.get("kind") for e in entries_for_run(load_run(journal.path))]
+    _check(
+        "journal order: plot and structure before the observation",
+        kinds.index("plot") < kinds.index("observation") and kinds.index("structure") < kinds.index("observation"),
+        f"{kinds}",
+    )
+
+
 def run_all() -> int:
     print("=" * 60)
     print("show_structure / plot guidance tests")
@@ -539,6 +584,7 @@ def run_all() -> int:
         test_execute_resets_run_id,
         test_tutor_upload_does_not_start_a_step,
         test_tutor_plot_joins_its_step,
+        test_tutor_pause_on_observation_shows_the_figure,
     ):
         try:
             test()

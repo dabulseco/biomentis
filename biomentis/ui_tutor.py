@@ -1059,6 +1059,24 @@ def _render_mode_toggles(tutor) -> None:
 # ----- 6a. Knowledge-base panel ------------------------------------------
 
 
+def _kb_structure_dialog(name: str, path: str) -> None:
+    """Open a knowledge-base structure file in the 3D viewer."""
+    import streamlit as st
+
+    st.caption(name)
+    from biomentis.ui_visuals import render_structure
+
+    render_structure(path, key=f"kb-{name}")
+
+
+try:
+    import streamlit as _st
+
+    _kb_structure_dialog = _st.dialog("Structure", width="large")(_kb_structure_dialog)
+except Exception:  # Streamlit absent or too old: View falls back to inline
+    pass
+
+
 def _render_kb_panel(tutor) -> None:
     """KB uploader + URL ingest + Clear button + stats."""
     import streamlit as st
@@ -1069,10 +1087,14 @@ def _render_kb_panel(tutor) -> None:
     )
     uploaded = st.file_uploader(
         "Upload course materials",
-        type=["pdf", "pptx", "docx", "txt"],
+        type=["pdf", "pptx", "docx", "txt", "pdb", "sdf", "smi"],
         accept_multiple_files=True,
         key="biomni_tutor_kb_uploader",
-        help="PDF, PowerPoint, Word, or plain text. Each file is chunked and embedded locally.",
+        help=(
+            "PDF, PowerPoint, Word, or plain text. Each file is chunked and embedded locally. "
+            "Structure files (PDB, SDF, SMILES) are indexed by their descriptive "
+            "metadata only, never atom coordinates; open them with View."
+        ),
     )
     url_text = st.text_area(
         "Or paste URLs (one per line)",
@@ -1138,8 +1160,16 @@ def _render_kb_panel(tutor) -> None:
                 + (f" · last updated {stats.last_updated}" if stats.last_updated else "")
             )
             with st.expander("Indexed sources", expanded=False):
-                for s in stats.source_names:
-                    st.markdown(f"- {s}")
+                for name in stats.source_names:
+                    if name.lower().endswith((".pdb", ".sdf", ".smi")):
+                        name_col, view_col = st.columns([3, 1])
+                        name_col.markdown(f"- {name}")
+                        if view_col.button("View", key=f"kbview-{name}"):
+                            _kb_structure_dialog(
+                                name, os.path.join(tutor.kb.path, "raw", name)
+                            )
+                    else:
+                        st.markdown(f"- {name}")
 
 
 # ----- 6b. Rubric panel ---------------------------------------------------

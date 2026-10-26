@@ -376,6 +376,11 @@ class KnowledgeBase:
 
             doc = DocxDocument(file_path)
             return "\n\n".join(p.text for p in doc.paragraphs if p.text)
+        if ext in (".pdb", ".sdf", ".smi"):
+            # Index descriptive metadata only -- never atom coordinates.
+            from biomentis.structure_info import metadata_text
+
+            return metadata_text(file_path)
         raise ValueError(f"Unsupported file type: {ext}")
 
     def _read_pdf_pages(self, file_path: str, basename: str) -> list:

@@ -11,7 +11,7 @@ from Bio.Seq import Seq
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from biomentis.llm import get_llm
-from biomentis.structures import default_artifact_dir, record_download
+from biomentis.structures import current_run_id, default_artifact_dir, record_download
 from biomentis.utils import parse_hpo_obo
 
 
@@ -616,8 +616,11 @@ def query_alphafold(
             # Default to the run-scoped artifact directory. This used to be
             # ".", which is why loose AF-*.pdb files accumulate wherever the
             # app happens to be started from.
+            # The run whose code called this (None outside a run); an explicit
+            # output_dir still decides where the file lands.
+            run_id = current_run_id()
             if not output_dir:
-                output_dir = default_artifact_dir()
+                output_dir = default_artifact_dir(run_id)
             os.makedirs(output_dir, exist_ok=True)
 
             # Generate standard AlphaFold filename
@@ -639,7 +642,7 @@ def query_alphafold(
                     "url": download_url,
                 }
                 artifacts.append(
-                    asdict(record_download(file_path, source_db="alphafold", accession=uniprot_id))
+                    asdict(record_download(file_path, source_db="alphafold", accession=uniprot_id, run_id=run_id))
                 )
                 # Printed so the UI's file-detection seam can find it.
                 print(f"Downloaded structure: {os.path.abspath(file_path)}")
@@ -998,6 +1001,8 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
         # Download structure files if requested
         downloaded: list[dict] = []
         if download:
+            # The run whose code called this (None outside a run).
+            run_id = current_run_id()
             for identifier in identifiers:
                 if "_" in identifier or "." in identifier or "-" in identifier:
                     # For non-entry identifiers, extract the PDB ID
@@ -1019,7 +1024,7 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                         # This used to write inside the installed package
                         # (biomentis/tool/data/pdb/), which is not a place a
                         # user's downloads belong and is not configurable.
-                        data_dir = default_artifact_dir()
+                        data_dir = default_artifact_dir(run_id)
                         os.makedirs(data_dir, exist_ok=True)
 
                         # Save PDB file
@@ -1032,7 +1037,7 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                             if result["identifier"] == identifier or result["identifier"].startswith(pdb_id):
                                 result["pdb_file_path"] = pdb_file_path
                         downloaded.append(
-                            asdict(record_download(pdb_file_path, source_db="rcsb", accession=pdb_id))
+                            asdict(record_download(pdb_file_path, source_db="rcsb", accession=pdb_id, run_id=run_id))
                         )
                         # Printed so the UI's file-detection seam can find it.
                         print(f"Downloaded structure: {os.path.abspath(pdb_file_path)}")

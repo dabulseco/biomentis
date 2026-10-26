@@ -72,7 +72,9 @@ class UIEvent:
     # "plot" / "plot_withheld" are figures the agent's code drew. The class
     # plot setting is baked in here by the producer, so a recorded run always
     # displays the way it was recorded, whatever the sidebar says later.
-    file_kind: Literal["image", "pdf", "plot", "plot_withheld"] | None = None
+    # "structure" is a molecule for the 3D viewer; the plot setting does not
+    # apply to it.
+    file_kind: Literal["image", "pdf", "plot", "plot_withheld", "structure"] | None = None
     collapsible: bool = False
 
 
@@ -94,6 +96,53 @@ def _plot_event(file_path: str, mode: str) -> UIEvent:
             file_path=file_path,
         )
     return UIEvent(type="file", file_kind="plot", title=PLOT_TITLE, file_path=file_path)
+
+
+def _structure_event(file_path: str) -> UIEvent:
+    """A structure-viewer event for an absolute path."""
+    return UIEvent(
+        type="file",
+        file_kind="structure",
+        title=f"🧬 {os.path.basename(file_path)}",
+        file_path=file_path,
+    )
+
+
+def _structure_marker_paths(observation: str) -> list[str]:
+    """Existing files named by `show_structure`'s marker lines, in order, once each."""
+    from biomentis.structures import STRUCTURE_MARKER
+
+    paths: list[str] = []
+    for line in observation.splitlines():
+        line = line.strip()
+        if not line.startswith(STRUCTURE_MARKER):
+            continue
+        path = os.path.abspath(line[len(STRUCTURE_MARKER) :].strip().strip("\"'"))
+        if os.path.isfile(path) and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _uploaded_structure_events(agent: Any, files: list[str]) -> list[UIEvent]:
+    """Import each uploaded PDB/SDF/SMILES file into the run and open it.
+
+    Imported by the producer, before the agent starts, so the event is
+    journaled like any other and the viewer survives re-attach and restore.
+    """
+    from biomentis.structures import default_artifact_dir, format_for_path, import_file
+
+    run_id = getattr(agent, "current_run_id", None)
+    events: list[UIEvent] = []
+    for file_path in files:
+        if format_for_path(file_path) not in ("pdb", "sdf", "smi"):
+            continue
+        try:
+            artifact = import_file(file_path, "upload", run_id=run_id)
+        except Exception as exc:  # an unreadable upload must not stop the run
+            print(f"Warning: could not open uploaded structure {file_path}: {exc}")
+            continue
+        events.append(_structure_event(os.path.abspath(os.path.join(default_artifact_dir(run_id), artifact.path))))
+    return events
 
 
 def _savefig_paths(observation: str) -> set[str]:
@@ -208,6 +257,10 @@ def stream_agent_events(
     if context_note:
         yield UIEvent(type="status", content=context_note)
 
+    # Uploaded structures open before the agent starts. Not governed by the
+    # plot setting: a molecule viewer is not a figure students must draw.
+    yield from _uploaded_structure_events(agent, files)
+
     if agent.use_tool_retriever:
         yield UIEvent(type="status", content="Retrieving relevant tools, data lake items, and libraries...")
         try:
@@ -316,6 +369,10 @@ def stream_agent_events(
 
             for plot_path in captured:
                 yield _plot_event(plot_path, plot_mode)
+
+            # `show_structure` prints a marker line per molecule it saved.
+            for structure_path in _structure_marker_paths(observation):
+                yield _structure_event(structure_path)
 
             if any(ext in observation for ext in SUPPORTED_FILE_EXTENSIONS):
                 matches = re.findall(r"(\S+?(?:\.png|\.jpg|\.jpeg|\.gif|\.bmp|\.webp|\.pdf))", observation)
@@ -470,6 +527,14 @@ def transcript_entry_for_event(
                 "file_path": event.file_path,
                 "title": event.title,
             }
+        elif event.file_kind == "structure":
+            entry = {
+                "panel": "inner",
+                "role": "assistant",
+                "kind": "structure",
+                "file_path": event.file_path,
+                "title": event.title,
+            }
         elif event.file_kind == "plot_withheld":
             # The path is kept for the instructor's HTML export; the live
             # renderer shows only the note.
@@ -602,7 +667,9 @@ def list_available_providers() -> dict[str, list[str]]:
 
 # --- HTML export -------------------------------------------------------
 
-ExportEntryKind = Literal["text", "code", "observation", "image", "pdf", "plot_withheld", "instruction", "qa"]
+ExportEntryKind = Literal[
+    "text", "code", "observation", "image", "pdf", "plot_withheld", "structure", "instruction", "qa"
+]
 
 
 def export_kind(kind: str | None) -> ExportEntryKind:
@@ -733,6 +800,25 @@ def _embed_image_html(file_path: str) -> str:
         return f'<div class="text-danger">Image not found: {html.escape(file_path)}</div>'
 
 
+def _structure_metadata_html(file_path: str) -> str:
+    """A structure as its metadata table: no viewer, and never its coordinates."""
+    try:
+        from biomentis.structure_info import structure_metadata
+
+        rows = structure_metadata(file_path)
+    except Exception as exc:  # the export must not fail on one structure
+        rows = [("Error", f"{type(exc).__name__}: {exc}")]
+    body = "".join(
+        f"<tr><th scope='row' class='text-nowrap'>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>"
+        for label, value in rows
+    )
+    return (
+        f"<div class='text-muted small mb-1'>{html.escape(os.path.basename(file_path))}</div>"
+        f"<div class='table-responsive'><table class='table table-sm table-bordered align-middle mb-0'>"
+        f"<tbody>{body}</tbody></table></div>"
+    )
+
+
 def _render_markdown(text: str) -> str:
     """Render markdown prose (tables, bold, lists, ...) to Bootstrap-styled HTML.
 
@@ -828,6 +914,8 @@ def _entry_body_html(entry: ExportEntry) -> str:
         return _embed_image_html(entry.file_path)
     if entry.kind == "pdf":
         return _render_markdown(entry.content) if entry.content else ""
+    if entry.kind == "structure" and entry.file_path:
+        return _structure_metadata_html(entry.file_path)
     if entry.kind in ("instruction", "qa"):
         # Tutor-layer exports: a left "Tutor" badge, then markdown body,
         # then (for qa) a Sources list and a metadata line if the entry

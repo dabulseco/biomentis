@@ -27,6 +27,7 @@ from biomentis.run_journal import default_run_dir
 
 __all__ = [
     "UNATTACHED_RUN_DIR",
+    "STRUCTURE_MARKER",
     "StructureArtifact",
     "StructureStats",
     "append_artifact",
@@ -47,6 +48,10 @@ __all__ = [
 # call with no background run — go here rather than failing. Artifacts in it
 # carry run_id=None.
 UNATTACHED_RUN_DIR = "unattached"
+
+# Printed by `show_structure` before a structure's absolute path. The UI turns a
+# line starting with it, in a step's observation, into a structure viewer.
+STRUCTURE_MARKER = "🧬 Structure ready: "
 
 
 def default_artifact_dir(run_id: str | None = None) -> str:

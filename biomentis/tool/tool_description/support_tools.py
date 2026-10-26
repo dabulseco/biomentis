@@ -13,6 +13,21 @@ description = [
         ],
     },
     {
+        "description": "Display a molecule in the app's 3D structure viewer. Downloads a PDB entry from RCSB, "
+        "imports a structure file, or builds one from a SMILES string, saves it under the current run, "
+        "and returns a one-line summary (or 'Could not show structure: <reason>').",
+        "name": "show_structure",
+        "optional_parameters": [],
+        "required_parameters": [
+            {
+                "default": None,
+                "description": "a PDB ID (e.g. 6NK5), a path to a .pdb/.sdf/.smi file, or a SMILES string",
+                "name": "source",
+                "type": "str",
+            }
+        ],
+    },
+    {
         "description": "Read the source code of a function from any module path.",
         "name": "read_function_source_code",
         "optional_parameters": [],

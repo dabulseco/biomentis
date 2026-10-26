@@ -48,3 +48,32 @@ def save_plot_pngs(data_uris: list[str], out_dir: str, start_index: int) -> list
         paths.append(path)
         index += 1
     return paths
+
+
+def plot_guidance(plot_mode: str) -> str:
+    """System-prompt text telling the agent how to plot and show molecules.
+
+    Every plotting block must stand on its own so a student can paste it alone
+    into Colab: the agent's REPL keeps state between steps, Colab does not.
+    """
+    lines = [
+        "PLOTS AND STRUCTURES:",
+        "- When explaining a quantitative or visual principle, plot the data with matplotlib. "
+        "Label both axes, with units, give the figure a title, and call plt.show().",
+        "- Every plotting block is self-contained: write the data inline, import only numpy and "
+        "matplotlib, and use no variables from earlier steps, no files, and no biomentis tools, "
+        "so a student can paste that block alone into Colab and run it.",
+        "- Finish each figure within one step (one <execute> block); figures still open when a "
+        "step ends are captured and closed.",
+        "- To display a molecule, call show_structure(source) with a PDB ID (e.g. 6NK5), a path "
+        "to a .pdb/.sdf/.smi file, or a SMILES string: "
+        "`from biomentis.tool.support_tools import show_structure`.",
+    ]
+    if plot_mode == "student":
+        lines.append(
+            "- Students will run the plotting code themselves and will not see the figure in the "
+            "app, so the code must be complete and commented, explaining what each part draws."
+        )
+    else:
+        lines.append("- The figure will be shown beside the code in the app.")
+    return "\n".join(lines)

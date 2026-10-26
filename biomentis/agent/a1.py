@@ -105,7 +105,7 @@ from biomentis.model.retriever import ToolRetriever
 from biomentis.tool.support_tools import run_python_repl
 from biomentis.tool.tool_registry import ToolRegistry
 from biomentis.run_journal import RunJournal, journaled
-from biomentis.plots import save_plot_pngs
+from biomentis.plots import plot_guidance, save_plot_pngs
 from biomentis.structures import default_artifact_dir, set_current_run_id
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
@@ -1715,6 +1715,9 @@ Each library is listed with its description to help you understand its functiona
                 "gpt" in str(self.llm.model_name).lower() or "openai" in str(type(self.llm)).lower()
             ):
                 system_prompt += "\n\nIMPORTANT FOR GPT MODELS: You MUST use XML tags <execute> or <solution> in EVERY response. Do not use markdown code blocks (```) - use <execute> tags instead."
+            # Per call, not baked into self.system_prompt, so the next run
+            # follows a changed plot setting without re-running configure().
+            system_prompt += "\n\n" + plot_guidance(getattr(self, "plot_mode", "show"))
 
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
             messages, context_fit = self._fit_request(messages)
@@ -1895,42 +1898,48 @@ Each library is listed with its description to help you understand its functiona
                 # Bash step never inherits the previous Python step's figures.
                 self._clear_execution_plots()
 
-                # Check if the code is R code
-                if (
-                    code.strip().startswith("#!R")
-                    or code.strip().startswith("# R code")
-                    or code.strip().startswith("# R script")
-                ):
-                    # Remove the R marker and run as R code
-                    r_code = re.sub(r"^#!R|^# R code|^# R script", "", code, count=1).strip()
-                    trace_lang = "r"
-                    result = run_with_timeout(run_r_code, [r_code], timeout=timeout)
-                # Check if the code is a Bash script or CLI command
-                elif (
-                    code.strip().startswith("#!BASH")
-                    or code.strip().startswith("# Bash script")
-                    or code.strip().startswith("#!CLI")
-                ):
-                    # Handle both Bash scripts and CLI commands with the same function
-                    if code.strip().startswith("#!CLI"):
-                        # For CLI commands, extract the command and run it as a simple bash script
-                        cli_command = re.sub(r"^#!CLI", "", code, count=1).strip()
-                        # Remove any newlines to ensure it's a single command
-                        cli_command = cli_command.replace("\n", " ")
-                        trace_lang = "cli"
-                        result = run_with_timeout(run_bash_script, [cli_command], timeout=timeout)
+                try:
+                    # Check if the code is R code
+                    if (
+                        code.strip().startswith("#!R")
+                        or code.strip().startswith("# R code")
+                        or code.strip().startswith("# R script")
+                    ):
+                        # Remove the R marker and run as R code
+                        r_code = re.sub(r"^#!R|^# R code|^# R script", "", code, count=1).strip()
+                        trace_lang = "r"
+                        result = run_with_timeout(run_r_code, [r_code], timeout=timeout)
+                    # Check if the code is a Bash script or CLI command
+                    elif (
+                        code.strip().startswith("#!BASH")
+                        or code.strip().startswith("# Bash script")
+                        or code.strip().startswith("#!CLI")
+                    ):
+                        # Handle both Bash scripts and CLI commands with the same function
+                        if code.strip().startswith("#!CLI"):
+                            # For CLI commands, extract the command and run it as a simple bash script
+                            cli_command = re.sub(r"^#!CLI", "", code, count=1).strip()
+                            # Remove any newlines to ensure it's a single command
+                            cli_command = cli_command.replace("\n", " ")
+                            trace_lang = "cli"
+                            result = run_with_timeout(run_bash_script, [cli_command], timeout=timeout)
+                        else:
+                            # For Bash scripts, remove the marker and run as a bash script
+                            bash_script = re.sub(r"^#!BASH|^# Bash script", "", code, count=1).strip()
+                            trace_lang = "bash"
+                            result = run_with_timeout(run_bash_script, [bash_script], timeout=timeout)
+                    # Otherwise, run as Python code
                     else:
-                        # For Bash scripts, remove the marker and run as a bash script
-                        bash_script = re.sub(r"^#!BASH|^# Bash script", "", code, count=1).strip()
-                        trace_lang = "bash"
-                        result = run_with_timeout(run_bash_script, [bash_script], timeout=timeout)
-                # Otherwise, run as Python code
-                else:
-                    # Inject custom functions into the Python execution environment
-                    self._inject_custom_functions_to_repl()
-                    result = run_with_timeout(run_python_repl, [code], timeout=timeout)
+                        # Inject custom functions into the Python execution environment
+                        self._inject_custom_functions_to_repl()
+                        result = run_with_timeout(run_python_repl, [code], timeout=timeout)
 
-                    # Plots are now captured directly in the execution entry above
+                        # Plots are now captured directly in the execution entry above
+                finally:
+                    # Code run outside an agent run (the sidebar REPL) must
+                    # not save into this run, so the id lives only as long
+                    # as this execution.
+                    set_current_run_id(None)
 
                 if len(result) > 10000:
                     result = (
@@ -3344,6 +3353,15 @@ Each library is listed with its description to help you understand its functiona
                         inner_history.append(
                             ChatMessage(role="assistant", content=event.content, metadata={"title": event.title})
                         )
+                    elif event.file_kind == "structure":
+                        # No 3D viewer here; name the file rather than feed it to gr.Image.
+                        inner_history.append(
+                            ChatMessage(
+                                role="assistant",
+                                content=f"Structure saved to: {event.file_path}",
+                                metadata={"title": event.title},
+                            )
+                        )
                     else:
                         inner_history.append(
                             ChatMessage(
@@ -3716,7 +3734,7 @@ Each library is listed with its description to help you understand its functiona
                 out.append(
                     ExportEntry(
                         role=e.get("role", "assistant"),
-                        # "plot" → "image"; "plot_withheld" keeps its kind.
+                        # "plot" → "image"; "plot_withheld" and "structure" keep their kind.
                         kind=export_kind(e.get("kind", "text")),
                         title=e.get("title"),
                         content=e.get("content", ""),
@@ -3780,6 +3798,9 @@ Each library is listed with its description to help you understand its functiona
             except Exception as e:
                 inner_col.error(f"Failed to export: {e}")
 
+        # Counts structure viewers drawn in this script run, for unique keys.
+        _structure_keys = {"n": 0}
+
         def render_entry(container, entry):
             with container.chat_message(entry.get("role", "assistant")):
                 if entry.get("title"):
@@ -3788,6 +3809,16 @@ Each library is listed with its description to help you understand its functiona
                     st.code(entry["content"], language=entry.get("language") or "python")
                 elif entry.get("kind") in ("image", "plot"):
                     st.image(entry["file_path"])
+                elif entry.get("kind") == "structure":
+                    # Not governed by the plot setting. The key follows render
+                    # order, which is stable across reruns for a transcript.
+                    _structure_keys["n"] += 1
+                    from biomentis.ui_visuals import render_structure
+
+                    render_structure(
+                        entry["file_path"],
+                        key=f"structure-{_structure_keys['n']}-{os.path.basename(entry['file_path'])}",
+                    )
                 elif entry.get("kind") == "plot_withheld":
                     # Students run the code themselves: the note only, never
                     # the figure (it stays on disk for the instructor's export).

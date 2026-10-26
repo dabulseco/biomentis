@@ -48,6 +48,7 @@ $P -m biomentis.agent.tests.test_runaway_generation # parse-error retry cap + Ol
 $P -m biomentis.agent.tests.test_kb_context         # knowledge base → agent + Clear KB confirm
 $P -m biomentis.agent.tests.test_tutor_card_cache   # failed cards/empty chat answers retried + loop messages not shown as steps
 $P -m biomentis.agent.tests.test_ollama_thinking    # per-model Ollama `think` setting (cloud on, local off)
+$P -m biomentis.agent.tests.test_viewer            # 3Dmol viewer page + render_structure smoke
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

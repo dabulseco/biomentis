@@ -26,6 +26,12 @@ What these tests pin down:
   7.  turn_from_reasoning finds the block a model wrote in its thinking
   8.  A reply with empty content and the turn in its thinking runs that turn,
       with no "no tag" retry (deepseek-v4.1-flash:cloud, 2026-10-26)
+  9.  coerce_invoke_syntax reads a turn written as a tool call
+ 10.  A tool-call-style turn runs as code, and the results the model made up
+      after it are dropped (claude-sonnet-5-5, 2026-10-26)
+ 11.  On Claude, observations go as user turns, so no request ends on an
+      assistant turn (prefill is a 400 on current Claude models); other
+      models' requests are unchanged
 
 Run with:
     python -m biomentis.agent.tests.test_runaway_generation
@@ -275,6 +281,86 @@ def test_turn_in_thinking_runs() -> None:
     _check("answered", "<solution>42</solution>" in final, final)
 
 
+_INVOKE_TURN = (
+    "I'll compute it.\n\n<invoke name=\"execute\">\n<parameter name=\"code\">\nprint(6 * 7)\n</parameter>\n</invoke>\n"
+    ":<observe>\n41\n</parameter>\n</invoke>\n:So the answer is 41."
+)
+
+
+def test_coerce_invoke_syntax() -> None:
+    print("\n[9] a turn written as a tool call")
+    from biomentis.utils import AGENT_STOP_SEQUENCES, coerce_invoke_syntax
+
+    got = coerce_invoke_syntax(_INVOKE_TURN)
+    _check("becomes an execute block", got == "I'll compute it.\n<execute>\nprint(6 * 7)\n</execute>", repr(got))
+    _check("made-up results dropped", "41" not in got and "observe" not in got, repr(got))
+    cut = '<invoke name="execute">\n<parameter name="code">\nx = 1\n</parameter>\n'  # stopped at </invoke>
+    _check("works when stopped at </invoke>", coerce_invoke_syntax(cut) == "<execute>\nx = 1\n</execute>",
+           repr(coerce_invoke_syntax(cut)))
+    answer = '<invoke name="solution"><parameter name="text">ZnTe</parameter></invoke>'
+    _check("answer-like name becomes a solution", coerce_invoke_syntax(answer) == "<solution>\nZnTe\n</solution>")
+    tagged = "<execute>print(1)</execute> <invoke name=\"execute\"><parameter name=\"code\">2</parameter>"
+    _check("a turn with tags is left alone", coerce_invoke_syntax(tagged) == tagged)
+    _check("plain prose is left alone", coerce_invoke_syntax("No tags here.") == "No tags here.")
+    _check("agent stops at </invoke>", "</invoke>" in AGENT_STOP_SEQUENCES)
+
+
+class _InvokeLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls += 1
+        return AIMessage(content=_INVOKE_TURN if self.calls == 1 else "<solution>42</solution>")
+
+
+def test_invoke_turn_runs() -> None:
+    print("\n[10] a tool-call-style turn runs as code")
+    llm = _InvokeLLM()
+    log, final = _agent(llm).go("multiply")
+    _check("the code ran", any("<observation>42" in m for m in log), str(log[-3:])[:300])
+    _check("its made-up result is not in the history", not any(":So the answer is 41" in m for m in log), "")
+    _check("two calls", llm.calls == 2, str(llm.calls))
+    _check("answered", "<solution>42</solution>" in final, final)
+
+
+class _RecordingLLM:
+    """Runs one step, then answers; records every request."""
+
+    def __init__(self, model: str):
+        self.model = model
+        self.requests: list = []
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.requests.append(list(messages))
+        if len(self.requests) == 1:
+            return AIMessage(content="<execute>print(42)</execute>")
+        return AIMessage(content="<solution>42</solution>")
+
+
+def test_claude_requests_end_on_a_user_turn() -> None:
+    print("\n[11] Claude requests never end on an assistant turn")
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    llm = _RecordingLLM("claude-sonnet-5-5")
+    _, final = _agent(llm).go("print 42")
+    second = llm.requests[1] if len(llm.requests) > 1 else []
+    _check("ran to its answer", "<solution>42</solution>" in final, final)
+    _check("the request after a step ends on a user turn", bool(second) and isinstance(second[-1], HumanMessage),
+           type(second[-1]).__name__ if second else "no second request")
+    _check("that turn is the observation", bool(second) and second[-1].content.startswith("<observation>42"),
+           second[-1].content[:60] if second else "")
+
+    other = _RecordingLLM("gemma4:31b-cloud")
+    _agent(other).go("print 42")
+    last = other.requests[1][-1] if len(other.requests) > 1 else None
+    _check("other models unchanged", isinstance(last, AIMessage), type(last).__name__)
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Runaway generation tests")
@@ -288,6 +374,9 @@ def run_all() -> int:
         test_ollama_client_has_an_output_cap,
         test_turn_from_reasoning,
         test_turn_in_thinking_runs,
+        test_coerce_invoke_syntax,
+        test_invoke_turn_runs,
+        test_claude_requests_end_on_a_user_turn,
     ):
         try:
             test()

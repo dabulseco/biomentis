@@ -1086,6 +1086,40 @@ def truncate_after_first_tag(message: str) -> tuple[str, str]:
 
 _OPENING_TAG_RE = re.compile(r"<(?:execute|solution)>", re.IGNORECASE)
 
+# Stop sequences for agent turns. `</invoke>` ends a turn written in tool-call
+# syntax (see `coerce_invoke_syntax`) before the model goes on to invent its
+# own results.
+AGENT_STOP_SEQUENCES = ["</execute>", "</solution>", "</invoke>"]
+
+_INVOKE_RE = re.compile(
+    r'<invoke name="([^"]*)">\s*<parameter name="[^"]*">(.*?)(?:</parameter>|</invoke>|$)',
+    re.DOTALL | re.IGNORECASE,
+)
+_ANSWER_INVOKE_NAMES = {"solution", "answer", "final_answer"}
+
+
+def coerce_invoke_syntax(message: str) -> str:
+    """A turn written as a tool call, rewritten with the agent's tags.
+
+    claude-sonnet-5-5, on long tasks, sometimes ignores `<execute>` and writes
+    Anthropic's tool-call syntax as plain text,
+    `<invoke name="execute"><parameter name="code">...</parameter></invoke>`,
+    then carries on with results it made up (2026-10-26). The agent saw no tag
+    and the run ended on repeated parse errors. The first call becomes an
+    `<execute>` block (a `<solution>` for an answer-like name) and everything
+    after it is dropped. A message that already has a tag is left alone.
+    """
+    if _OPENING_TAG_RE.search(message or ""):
+        return message
+    match = _INVOKE_RE.search(message or "")
+    if match is None:
+        return message
+    tag = "solution" if match.group(1).strip().lower() in _ANSWER_INVOKE_NAMES else "execute"
+    body = match.group(2).strip()
+    if not body:
+        return message
+    return (message[: match.start()].rstrip() + f"\n<{tag}>\n{body}\n</{tag}>").strip()
+
 
 def turn_from_reasoning(reasoning: str | None) -> str:
     """The `<execute>`/`<solution>` block a model wrote in its thinking, or "".

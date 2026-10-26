@@ -143,6 +143,8 @@ from biomentis.utils import (
     run_with_timeout,
     should_skip_message,
     textify_api_dict,
+    AGENT_STOP_SEQUENCES,
+    coerce_invoke_syntax,
     truncate_after_first_tag,
     turn_from_reasoning,
 )
@@ -193,6 +195,32 @@ def _repeat_note(first_step: int, repeats: int) -> str:
             "Give your <solution> now, based on the results you already have."
         )
     return note
+
+
+def _is_claude(llm) -> bool:
+    """A Claude model, first-party or on Bedrock."""
+    from biomentis.context_budget import model_name
+
+    return "claude" in model_name(llm).lower()
+
+
+def _observations_as_user_turns(messages: list) -> list:
+    """The request with each `<observation>` sent as a user turn.
+
+    The history keeps observations as AIMessages (the UI and journal read them
+    that way), so after a step the request ended on an assistant turn. Claude
+    models from 4.6 on reject that as prefill: "This model does not support
+    assistant message prefill" (claude-sonnet-5-5, 2026-10-26), ending every
+    run after its first step. An observation is input to the model, so it goes
+    as a user turn; every observation is converted, not just the last, so the
+    request stays a stable prefix from step to step.
+    """
+    return [
+        HumanMessage(content=m.content)
+        if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.lstrip().startswith("<observation>")
+        else m
+        for m in messages
+    ]
 
 
 def _is_ollama(llm) -> bool:
@@ -466,7 +494,7 @@ class A1:
         self.llm = get_llm(
             llm,
             temperature=temperature,
-            stop_sequences=["</execute>", "</solution>"],
+            stop_sequences=AGENT_STOP_SEQUENCES,
             source=source,
             base_url=base_url,
             api_key=api_key,
@@ -544,7 +572,7 @@ class A1:
         self.llm = get_llm(
             model,
             temperature=self.temperature,
-            stop_sequences=["</execute>", "</solution>"],
+            stop_sequences=AGENT_STOP_SEQUENCES,
             source=source,
             base_url=self._llm_base_url,
             api_key=self._llm_api_key,
@@ -1753,6 +1781,8 @@ Each library is listed with its description to help you understand its functiona
             system_prompt += "\n\n" + plot_guidance(getattr(self, "plot_mode", "show"))
 
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
+            if _is_claude(self.llm):
+                messages = _observations_as_user_turns(messages)
             messages, context_fit = self._fit_request(messages)
             trace_t0 = time.time()
             response = _invoke_llm_with_retry(self.llm, messages, stop_at_first_tag=True)
@@ -1792,6 +1822,13 @@ Each library is listed with its description to help you understand its functiona
                     print("took the turn from the model's thinking: its reply had no tag")
                     msg = (msg.strip() + "\n" + salvaged).strip()
                     trace_coerced = True
+
+            # Claude can write the turn as a tool call instead of <execute>.
+            coerced = coerce_invoke_syntax(msg)
+            if coerced != msg:
+                print("read a tool-call-style turn as <execute>/<solution>")
+                msg = coerced
+                trace_coerced = True
 
             # Enhanced parsing for better OpenAI compatibility
             # Check for incomplete tags and fix them

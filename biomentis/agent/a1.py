@@ -105,6 +105,7 @@ from biomentis.model.retriever import ToolRetriever
 from biomentis.tool.support_tools import run_python_repl
 from biomentis.tool.tool_registry import ToolRegistry
 from biomentis.run_journal import RunJournal, journaled
+from biomentis.ui_visuals import current_plot_mode
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
     ExportEntry,
@@ -454,6 +455,10 @@ class A1:
 
         # Add timeout parameter
         self.timeout_seconds = timeout_seconds  # 10 minutes default timeout
+
+        # Set per run by launch_streamlit_demo; defaults serve non-UI callers.
+        self.plot_mode = "show"
+        self.current_run_id = None
 
         # Step-level tracing. Cheap (a few JSON lines per step, no extra LLM
         # calls), so it defaults on -- the failures worth studying are the
@@ -4006,13 +4011,16 @@ Each library is listed with its description to help you understand its functiona
                 # Journaled either way: durability and where the run executes
                 # are separate concerns, and opting out of the worker should
                 # not also opt out of having the work on disk.
+                self.plot_mode = current_plot_mode()
                 _journal = RunJournal(
                     effective_prompt,
                     mode="tutor" if stream_fn is not None else "research",
                     llm=get_llm_display_name(self.llm),
                     files=list(files),
                     thread_id=thread_id,
+                    plot_mode=self.plot_mode,
                 )
+                self.current_run_id = _journal.run_id
                 st.session_state.biomni_run_journal = _journal.path
                 if background_runs_enabled():
                     # The stream is built on the worker thread, not here: the

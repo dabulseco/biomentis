@@ -930,6 +930,10 @@ def render_tutor_sidebar(tutor) -> None:
             key="biomni_tutor_enabled",
         )
 
+        from biomentis.ui_visuals import render_plot_mode_control
+
+        render_plot_mode_control(logger=tutor.logger)
+
         if tutor.enabled:
             _render_mode_toggles(tutor)
 

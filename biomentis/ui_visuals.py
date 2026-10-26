@@ -165,3 +165,40 @@ def render_structure(path: str, *, key: str, container=None) -> None:
         return
     name = path.replace("\\", "/").rsplit("/", 1)[-1]
     box.download_button("Download structure file", data, file_name=name, key=f"dl-{key}")
+
+
+# --- Class plot setting ---------------------------------------------------
+
+_PLOT_MODE_KEY = "biomentis_plot_mode"
+_PLOT_MODE_LOGGED_KEY = "biomentis_plot_mode_logged"
+
+
+def current_plot_mode() -> str:
+    """The class setting: the sidebar value if valid, else the environment default."""
+    from biomentis.plots import PLOT_MODES, plot_mode_default
+
+    value = st.session_state.get(_PLOT_MODE_KEY)
+    return value if value in PLOT_MODES else plot_mode_default()
+
+
+def render_plot_mode_control(logger=None) -> str:
+    """Sidebar radio for the plot setting. Logs the first value and each change."""
+    from biomentis.plots import PLOT_MODE_LABELS, PLOT_MODES, plot_mode_default
+
+    if st.session_state.get(_PLOT_MODE_KEY) not in PLOT_MODES:
+        st.session_state[_PLOT_MODE_KEY] = plot_mode_default()
+    value = st.radio(
+        "Plots",
+        PLOT_MODES,
+        format_func=PLOT_MODE_LABELS.get,
+        key=_PLOT_MODE_KEY,
+        horizontal=True,
+        help="Applies to the next run and the next question. Code is always shown.",
+    )
+    if logger is not None and st.session_state.get(_PLOT_MODE_LOGGED_KEY) != value:
+        st.session_state[_PLOT_MODE_LOGGED_KEY] = value
+        try:
+            logger.log({"kind": "plot_mode", "plot_mode": value})
+        except Exception as exc:  # logging must never break the sidebar
+            print(f"[plot_mode] could not log: {exc}")
+    return value

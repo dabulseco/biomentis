@@ -224,7 +224,8 @@ def test_show_structure_by_id():
         f"{path} vs {default_artifact_dir(RUN)}",
     )
     _check("registered in the run", any(a.accession == "6NK5" for a in read_registry(default_artifact_dir(RUN))), "")
-    _check("summary is one line with the title", "\n" not in summary and "Mini test protein" in summary, summary)
+    _check("summary is one line with the title", "\n" not in summary and "MINI TEST PROTEIN" in summary, summary)
+    _check("summary also printed (statement call is not silent)", summary in out.splitlines(), out)
 
 
 def test_show_structure_smiles_and_bad():
@@ -248,10 +249,12 @@ def test_show_structure_smiles_and_bad():
         out, summary = _capture_stdout(lambda: show_structure("not a molecule ((("))
     _check("bad input: no marker", STRUCTURE_MARKER not in out, out)
     _check("bad input: reason returned", summary.startswith("Could not show structure: "), summary)
+    _check("bad input: reason printed", summary in out.splitlines(), out)
 
     out, summary = _capture_stdout(lambda: show_structure("/nonexistent/thing.pdb"))
     _check("missing file: no marker", STRUCTURE_MARKER not in out, out)
     _check("missing file: reason", summary.startswith("Could not show structure: "), summary)
+    _check("missing file: reason printed", summary in out.splitlines(), out)
 
 
 def test_smiles_not_mistaken_for_pdb_id():
@@ -302,6 +305,28 @@ def test_download_tools_use_current_run():
     )
 
 
+def test_chat_pdb_id_while_a_run_executes():
+    print("\n[7b] Chat PDB-ID lookup while an agent step runs: path exists")
+    from biomentis.structures import default_artifact_dir, resolve_structure_source
+    from biomentis.tool import database as db
+
+    with _fake_network(), _in_run("run-busy-elsewhere"), contextlib.redirect_stdout(io.StringIO()):
+        path = resolve_structure_source("2XYZ", run_id=None, search_dirs=[])
+        agent_side = db.query_pdb_identifiers(["3XYZ"], download=True)
+    _check("returned path exists", bool(path) and os.path.exists(path), str(path))
+    _check(
+        "chat download lands in unattached, not the busy run",
+        bool(path) and os.path.dirname(path) == default_artifact_dir(None)
+        and not os.path.exists(os.path.join(default_artifact_dir("run-busy-elsewhere"), "2XYZ.pdb")),
+        str(path),
+    )
+    _check(
+        "default still follows the current run",
+        [a.get("run_id") for a in agent_side.get("artifacts", [])] == ["run-busy-elsewhere"],
+        str(agent_side.get("artifacts")),
+    )
+
+
 def test_marker_becomes_event():
     print("\n[8] A marker line in an observation becomes a structure event")
     from biomentis.structures import STRUCTURE_MARKER, default_artifact_dir
@@ -322,6 +347,16 @@ def test_marker_becomes_event():
     _check("same structure twice in one step: one event", len([e for e in ev if e.file_path]) == 1, "")
     ev = _events(observation=f"{STRUCTURE_MARKER}/nonexistent/x.pdb\n")
     _check("missing file: no event", [e for e in ev if e.file_path] == [], "")
+
+    txt = os.path.join(default_artifact_dir(RUN), "notes.txt")
+    with open(txt, "w") as handle:
+        handle.write("not a structure\n")
+    ev = _events(observation=f"{STRUCTURE_MARKER}{txt}\n")
+    _check("marker to a .txt file: no event", [e for e in ev if e.file_path] == [], "")
+    outside = os.path.join(_UPLOADS, "outside_root.pdb")
+    shutil.copyfile(XRAY, outside)
+    ev = _events(observation=f"{STRUCTURE_MARKER}{outside}\n")
+    _check("marker to a .pdb outside the artifact root: no event", [e for e in ev if e.file_path] == [], "")
 
 
 def test_student_mode_still_shows_structure():
@@ -575,6 +610,7 @@ def run_all() -> int:
         test_smiles_not_mistaken_for_pdb_id,
         test_show_structure_from_file,
         test_download_tools_use_current_run,
+        test_chat_pdb_id_while_a_run_executes,
         test_marker_becomes_event,
         test_student_mode_still_shows_structure,
         test_uploaded_pdb_opens,

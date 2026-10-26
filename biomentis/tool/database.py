@@ -929,7 +929,12 @@ def query_pdb(
     return api_result
 
 
-def query_pdb_identifiers(identifiers, return_type="entry", download=False, attributes=None):
+# Default for `query_pdb_identifiers(run_id=...)`: file downloads under the run
+# whose code is executing now (`current_run_id()`).
+_CURRENT_RUN = object()
+
+
+def query_pdb_identifiers(identifiers, return_type="entry", download=False, attributes=None, run_id=_CURRENT_RUN):
     """Retrieve detailed data and/or download files for PDB identifiers.
 
     Parameters
@@ -938,6 +943,9 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
     return_type (str): Type of results: "entry", "assembly", "polymer_entity", etc.
     download (bool): Whether to download PDB structure files
     attributes (list, optional): List of specific attributes to retrieve
+    run_id (str | None, optional): Run whose artifact directory receives the
+        downloads. Defaults to the run whose code is executing now; pass None
+        explicitly for the unattached directory (the tutor chat does).
 
     Returns
     -------
@@ -976,7 +984,7 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                     data_url = f"https://data.rcsb.org/rest/v1/core/chem_comp/{identifier}"
 
                 # Fetch data
-                data_response = requests.get(data_url)
+                data_response = requests.get(data_url, timeout=30)
                 data_response.raise_for_status()
                 entity_data = data_response.json()
 
@@ -1001,8 +1009,10 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
         # Download structure files if requested
         downloaded: list[dict] = []
         if download:
-            # The run whose code called this (None outside a run).
-            run_id = current_run_id()
+            # The run whose code called this (None outside a run), unless the
+            # caller named one: the tutor chat resolves into its own directory.
+            if run_id is _CURRENT_RUN:
+                run_id = current_run_id()
             for identifier in identifiers:
                 if "_" in identifier or "." in identifier or "-" in identifier:
                     # For non-entry identifiers, extract the PDB ID
@@ -1018,7 +1028,7 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                 try:
                     # Download PDB file
                     pdb_url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
-                    pdb_response = requests.get(pdb_url)
+                    pdb_response = requests.get(pdb_url, timeout=30)
 
                     if pdb_response.status_code == 200:
                         # This used to write inside the installed package

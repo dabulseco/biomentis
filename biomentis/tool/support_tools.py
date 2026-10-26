@@ -108,8 +108,9 @@ def _apply_matplotlib_patches():
             """Enhanced show function that captures plots before displaying them."""
             # Capture any plots before showing
             _capture_matplotlib_plots()
-            # Print a message to indicate plot was generated
-            print("Plot generated and displayed")
+            # Neutral on purpose: under plot mode "student" the figure is
+            # captured for the record but never displayed.
+            print("Plot captured.")
             # Call the original show function
             return original_show(*args, **kwargs)
 
@@ -174,20 +175,28 @@ def show_structure(source: str) -> str:
     current run's artifact directory and a marker line is printed that the UI
     turns into a viewer. Returns a one-line summary, or
     "Could not show structure: <reason>" (and prints no marker) on bad input.
+    Either line is also printed, so the agent sees it in the observation even
+    when it calls this as a statement and drops the return value.
     """
     from biomentis.structures import STRUCTURE_MARKER, current_run_id, resolve_structure_reason
 
     src = source.strip() if isinstance(source, str) else ""
     if not src:
-        return "Could not show structure: no source given"
+        message = "Could not show structure: no source given"
+        print(message)
+        return message
 
     path, reason = resolve_structure_reason(src, current_run_id(), [], source_db="agent")
     if path is None:
-        return f"Could not show structure: {reason}"
+        message = f"Could not show structure: {reason}"
+        print(message)
+        return message
 
     path = os.path.abspath(path)
     print(f"{STRUCTURE_MARKER}{path}")
-    return _structure_summary(path)
+    summary = _structure_summary(path)
+    print(summary)
+    return summary
 
 
 def read_function_source_code(function_name: str) -> str:

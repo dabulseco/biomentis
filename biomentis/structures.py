@@ -445,11 +445,14 @@ def resolve_structure_reason(
         if _PDB_ID_RE.match(src):
             from biomentis.tool.database import query_pdb_identifiers
 
-            result = query_pdb_identifiers([src.upper()], download=True) or {}
+            # Name the run explicitly: the process-wide current run belongs to
+            # whatever agent step is executing, not necessarily to this caller.
+            result = query_pdb_identifiers([src.upper()], download=True, run_id=run_id) or {}
             artifacts = result.get("artifacts") or []
             if not artifacts:
                 return None, result.get("error") or f"PDB entry {src.upper()} could not be downloaded"
-            return os.path.join(artifact_dir, artifacts[0]["path"]), ""
+            # The record's path is relative to its own run's directory.
+            return os.path.join(default_artifact_dir(artifacts[0].get("run_id")), artifacts[0]["path"]), ""
 
         found = src if allow_paths and os.path.isfile(src) else None
         if found is None and format_for_path(src) != "unknown" and os.path.basename(src) == src:

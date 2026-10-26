@@ -108,9 +108,26 @@ def _structure_event(file_path: str) -> UIEvent:
     )
 
 
+def _under_artifact_root(path: str) -> bool:
+    """True when `path` (symlinks resolved) is inside the structure artifact tree."""
+    from biomentis.structures import default_artifact_dir
+
+    root = os.path.realpath(os.path.dirname(default_artifact_dir(None)))
+    real = os.path.realpath(path)
+    try:
+        return os.path.commonpath([root, real]) == root
+    except ValueError:  # different drives on Windows
+        return False
+
+
 def _structure_marker_paths(observation: str) -> list[str]:
-    """Existing files named by `show_structure`'s marker lines, in order, once each."""
-    from biomentis.structures import STRUCTURE_MARKER
+    """Structure files named by `show_structure`'s marker lines, in order, once each.
+
+    The observation can echo arbitrary text (a web page, a file), so a marker is
+    honoured only for an existing .pdb/.sdf/.smi file inside the artifact root,
+    which is where `show_structure` always saves.
+    """
+    from biomentis.structures import STRUCTURE_MARKER, format_for_path
 
     paths: list[str] = []
     for line in observation.splitlines():
@@ -118,7 +135,12 @@ def _structure_marker_paths(observation: str) -> list[str]:
         if not line.startswith(STRUCTURE_MARKER):
             continue
         path = os.path.abspath(line[len(STRUCTURE_MARKER) :].strip().strip("\"'"))
-        if os.path.isfile(path) and path not in paths:
+        if (
+            os.path.isfile(path)
+            and format_for_path(path) != "unknown"
+            and _under_artifact_root(path)
+            and path not in paths
+        ):
             paths.append(path)
     return paths
 

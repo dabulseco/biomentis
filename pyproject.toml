@@ -28,6 +28,7 @@ dependencies = [
     "python-dotenv",
     "markdown",
     "biopython",
+    "rdkit",
 ]
 
 [project.urls]

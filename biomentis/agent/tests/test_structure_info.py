@@ -185,6 +185,25 @@ def test_bad_input_degrades():
     _check("missing file: error row", md and md[0][0] == "Error", md)
 
 
+def test_title_text_kept_as_written():
+    print("\n[title and classification keep the file's text]")
+    with open(XRAY, encoding="utf-8") as handle:
+        text = handle.read()
+    text = text.replace(
+        "TITLE     MINI TEST PROTEIN IN COMPLEX WITH A LIGAND",
+        "TITLE     HIV-1 PROTEASE IN A VLP\nTITLE    2 WITH pH-SENSITIVE LIGAND",
+    ).replace("HEADER    HYDROLASE   ", "HEADER    VIRAL PROTEIN/HIV-1")
+    p = _tmp(text, ".pdb")
+    try:
+        md = dict(structure_metadata(p))
+    finally:
+        os.unlink(p)
+    _check("HIV-1 survives unchanged", md.get("Title") == "HIV-1 PROTEASE IN A VLP WITH pH-SENSITIVE LIGAND", md.get("Title"))
+    _check("classification kept as written", md.get("Classification") == "VIRAL PROTEIN/HIV-1", md.get("Classification"))
+    _check("fixture title unchanged", dict(structure_metadata(XRAY)).get("Title") ==
+           "MINI TEST PROTEIN IN COMPLEX WITH A LIGAND", dict(structure_metadata(XRAY)).get("Title"))
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Structure info tests")
@@ -197,6 +216,7 @@ def run_all() -> int:
     test_smiles()
     test_pdb_viewer_and_depiction()
     test_bad_input_degrades()
+    test_title_text_kept_as_written()
 
     print("\n" + "=" * 60)
     print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")

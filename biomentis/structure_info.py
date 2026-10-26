@@ -137,9 +137,12 @@ def _pdb_metadata(path: str) -> list[tuple[str, str]]:
     has_hdate = any(ln.startswith("HEADER") and ln[50:59].strip() for ln in lines)
     has_revdat = any(ln.startswith("REVDAT") for ln in lines)
     resolution = header.get("resolution")
+    # The file's own text, as written: capitalizing would mangle acronyms
+    # (HIV-1 → Hiv-1, VLP → Vlp).
     rows = [
-        ("Title", _record_text(lines, "TITLE").capitalize() if _record_text(lines, "TITLE") else ""),
-        ("Classification", (header.get("head") or "").strip().capitalize()),
+        ("Title", _record_text(lines, "TITLE")),
+        # From the HEADER line itself: Biopython lowercases `head`.
+        ("Classification", next((ln[10:50].strip() for ln in lines if ln.startswith("HEADER")), "")),
         ("Deposited", header.get("deposition_date") or "" if has_hdate else ""),
         ("Released", header.get("release_date") or "" if has_revdat else ""),
         ("Experimental method", _record_text(lines, "EXPDTA")),
@@ -285,8 +288,6 @@ def viewer_model(path: str, record: int = 0) -> tuple[str, str] | None:
     This is the one place coordinates leave this module, and only toward the
     viewer. SMILES has none, so it is embedded in 3D first.
     """
-    from rdkit import Chem
-
     fmt = format_for_path(path)
     try:
         if fmt == "pdb":
@@ -294,6 +295,10 @@ def viewer_model(path: str, record: int = 0) -> tuple[str, str] | None:
             if not any(ln.startswith(("ATOM", "HETATM")) for ln in text.splitlines()):
                 return None
             return text, "pdb"
+        # RDKit only from here on, imported inside the try so a missing RDKit
+        # degrades to "cannot be drawn" and PDB files still render.
+        from rdkit import Chem
+
         if fmt == "sdf":
             mols = _sdf_mols(path)
             mol = mols[record] if 0 <= record < len(mols) else None
@@ -313,11 +318,11 @@ def viewer_model(path: str, record: int = 0) -> tuple[str, str] | None:
 
 def depiction_png(path: str, record: int = 0) -> bytes | None:
     """A 2D drawing as PNG bytes for `.smi` / `.sdf`; None for PDB or on failure."""
-    from rdkit.Chem import AllChem
-    from rdkit.Chem.Draw import rdMolDraw2D
-
     fmt = format_for_path(path)
     try:
+        from rdkit.Chem import AllChem
+        from rdkit.Chem.Draw import rdMolDraw2D
+
         if fmt == "smi":
             mol, _ = _smiles_mol(path)
         elif fmt == "sdf":

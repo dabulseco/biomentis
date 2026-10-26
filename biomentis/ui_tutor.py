@@ -585,11 +585,14 @@ _CARD_CACHE: dict[tuple, Any] = {}
 def _generate_or_get_card(event, run, tutor) -> Any:
     """Generate (or fetch from cache) an InstructionCard for an event.
 
-    Caching is keyed on (event_type, content_hash, kb_signature, modes)
-    so that re-emitting a near-identical event in the same run doesn't
-    re-bill the LLM. `modes` is part of the key because a card generated
-    with only the technical lens on is not a valid answer once the
-    student switches the scientific lens on mid-run.
+    Caching is keyed on (model, event_type, content_hash, kb_signature,
+    modes) so that re-emitting a near-identical event in the same run
+    doesn't re-bill the LLM. `modes` is part of the key because a card
+    generated with only the technical lens on is not a valid answer once
+    the student switches the scientific lens on mid-run; the model is,
+    because switching models in the sidebar should get that model's card.
+    Failed cards are never cached, so the next step with the same text
+    tries again.
 
     Returns `None` when both instructional modes are off — there is
     nothing to teach, so no LLM call is made and no card event is
@@ -606,11 +609,16 @@ def _generate_or_get_card(event, run, tutor) -> Any:
             kb_sig = tutor.kb.kb_signature() or ""
         except Exception:
             kb_sig = ""
-    key = (event.type, _hash(content), kb_sig, modes)
+    from biomentis.agent.tutor.instruction import llm_cache_tag
+
+    key = (llm_cache_tag(tutor.instruction_gen.llm), event.type, _hash(content), kb_sig, modes)
     if key in _CARD_CACHE:
         return _CARD_CACHE[key]
     card = tutor.instruction_gen.generate(event, task=run.get("prompt", ""), modes=modes)
-    _CARD_CACHE[key] = card
+    # This cache outlives the run and the session, so a cached failure would
+    # stand in for this step on every model until the app restarted.
+    if not getattr(card, "_generation_failed", False):
+        _CARD_CACHE[key] = card
 
     # Log the full step with the card so analytics can see it.
     try:

@@ -119,6 +119,7 @@ from biomentis.ui_core import (
 )
 from biomentis.utils import (
     FIRST_CLOSING_TAG_RE,
+    PARSE_ERROR_NUDGE,
     check_and_download_s3_files,
     clean_message_content,
     convert_markdown_to_pdf,
@@ -156,14 +157,6 @@ class AgentState(TypedDict):
 # generate node can record how many attempts it took without changing the
 # function's signature (it has two callers).
 LAST_LLM_CALL: dict[str, int] = {"attempts": 0}
-
-# What `generate` says when a reply has neither `<execute>` nor `<solution>`.
-# The parse-error guard counts these to know how many corrections it has spent.
-PARSE_ERROR_NUDGE = (
-    "Each response must include thinking process followed by either <execute> or <solution> tag. "
-    "But there are no tags in the current response. Please follow the instruction, fix and "
-    "regenerate the response again."
-)
 
 
 def _is_ollama(llm) -> bool:

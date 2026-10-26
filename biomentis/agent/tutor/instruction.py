@@ -803,7 +803,7 @@ class InstructionGenerator:
                 kb_sig = self.kb.kb_signature() or ""
             except Exception:
                 kb_sig = ""
-        cache_key = (event.type, _content_hash(content_truncated), kb_sig, modes)
+        cache_key = (llm_cache_tag(self.llm), event.type, _content_hash(content_truncated), kb_sig, modes)
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -834,7 +834,10 @@ class InstructionGenerator:
             event, content_truncated, kb_snippets, allowed_sources, task, modes
         )
 
-        self._cache[cache_key] = card
+        # A failure is not an answer: caching it served the same placeholder,
+        # instantly and without a call, to every later step with this text.
+        if not card._generation_failed:
+            self._cache[cache_key] = card
         return card
 
     # ---- internals --------------------------------------------------------
@@ -925,6 +928,18 @@ class InstructionGenerator:
 
 
 # --- helpers --------------------------------------------------------------
+
+
+def llm_cache_tag(llm) -> str:
+    """Name the model in a card cache key.
+
+    The sidebar can switch models mid-session, and a card written by one
+    model is not the card another would write — so cached cards are kept
+    per model rather than shared across a switch.
+    """
+    from biomentis.context_budget import model_name
+
+    return model_name(llm) or type(llm).__name__
 
 
 def _content_hash(text: str) -> str:

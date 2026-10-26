@@ -1028,6 +1028,15 @@ def check_and_download_s3_files(
 # `</solution>` count: `</think>` is a preamble to one of them, not a turn.
 FIRST_CLOSING_TAG_RE = re.compile(r"</(?:execute|solution)>", re.IGNORECASE)
 
+# What `generate` says when a reply has neither `<execute>` nor `<solution>`.
+# The parse-error guard counts these to know how many corrections it has spent,
+# and `stream_agent_events` recognizes it so it is not shown as agent reasoning.
+PARSE_ERROR_NUDGE = (
+    "Each response must include thinking process followed by either <execute> or <solution> tag. "
+    "But there are no tags in the current response. Please follow the instruction, fix and "
+    "regenerate the response again."
+)
+
 
 def truncate_after_first_tag(message: str) -> tuple[str, str]:
     """Cut a model response at the end of its first `</execute>`/`</solution>`.

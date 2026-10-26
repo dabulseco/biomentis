@@ -24,6 +24,8 @@ from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from biomentis.utils import PARSE_ERROR_NUDGE
+
 SUPPORTED_FILE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".pdf")
 
 UIEventType = Literal[
@@ -195,6 +197,21 @@ def stream_agent_events(
         if not isinstance(message.content, str):
             continue
         content = message.content
+
+        # Messages the loop writes back to the model (the parse-error
+        # correction, self-critic feedback, the context-exhausted notice) are
+        # HumanMessages, and they can quote a tag. Cutting one at that tag
+        # used to put the correction on screen as "🤔 Reasoning" — and the
+        # tutor would pause on it and try to teach it. Agent output, including
+        # observations, is always an AIMessage.
+        if isinstance(message, HumanMessage):
+            if content == PARSE_ERROR_NUDGE:
+                yield UIEvent(
+                    type="status",
+                    content="The model's reply had no <execute> or <solution> tag — asking it to try again.",
+                )
+            t = time()
+            continue
 
         tag_positions = [pos for pos in (content.find(tag) for tag in ("<execute>", "<solution>", "<observation>")) if pos != -1]
         if tag_positions:

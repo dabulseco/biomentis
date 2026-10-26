@@ -100,6 +100,14 @@ def test_nmr_is_not_none_filled():
     _check("no resolution row", "Resolution (Å)" not in dict(md))
     _check("no 'None' values", all(v and v != "None" for _, v in md), md)
     _check("method is NMR", "NMR" in dict(md)["Experimental method"])
+    _check("NMR has no Released row", "Released" not in dict(md))
+    _check("NMR has no fabricated 1909 date", not any("1909" in v for _, v in md), md)
+    p = _tmp("HEADER    PROTEIN\nATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 20.00           C\nEND\n", ".pdb")
+    try:
+        _check("no HEADER date -> no Deposited row", "Deposited" not in dict(structure_metadata(p)),
+               structure_metadata(p))
+    finally:
+        os.unlink(p)
     _check("no reference row", "Reference" not in dict(md))
 
 

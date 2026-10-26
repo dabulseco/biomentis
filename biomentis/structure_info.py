@@ -132,12 +132,16 @@ def _pdb_metadata(path: str) -> list[tuple[str, str]]:
     except Exception:
         residues, atoms = None, stats.n_atoms
 
+    # parse_pdb_header invents 1909-01-08 for a missing date; only trust a date
+    # the file actually carries.
+    has_hdate = any(ln.startswith("HEADER") and ln[50:59].strip() for ln in lines)
+    has_revdat = any(ln.startswith("REVDAT") for ln in lines)
     resolution = header.get("resolution")
     rows = [
         ("Title", _record_text(lines, "TITLE").capitalize() if _record_text(lines, "TITLE") else ""),
         ("Classification", (header.get("head") or "").strip().capitalize()),
-        ("Deposited", header.get("deposition_date") or ""),
-        ("Released", header.get("release_date") or ""),
+        ("Deposited", header.get("deposition_date") or "" if has_hdate else ""),
+        ("Released", header.get("release_date") or "" if has_revdat else ""),
         ("Experimental method", _record_text(lines, "EXPDTA")),
         ("Resolution (Å)", f"{resolution:.2f}" if isinstance(resolution, (int, float)) else ""),
         ("Organism", ", ".join(_unique([v for k, v in source if k == "ORGANISM_SCIENTIFIC"]))),

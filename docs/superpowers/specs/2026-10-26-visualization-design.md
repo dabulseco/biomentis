@@ -248,45 +248,62 @@ selections can be added without rewriting it.
 Each item is checked in the running app unless marked *(test)*.
 
 **Plots**
-- [ ] Re-running the quantum-dot task with *Show plots*, at least one step shows
+- [ ] ❌ Re-running the quantum-dot task with *Show plots*, at least one step shows
       a labelled wavelength-vs-diameter figure under its code.
-- [ ] The code that made each plot is visible above it, in both settings.
+      ↳ 2026-10-26: gemma4:31b-cloud ran the task without plotting (printed numbers). gemma4:26b-mlx plotted when asked explicitly, but looped 120 times on a units bug it could not see (observation only says "Plot captured.").
+- [x] The code that made each plot is visible above it, in both settings.
+      ↳ verified under Show plots (agent) and both settings (chat).
 - [ ] With *Students run the code*, no figure appears in any step; the note
       appears instead; the code still copies and runs elsewhere to produce the
       plot.
-- [ ] Switching tabs, reloading, and re-attaching mid-run keeps every plot in
+      ↳ not walked in the app for an agent run (covered by test_step_plots); verified in the chat.
+- [x] Switching tabs, reloading, and re-attaching mid-run keeps every plot in
       place, with none duplicated *(test, journal re-attach)*.
+      ↳ test_reattach_mid_run_and_restore.
 - [ ] A restored past run shows its plots.
-- [ ] The run's journal records which plot setting it ran under.
-- [ ] A run made under *Students run the code* still shows no figures after the
+      ↳ not walked in the app (restore covered by tests).
+- [x] The run's journal records which plot setting it ran under.
+      ↳ run_start plot_mode=show in runs/20261026-111559-3d0e05.jsonl.
+- [x] A run made under *Students run the code* still shows no figures after the
       sidebar is switched to *Show plots*, live and after restore *(test)*.
-- [ ] Each plot's code block, pasted alone into a fresh Python with only numpy
+- [x] Each plot's code block, pasted alone into a fresh Python with only numpy
       and matplotlib, produces the plot.
+      ↳ agent blocks import only numpy + matplotlib and run in a fresh `python -I`.
 
 **Tutor conversation**
-- [ ] Asking "can you show me that?" after a quantitative step gets an answer
+- [x] Asking "can you show me that?" after a quantitative step gets an answer
       with plot code and, under *Show plots*, the figure.
-- [ ] Under *Students run the code*, the same question returns code only.
+      ↳ chat with gemma4:31b-cloud: code + figure.
+- [x] Under *Students run the code*, the same question returns code only.
+      ↳ code + "Run this code to see the plot."; the earlier Show-plots answer kept its figure.
 - [ ] Plot code that errors shows a short error, and the text answer still
       appears.
-- [ ] Asking to see a structure by PDB ID opens the viewer in the answer.
+      ↳ covered by test_chat_visuals; not forced in the app.
+- [x] Asking to see a structure by PDB ID opens the viewer in the answer.
+      ↳ 6NK6 opened in the chat answer (the answer text misdescribed it; viewer and metadata correct).
 
 **Structures**
-- [ ] A PDB file opens from each source: upload, knowledge base, agent fetch by ID.
-- [ ] An SDF file and a SMILES string each open in the viewer.
-- [ ] The viewer rotates and zooms.
-- [ ] The metadata panel shows title, organism, method, resolution, authors,
+- [x] A PDB file opens from each source: upload, knowledge base, agent fetch by ID.
+      ↳ upload and KB verified in the app; agent fetch covered by test_show_structure.
+- [x] An SDF file and a SMILES string each open in the viewer.
+- [x] The viewer rotates and zooms.
+      ↳ headless Chromium with 6NK6 and aspirin; a 2-residue synthetic fixture draws nothing in cartoon style.
+- [x] The metadata panel shows title, organism, method, resolution, authors,
       reference, chains and ligands for a PDB entry.
-- [ ] No `ATOM`/`HETATM` line or SDF atom block appears anywhere as text
+      ↳ 6NK6 and mini_xray.pdb.
+- [x] No `ATOM`/`HETATM` line or SDF atom block appears anywhere as text
       *(test)*.
-- [ ] With the network off, the viewer area shows a message and a download
+- [x] With the network off, the viewer area shows a message and a download
       button; metadata still shows.
-- [ ] A malformed file shows a message rather than a broken frame *(test)*.
-- [ ] Knowledge-base retrieval returns structure metadata, not coordinates
+      ↳ CDN blocked and CDN hanging (8 s watchdog) both show the fallback.
+- [x] A malformed file shows a message rather than a broken frame *(test)*.
+- [x] Knowledge-base retrieval returns structure metadata, not coordinates
       *(test)*.
+      ↳ broken.pdb skipped with a sidebar warning.
 
 **Foundation**
-- [ ] Downloaded structures land in `runs/<run_id>/`, not in the package or the
+- [x] Downloaded structures land in `runs/<run_id>/`, not in the package or the
       repo root *(test)*.
-- [ ] All existing test suites still pass; new suites are added to CLAUDE.md.
-- [ ] `rdkit` and `biopython` are declared in the requirements.
+- [x] All existing test suites still pass; new suites are added to CLAUDE.md.
+      ↳ 23 suites, 893 checks.
+- [x] `rdkit` and `biopython` are declared in the requirements.

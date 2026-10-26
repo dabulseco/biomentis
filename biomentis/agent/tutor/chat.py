@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from biomentis.agent.tutor.instruction import _extract_json
+from biomentis.plots import SELF_CONTAINED_PLOT_RULE
 
 
 _MAX_HISTORY_TURNS = 6          # user/assistant pairs to keep in the prompt
@@ -75,6 +76,13 @@ class ChatTurn:
     # approach) — {"point": str, "why": str}. Empty when the model judged
     # the question complete as asked.
     also_consider: list[dict] = field(default_factory=list)
+    # Visuals the reply carried. `plot_code` is always kept; `plot_png` is set
+    # only when the plot mode was "show" and the code drew a figure.
+    plot_code: str = ""
+    plot_png: str = ""
+    plot_error: str = ""
+    structure_path: str = ""
+    plot_mode: str = "show"
 
 
 # --- Prompt --------------------------------------------------------------
@@ -96,7 +104,9 @@ Return a single JSON object with EXACTLY these keys (no other keys, no prose, no
   "answer": "<your answer, plain text or simple markdown>",
   "follow_up": "<one follow-up question, or empty string if none>",
   "citations": [{"source": "<EXACT source string from KB_SNIPPETS>", "page": <int or null>, "snippet": "<≤200 char quote>"}],
-  "also_consider": [{"point": "<a related concept, unstated assumption, or pitfall the question didn't cover>", "why": "<one short sentence, why it matters>"}]
+  "also_consider": [{"point": "<a related concept, unstated assumption, or pitfall the question didn't cover>", "why": "<one short sentence, why it matters>"}],
+  "plot_code": "<self-contained matplotlib code, or empty string>",
+  "structure": "<PDB ID, SMILES, or KB/upload file name, or empty string>"
 }
 
 RULES:
@@ -106,7 +116,8 @@ RULES:
 4. HISTORY is provided for continuity. Don't repeat yourself.
 5. Keep the answer short. The student is in the middle of a workflow, not reading an essay.
 6. ALSO_CONSIDER (KB-scoped) — after answering, list 0-3 gaps a thorough tutor would flag, but ONLY if you can ground them in KB_SNIPPETS content the student hasn't already been told. If nothing KB-groundable applies, return "also_consider": []. Do not use general knowledge here — that's what "chat" mode is for.
-7. Output ONLY the JSON. No markdown fences, no commentary, no apology.
+7. @@VIS@@
+8. Output ONLY the JSON. No markdown fences, no commentary, no apology.
 """
 
 
@@ -132,7 +143,9 @@ Return a single JSON object with EXACTLY these keys (no other keys, no prose, no
   "answer": "<your answer, plain text or simple markdown>",
   "follow_up": "<one follow-up question, or empty string if none>",
   "citations": [{"source": "<EXACT source string from KB_SNIPPETS>", "page": <int or null>, "snippet": "<≤200 char quote>"}],
-  "also_consider": [{"point": "<a related concept, unstated assumption, edge case, or pitfall the question didn't cover>", "why": "<one short sentence, why it matters>"}]
+  "also_consider": [{"point": "<a related concept, unstated assumption, edge case, or pitfall the question didn't cover>", "why": "<one short sentence, why it matters>"}],
+  "plot_code": "<self-contained matplotlib code, or empty string>",
+  "structure": "<PDB ID, SMILES, or KB/upload file name, or empty string>"
 }
 
 RULES:
@@ -145,8 +158,20 @@ RULES:
 7. HISTORY is provided for continuity. Don't repeat yourself.
 8. Keep the answer short. The student is in the middle of a workflow, not reading an essay.
 9. ALSO_CONSIDER — list 0-3 items, each ONE short sentence plus a one-sentence "why". Be selective: only include something a domain expert would actually think worth flagging. If the question is simple and complete as asked, return "also_consider": [] — don't pad for the sake of it. This is separate from, and in addition to, the single required "follow_up" question.
-10. Output ONLY the JSON. No markdown fences, no commentary, no apology.
+10. @@VIS@@
+11. Output ONLY the JSON. No markdown fences, no commentary, no apology.
 """
+
+# The plotting wording is shared with the agent's guidance so the two do not drift.
+_VISUALS_RULE = (
+    'VISUALS — set "plot_code" only when the student asks to see something or a plot is '
+    'clearly the better answer; otherwise use "". The code must be self-contained: '
+    + SELF_CONTAINED_PLOT_RULE
+    + ' Label both axes with units and call plt.show(). Set "structure" only when the '
+    'student asks to see a molecule; otherwise use "".'
+)
+_SYSTEM_PROMPT = _SYSTEM_PROMPT.replace("@@VIS@@", _VISUALS_RULE)
+_SYSTEM_PROMPT_CHAT = _SYSTEM_PROMPT_CHAT.replace("@@VIS@@", _VISUALS_RULE)
 
 
 def _build_user_prompt(
@@ -308,6 +333,8 @@ class TutorChat:
         last_answer: str = "",
         mode: str = _ASK_MODE_TUTOR,
         step_id: int | None = None,
+        plot_mode: str = "show",
+        search_dirs: list[str] | None = None,
     ) -> ChatTurn:
         """Ask the tutor a question.
 
@@ -329,6 +356,10 @@ class TutorChat:
                 content) or "tutor" (KB-only — strict grounding; the LLM
                 must only answer from KB_SNIPPETS). The "tutor" mode is
                 the default for backwards compatibility.
+            plot_mode: "show" runs the reply's `plot_code` and keeps the
+                figure; "student" keeps the code only and never runs it.
+            search_dirs: Folders (KB raw files, uploads) in which a bare file
+                name in the reply's `structure` is looked up.
             step_id: The pedagogical step the student was paused on when
                 asking, if any. Recorded on the logged `qa` record so the
                 session log can tell which step a question was asked
@@ -442,6 +473,30 @@ class TutorChat:
         )
         also_consider = self._coerce_also_consider(data.get("also_consider") or [])
 
+        # 5b. Visuals: the code is always kept; it is run only in "show" mode.
+        # A failing plot never costs the answer.
+        from biomentis.plots import PLOT_MODES, run_plot_code
+        from biomentis.structures import default_artifact_dir, resolve_structure_source
+
+        plot_mode = plot_mode if plot_mode in PLOT_MODES else "show"
+        plot_code = data.get("plot_code")
+        plot_code = plot_code.strip() if isinstance(plot_code, str) else ""
+        plot_png = plot_error = structure_path = ""
+        if plot_code and plot_mode == "show":
+            try:
+                result = run_plot_code(plot_code, os.path.join(default_artifact_dir(None), "chat"))
+                plot_png, plot_error = result.png_path or "", result.error or ""
+            except Exception as e:
+                plot_error = f"{type(e).__name__}: {e}"
+        structure = data.get("structure")
+        if isinstance(structure, str) and structure.strip():
+            try:
+                structure_path = (
+                    resolve_structure_source(structure.strip(), run_id=None, search_dirs=search_dirs or []) or ""
+                )
+            except Exception as e:
+                print(f"tutor: structure {structure!r} not resolved: {e!r}")
+
         # 6. Classify.
         cls = self.rubric.classify_qa(
             self.llm,
@@ -465,6 +520,11 @@ class TutorChat:
             confidence=cls.confidence,
             failed=cls.failed,
             also_consider=also_consider,
+            plot_code=plot_code,
+            plot_png=plot_png,
+            plot_error=plot_error,
+            structure_path=structure_path,
+            plot_mode=plot_mode,
         )
 
         # 7. Log.
@@ -483,6 +543,10 @@ class TutorChat:
                         "citations": citations,
                         "also_consider": also_consider,
                         "step_id": step_id,
+                        "plot_mode": plot_mode,
+                        "plot_code": plot_code,
+                        "plot_png": plot_png,
+                        "structure_path": structure_path,
                     }
                 )
             except Exception as e:

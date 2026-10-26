@@ -9,6 +9,11 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import subprocess
+import sys
+import tempfile
+import uuid
+from dataclasses import dataclass
 
 PLOT_MODES = ("show", "student")
 PLOT_MODE_LABELS = {"show": "Show plots", "student": "Students run the code"}
@@ -50,6 +55,66 @@ def save_plot_pngs(data_uris: list[str], out_dir: str, start_index: int) -> list
     return paths
 
 
+SELF_CONTAINED_PLOT_RULE = (
+    "write the data inline, import only numpy and matplotlib, and use no variables from "
+    "earlier steps, no files, and no biomentis tools, so a student can paste the block "
+    "alone into Colab and run it."
+)
+
+
+@dataclass
+class PlotResult:
+    png_path: str | None = None
+    error: str | None = None
+
+
+_RUNNER = """
+import sys, uuid
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+code, out_dir = sys.argv[1], sys.argv[2]
+exec(compile(code, "<plot>", "exec"), {"__name__": "__main__"})
+nums = plt.get_fignums()
+if not nums:
+    sys.stdout.write("NOFIG")
+    sys.exit(0)
+import os
+os.makedirs(out_dir, exist_ok=True)
+path = os.path.join(out_dir, "chat-plot-" + uuid.uuid4().hex[:8] + ".png")
+plt.figure(nums[-1]).savefig(path, dpi=120, bbox_inches="tight")
+sys.stdout.write("PNG:" + path)
+"""
+
+
+def run_plot_code(code: str, out_dir: str, timeout: float = 20.0) -> PlotResult:
+    """Run matplotlib `code` in a subprocess and save the last open figure.
+
+    A fresh interpreter in a fresh temp dir shares nothing with the agent's
+    REPL, so tutor-written code cannot see or disturb the agent's variables.
+    """
+    out_dir = os.path.abspath(out_dir)
+    env = dict(os.environ, MPLBACKEND="Agg")
+    try:
+        with tempfile.TemporaryDirectory(prefix="plotrun-") as cwd:
+            proc = subprocess.run(
+                [sys.executable, "-I", "-c", _RUNNER, code, out_dir],
+                cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout,
+            )
+    except subprocess.TimeoutExpired:
+        return PlotResult(error="Plot code took longer than 20 s and was stopped.")
+    except Exception as exc:
+        return PlotResult(error=f"{type(exc).__name__}: {exc}")
+    if proc.returncode != 0:
+        lines = [ln for ln in (proc.stderr or "").strip().splitlines() if ln.strip()]
+        return PlotResult(error=lines[-1] if lines else f"Plot code exited with status {proc.returncode}.")
+    out = (proc.stdout or "").strip()
+    marker = out.rfind("PNG:")
+    if marker >= 0 and os.path.exists(out[marker + 4 :]):
+        return PlotResult(png_path=out[marker + 4 :])
+    return PlotResult(error="The code ran but drew no figure.")
+
+
 def plot_guidance(plot_mode: str) -> str:
     """System-prompt text telling the agent how to plot and show molecules.
 
@@ -60,9 +125,7 @@ def plot_guidance(plot_mode: str) -> str:
         "PLOTS AND STRUCTURES:",
         "- When explaining a quantitative or visual principle, plot the data with matplotlib. "
         "Label both axes, with units, give the figure a title, and call plt.show().",
-        "- Every plotting block is self-contained: write the data inline, import only numpy and "
-        "matplotlib, and use no variables from earlier steps, no files, and no biomentis tools, "
-        "so a student can paste that block alone into Colab and run it.",
+        "- Every plotting block is self-contained: " + SELF_CONTAINED_PLOT_RULE,
         "- Finish each figure within one step (one <execute> block); figures still open when a "
         "step ends are captured and closed.",
         "- To display a molecule, call show_structure(source) with a PDB ID (e.g. 6NK5), a path "

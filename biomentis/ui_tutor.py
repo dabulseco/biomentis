@@ -1611,7 +1611,9 @@ def render_tutor_chat_panel(tutor) -> None:
                     get_llm_display_name,
                     render_transcript_html,
                 )
-                _entries = [
+                _entries = []
+                for turn in _history:
+                    _entries.append(
                     ExportEntry(
                         role=turn.get("role", "assistant"),
                         kind="qa" if turn.get("role") == "assistant" else "text",
@@ -1624,8 +1626,11 @@ def render_tutor_chat_panel(tutor) -> None:
                         confidence=turn.get("confidence"),
                         also_consider=turn.get("also_consider") or None,
                     )
-                    for turn in _history
-                ]
+                    )
+                    if turn.get("plot_code"):
+                        _entries.append(ExportEntry(role="assistant", kind="code", language="python", content=turn["plot_code"]))
+                        if turn.get("plot_png") and os.path.exists(turn["plot_png"]):
+                            _entries.append(ExportEntry(role="assistant", kind="image", file_path=turn["plot_png"]))
                 _model_name = "KB + LLM hybrid"
                 try:
                     _model_name = get_llm_display_name(getattr(tutor, "llm", None))
@@ -1651,9 +1656,10 @@ def render_tutor_chat_panel(tutor) -> None:
         # what's powering the chat at the moment.
         st.caption(f"{kb_status}  ·  {tutor_status}")
 
-        for turn in st.session_state.biomni_tutor_chat_history:
+        for _idx, turn in enumerate(st.session_state.biomni_tutor_chat_history):
             with st.chat_message(turn["role"]):
                 st.markdown(turn["content"])
+                _render_visuals(turn, key=f"chat-panel-{_idx}")
                 if turn.get("citations"):
                     with st.expander(
                         f"Sources ({len(turn['citations'])})", expanded=False
@@ -1727,6 +1733,51 @@ def render_tutor_chat_panel(tutor) -> None:
         if user_q:
             with st.spinner("🎓 Thinking..."):
                 _handle_chat_turn(tutor, user_q)
+
+
+def _visuals_dict(turn) -> dict:
+    """The plot and structure fields of a `ChatTurn`, as stored on a UI turn dict."""
+    return {
+        "plot_code": turn.plot_code,
+        "plot_png": turn.plot_png,
+        "plot_error": turn.plot_error,
+        "structure_path": turn.structure_path,
+        "plot_mode": turn.plot_mode,
+    }
+
+
+def _chat_search_dirs(tutor) -> list[str]:
+    """Folders where a bare structure file name in a tutor reply is looked up."""
+    import streamlit as st
+
+    dirs: list[str] = []
+    kb_path = getattr(getattr(tutor, "kb", None), "path", None)
+    if kb_path:
+        dirs.append(os.path.join(kb_path, "raw"))
+    uploads = st.session_state.get("biomni_upload_dir")
+    if uploads:
+        dirs.append(uploads)
+    return dirs
+
+
+def _render_visuals(turn: dict, key: str) -> None:
+    """Show a stored turn's code, figure and structure. Reads only the dict:
+    how an answer is shown never depends on the current plot setting."""
+    import streamlit as st
+
+    code = turn.get("plot_code")
+    if code:
+        st.code(code, language="python")
+        if turn.get("plot_png"):
+            st.image(turn["plot_png"])
+        elif turn.get("plot_error"):
+            st.caption("⚠️ " + turn["plot_error"])
+        else:
+            st.info("Run this code to see the plot.")
+    if turn.get("structure_path"):
+        from biomentis.ui_visuals import render_structure
+
+        render_structure(turn["structure_path"], key=key)
 
 
 def _handle_chat_turn(tutor, question: str) -> None:
@@ -1810,6 +1861,8 @@ def _handle_chat_turn(tutor, question: str) -> None:
         if last_answer and len(last_answer) > 2000:
             last_answer = last_answer[:2000] + "…"
 
+    from biomentis.ui_visuals import current_plot_mode
+
     _t_chat_start = time.monotonic()
     try:
         turn = tutor.chat.ask(
@@ -1820,6 +1873,8 @@ def _handle_chat_turn(tutor, question: str) -> None:
             last_answer=last_answer,
             mode="chat",  # KB + LLM hybrid; chat panel is decoupled from tutor
             step_id=run.get("step_id") if run else None,
+            plot_mode=current_plot_mode(),
+            search_dirs=_chat_search_dirs(tutor),
         )
     except Exception as e:
         # Defensive: TutorChat.ask is supposed to handle its own errors,
@@ -1854,6 +1909,7 @@ def _handle_chat_turn(tutor, question: str) -> None:
             "confidence": turn.confidence,
             "failed": turn.failed,
             "also_consider": list(turn.also_consider),
+            **_visuals_dict(turn),
         }
     )
     st.rerun()
@@ -1891,9 +1947,10 @@ def _render_step_qa(container: Any, step_id: int, run: dict, tutor, run_id: str 
             with st.expander(
                 f"💬 Questions about this step ({len(qa_list)})", expanded=True
             ):
-                for turn in qa_list:
+                for _qi, turn in enumerate(qa_list):
                     st.markdown(f"**Q:** {turn['question']}")
                     st.markdown(f"**A:** {turn['answer']}")
+                    _render_visuals(turn, key=f"chat-step-{_key_suffix}-{_qi}")
                     if turn.get("also_consider"):
                         with st.expander("Also worth knowing", expanded=False):
                             for item in turn["also_consider"]:
@@ -1931,12 +1988,16 @@ def _handle_step_qa(tutor, run: dict, step_id: int, question: str) -> None:
     attached — all stay consistent), but the result is stored on
     `run["step_qa"][step_id]` instead of the page-level chat history, so
     it re-renders attached to that step's card."""
+    from biomentis.ui_visuals import current_plot_mode
+
     turn = tutor.chat.ask(
         question=question,
         context=f"step_id={step_id}",
         task=run.get("prompt", ""),
         mode="chat",
         step_id=step_id,
+        plot_mode=current_plot_mode(),
+        search_dirs=_chat_search_dirs(tutor),
     )
     run.setdefault("step_qa", {}).setdefault(step_id, []).append(
         {
@@ -1949,6 +2010,7 @@ def _handle_step_qa(tutor, run: dict, step_id: int, question: str) -> None:
             "rubric_hit": list(turn.rubric_hit),
             "confidence": turn.confidence,
             "failed": turn.failed,
+            **_visuals_dict(turn),
         }
     )
 

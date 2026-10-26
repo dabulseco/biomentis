@@ -17,8 +17,10 @@ migration of every stored record.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -41,6 +43,8 @@ __all__ = [
     "record_download",
     "registry_path",
     "resolve_artifact_path",
+    "resolve_structure_reason",
+    "resolve_structure_source",
     "set_current_run_id",
 ]
 
@@ -378,3 +382,96 @@ def import_file(
         dest = os.path.join(artifact_dir, f"{base}-{n}{ext}")
 
     return record_download(dest, source_db=source_db, accession=base, run_id=run_id, artifact_dir=artifact_dir)
+
+
+# PDB IDs start with a digit; "4 alphanumerics" alone would read SMILES such as
+# CCCC or CCOC as an ID and send them to RCSB.
+_PDB_ID_RE = re.compile(r"^[0-9][A-Za-z0-9]{3}$")
+
+
+def _smiles_to_file(smiles: str, artifact_dir: str) -> tuple[str | None, str]:
+    """Validate `smiles` with RDKit and write it to `<artifact_dir>/<slug>.smi`.
+
+    The slug is the formula plus a short hash of the canonical SMILES, so the
+    file name is readable and isomers do not collide. Returns (path, canonical
+    SMILES), or (None, reason) when it does not parse.
+    """
+    try:
+        from rdkit import Chem, RDLogger
+        from rdkit.Chem import rdMolDescriptors
+    except ImportError:
+        return None, "RDKit is not installed, so SMILES cannot be read"
+
+    mol = None
+    if not any(ch.isspace() for ch in smiles):
+        RDLogger.DisableLog("rdApp.*")  # a bad SMILES is an answer here, not a log line
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+        finally:
+            RDLogger.EnableLog("rdApp.*")
+    if mol is None or mol.GetNumAtoms() == 0:
+        return None, f"not a PDB ID, a .pdb/.sdf/.smi file, or a valid SMILES string: {smiles!r}"
+
+    canonical = Chem.MolToSmiles(mol)
+    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:8]
+    slug = f"{rdMolDescriptors.CalcMolFormula(mol)}-{digest}"
+    os.makedirs(artifact_dir, exist_ok=True)
+    path = os.path.join(artifact_dir, f"{slug}.smi")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(canonical + "\n")
+    return path, canonical
+
+
+def resolve_structure_reason(
+    source: str,
+    run_id: str | None,
+    search_dirs: list[str],
+    source_db: str = "agent",
+) -> tuple[str | None, str]:
+    """Turn a PDB ID, file path/name, or SMILES string into a structure file.
+
+    Returns (path, "") on success, or (None, reason). A bare file name with a
+    structure extension is looked up in `search_dirs` (knowledge-base and upload
+    folders) when no such file exists as given. Never raises.
+    """
+    src = source.strip() if isinstance(source, str) else ""
+    if not src:
+        return None, "no source given"
+    artifact_dir = default_artifact_dir(run_id)
+    try:
+        if _PDB_ID_RE.match(src):
+            from biomentis.tool.database import query_pdb_identifiers
+
+            result = query_pdb_identifiers([src.upper()], download=True) or {}
+            artifacts = result.get("artifacts") or []
+            if not artifacts:
+                return None, result.get("error") or f"PDB entry {src.upper()} could not be downloaded"
+            return os.path.join(artifact_dir, artifacts[0]["path"]), ""
+
+        found = src if os.path.isfile(src) else None
+        if found is None and format_for_path(src) != "unknown" and os.path.basename(src) == src:
+            for directory in search_dirs or []:
+                candidate = os.path.join(directory, src)
+                if os.path.isfile(candidate):
+                    found = candidate
+                    break
+        if found is not None:
+            if format_for_path(found) == "unknown":
+                return None, f"unsupported file type (use .pdb, .sdf or .smi): {src}"
+            artifact = import_file(found, source_db, run_id=run_id, artifact_dir=artifact_dir)
+            return os.path.join(artifact_dir, artifact.path), ""
+        if format_for_path(src) != "unknown":
+            return None, f"file not found: {src}"
+
+        path, canonical = _smiles_to_file(src, artifact_dir)
+        if path is None:
+            return None, canonical
+        record_download(path, source_db="smiles", accession=canonical, run_id=run_id, artifact_dir=artifact_dir)
+        return path, ""
+    except Exception as exc:  # a bad source is an answer to the caller, not a crash
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def resolve_structure_source(source: str, run_id: str | None, search_dirs: list[str]) -> str | None:
+    """Path of the structure file for `source`, or None when it cannot be resolved."""
+    return resolve_structure_reason(source, run_id, search_dirs, source_db="chat")[0]

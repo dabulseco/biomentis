@@ -151,11 +151,6 @@ def clear_captured_plots():
     _captured_plots = []
 
 
-# PDB IDs start with a digit; "4 alphanumerics" alone would read SMILES such as
-# CCCC or CCOC as an ID and send them to RCSB.
-_PDB_ID_RE = re.compile(r"^[0-9][A-Za-z0-9]{3}$")
-
-
 def _structure_summary(path: str) -> str:
     """One line naming what `path` holds: its title/name and formula, if known."""
     try:
@@ -171,39 +166,6 @@ def _structure_summary(path: str) -> str:
     return f"Showing {label}: {' — '.join(bits)}" if bits else f"Showing {label}"
 
 
-def _smiles_to_file(smiles: str, artifact_dir: str) -> tuple[str | None, str]:
-    """Validate `smiles` with RDKit and write it to `<artifact_dir>/<slug>.smi`.
-
-    The slug is the formula plus a short hash of the canonical SMILES, so the
-    file name is readable and isomers do not collide. Returns (path, canonical
-    SMILES), or (None, reason) when it does not parse.
-    """
-    try:
-        from rdkit import Chem, RDLogger
-        from rdkit.Chem import rdMolDescriptors
-    except ImportError:
-        return None, "RDKit is not installed, so SMILES cannot be read"
-
-    mol = None
-    if not any(ch.isspace() for ch in smiles):
-        RDLogger.DisableLog("rdApp.*")  # a bad SMILES is an answer here, not a log line
-        try:
-            mol = Chem.MolFromSmiles(smiles)
-        finally:
-            RDLogger.EnableLog("rdApp.*")
-    if mol is None or mol.GetNumAtoms() == 0:
-        return None, f"not a PDB ID, a .pdb/.sdf/.smi file, or a valid SMILES string: {smiles!r}"
-
-    canonical = Chem.MolToSmiles(mol)
-    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:8]
-    slug = f"{rdMolDescriptors.CalcMolFormula(mol)}-{digest}"
-    os.makedirs(artifact_dir, exist_ok=True)
-    path = os.path.join(artifact_dir, f"{slug}.smi")
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(canonical + "\n")
-    return path, canonical
-
-
 def show_structure(source: str) -> str:
     """Display a molecule in the app's 3D structure viewer.
 
@@ -213,46 +175,15 @@ def show_structure(source: str) -> str:
     turns into a viewer. Returns a one-line summary, or
     "Could not show structure: <reason>" (and prints no marker) on bad input.
     """
-    from biomentis.structures import (
-        STRUCTURE_MARKER,
-        current_run_id,
-        default_artifact_dir,
-        format_for_path,
-        import_file,
-        record_download,
-    )
+    from biomentis.structures import STRUCTURE_MARKER, current_run_id, resolve_structure_reason
 
     src = source.strip() if isinstance(source, str) else ""
     if not src:
         return "Could not show structure: no source given"
 
-    # The run whose code is executing (None outside a run → "unattached").
-    run_id = current_run_id()
-    artifact_dir = default_artifact_dir(run_id)
-    try:
-        if _PDB_ID_RE.match(src):
-            from biomentis.tool.database import query_pdb_identifiers
-
-            result = query_pdb_identifiers([src.upper()], download=True) or {}
-            artifacts = result.get("artifacts") or []
-            if not artifacts:
-                reason = result.get("error") or f"PDB entry {src.upper()} could not be downloaded"
-                return f"Could not show structure: {reason}"
-            path = os.path.join(artifact_dir, artifacts[0]["path"])
-        elif os.path.isfile(src):
-            if format_for_path(src) == "unknown":
-                return f"Could not show structure: unsupported file type (use .pdb, .sdf or .smi): {src}"
-            artifact = import_file(src, "agent", run_id=run_id, artifact_dir=artifact_dir)
-            path = os.path.join(artifact_dir, artifact.path)
-        elif format_for_path(src) != "unknown":
-            return f"Could not show structure: file not found: {src}"
-        else:
-            path, canonical = _smiles_to_file(src, artifact_dir)
-            if path is None:
-                return f"Could not show structure: {canonical}"
-            record_download(path, source_db="smiles", accession=canonical, run_id=run_id, artifact_dir=artifact_dir)
-    except Exception as exc:  # a tool error is an answer to the agent, not a crash
-        return f"Could not show structure: {type(exc).__name__}: {exc}"
+    path, reason = resolve_structure_reason(src, current_run_id(), [], source_db="agent")
+    if path is None:
+        return f"Could not show structure: {reason}"
 
     path = os.path.abspath(path)
     print(f"{STRUCTURE_MARKER}{path}")

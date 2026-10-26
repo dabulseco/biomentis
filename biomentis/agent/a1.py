@@ -4034,6 +4034,8 @@ Each library is listed with its description to help you understand its functiona
                 st.session_state.biomni_last_run_duration = ""
 
                 saved_dir = os.path.join(self.path, "streamlit_uploads")
+                # The tutor chat looks structure file names up here.
+                st.session_state["biomni_upload_dir"] = saved_dir
                 for uploaded in uploaded_files or []:
                     os.makedirs(saved_dir, exist_ok=True)
                     dest = os.path.join(saved_dir, uploaded.name)

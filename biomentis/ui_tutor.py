@@ -1162,9 +1162,16 @@ def _render_kb_panel(tutor) -> None:
             with st.expander("Indexed sources", expanded=False):
                 for name in stats.source_names:
                     if name.lower().endswith((".pdb", ".sdf", ".smi")):
-                        name_col, view_col = st.columns([3, 1])
-                        name_col.markdown(f"- {name}")
-                        if view_col.button("View", key=f"kbview-{name}"):
+                        # The file name is the button: a separate "View"
+                        # column was too narrow in the sidebar and wrapped
+                        # one letter per line.
+                        if st.button(
+                            name,
+                            key=f"kbview-{name}",
+                            icon=":material/view_in_ar:",
+                            type="tertiary",
+                            help="View this structure in 3D, with its metadata",
+                        ):
                             _kb_structure_dialog(
                                 name, os.path.join(tutor.kb.path, "raw", name)
                             )

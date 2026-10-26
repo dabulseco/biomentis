@@ -5,6 +5,8 @@
   3.  Bad plot code leaves the answer intact and reports the error
   4.  A `structure` field is resolved against the search dirs; unknown is ignored
   5.  The page panel and step Q&A turn dicts carry the visuals keys
+  6.  A reply that shows a structure is checked against that file's header
+      and its answer corrected; if the check fails the first answer stays
 
 Run with:
     python -m biomentis.agent.tests.test_chat_visuals
@@ -123,12 +125,52 @@ def test_ui_dicts() -> None:
     _check("values copied", d["plot_code"] == CODE and d["plot_mode"] == "student")
 
 
+class _ScriptLLM:
+    """Replies in order; records each prompt it was sent."""
+
+    def __init__(self, replies: list[str]):
+        self.model = "fake"
+        self.replies = list(replies)
+        self.prompts: list = []
+
+    def invoke(self, messages):
+        self.prompts.append(messages)
+        return AIMessage(content=self.replies.pop(0) if self.replies else _CLASSIFY)
+
+
+def test_structure_answer_checked_against_header() -> None:
+    print("\n[6] the answer is checked against the structure's header")
+    from biomentis.agent.tutor.chat import TutorChat
+
+    wrong = json.dumps({"answer": "This is a cryo-EM structure of a mouse ion channel.",
+                        "follow_up": "What does it bind?", "structure": "mini_xray.pdb"})
+    right = json.dumps({"answer": "This is an X-ray structure (1.80 Å) of a human test hydrolase with a ligand.",
+                        "follow_up": "Which chains form it?", "structure": "mini_xray.pdb"})
+    llm = _ScriptLLM([wrong, right])
+    turn = TutorChat(llm).ask("Show me this structure", mode="chat", search_dirs=[FIXTURES])
+    check = llm.prompts[1][-1].content if len(llm.prompts) > 1 else ""
+    _check("the header was shown to the LLM", "MINI TEST PROTEIN" in check and "X-RAY DIFFRACTION" in check, check[:300])
+    _check("the corrected answer is kept", "human test hydrolase" in turn.content, turn.content)
+    _check("with its follow-up", "Which chains form it?" in turn.content, turn.content)
+    _check("the structure still shows", turn.structure_path.endswith("mini_xray.pdb"), turn.structure_path)
+
+    llm = _ScriptLLM([wrong, "not json at all"])
+    turn = TutorChat(llm).ask("Show me this structure", mode="chat", search_dirs=[FIXTURES])
+    _check("a failed check keeps the first answer", "cryo-EM" in turn.content, turn.content)
+
+    llm = _ScriptLLM([json.dumps({"answer": "No molecule here.", "structure": ""})])
+    TutorChat(llm).ask("Explain", mode="chat")
+    _check("no structure, no extra call", not any("STRUCTURE_INFO" in str(p[-1].content) for p in llm.prompts),
+           str(len(llm.prompts)))
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Chat visuals tests")
     print("=" * 60)
     for t in (test_run_plot_code, test_show_mode_draws, test_student_mode_code_only,
-              test_bad_plot_code_keeps_answer, test_structure_field, test_ui_dicts):
+              test_bad_plot_code_keeps_answer, test_structure_field, test_ui_dicts,
+              test_structure_answer_checked_against_header):
         try:
             t()
         except Exception as exc:

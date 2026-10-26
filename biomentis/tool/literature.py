@@ -524,7 +524,7 @@ def advanced_web_search_claude(
 
 # The chat model can be an Ollama model, so this tool pins its own Anthropic
 # model. Override with BIOMENTIS_WEB_SEARCH_MODEL if you want a cheaper tier.
-_DEFAULT_WEB_SEARCH_MODEL = "claude-opus-5"
+_DEFAULT_WEB_SEARCH_MODEL = "claude-opus-5-5"
 
 # `web_search_20250305` is the pre-4.6 variant. The dated-2026 variant adds
 # dynamic filtering and is what current models expect; naming the old type

@@ -257,18 +257,40 @@ _ANTHROPIC_KEY_PREFIX = "sk-ant-"
 
 _QUOTE_CHARS = "\"'"
 
+# Example values like the ones `.env.example` ships with
+# ("your_anthropic_api_key_here"). Copying the example file is the usual way
+# to start, and a placeholder left in place was sent as the key: a 401 on
+# every call, Claude models offered in the picker, and the sidebar saying
+# "Applied." A placeholder counts as not set.
+_PLACEHOLDER_SECRET_RE = re.compile(r"^(?:your[_-].*|<[^>]*>|sk-ant-\.\.\.|changeme|x{3,})$", re.IGNORECASE)
+
 
 def _normalize_secret(raw: str | None) -> str:
-    """Strip whitespace and one layer of surrounding quotes.
+    """Strip whitespace and one layer of surrounding quotes; "" for a placeholder.
 
     `KEY="sk-ant-..."` in a `.env` file, or a trailing newline picked up from a
     `source`d shell profile, would otherwise go into the `x-api-key` header
     verbatim and come back as a 401 that looks exactly like a revoked key.
     """
+    value = _strip_secret(raw)
+    return "" if _PLACEHOLDER_SECRET_RE.match(value) else value
+
+
+def _strip_secret(raw: str | None) -> str:
     value = (raw or "").strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in _QUOTE_CHARS:
         value = value[1:-1].strip()
     return value
+
+
+def is_placeholder_secret(raw: str | None) -> bool:
+    """True if `raw` is an example value such as `your_anthropic_api_key_here`."""
+    return bool(_PLACEHOLDER_SECRET_RE.match(_strip_secret(raw)))
+
+
+def secret_is_set(raw: str | None) -> bool:
+    """True if `raw` holds a real value: not blank, and not a placeholder."""
+    return bool(_normalize_secret(raw))
 
 
 def looks_like_anthropic_key(key: str | None) -> bool:

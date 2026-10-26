@@ -1,4 +1,6 @@
+import functools
 import os
+import re
 from typing import TYPE_CHECKING, Literal, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -15,6 +17,23 @@ ALLOWED_SOURCES: set[str] = set(SourceType.__args__)
 # a reasoning model's thinking counts toward the cap, hence the headroom.
 # Override with BIOMENTIS_OLLAMA_NUM_PREDICT.
 OLLAMA_NUM_PREDICT_DEFAULT = 8192
+
+# Claude models that reject sampling parameters: `temperature` is a 400 on
+# Claude Opus 4.7 and later, the Fable and Mythos lines, and every 5-series
+# Sonnet and Haiku. The agent always asks for 0.2 (0.7 for the critic), so on
+# these models it must send none and steer with the prompt instead.
+_CLAUDE_FAMILY_RE = re.compile(r"(?:^|[.:/])claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?(?![\d])")
+
+
+def claude_rejects_sampling(model: str | None) -> bool:
+    """True for a Claude model id (first-party or Bedrock) that rejects `temperature`."""
+    match = _CLAUDE_FAMILY_RE.search(model or "")
+    if not match:
+        return False
+    family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
+    if family in ("fable", "mythos") or major >= 5:
+        return True
+    return family == "opus" and (major, minor) >= (4, 7)
 
 
 def _ollama_can_think(model: str, base_url: str | None) -> bool:
@@ -116,6 +135,41 @@ def _check_stop_sequences(llm: BaseChatModel, stop_sequences: list[str] | None) 
     return llm
 
 
+@functools.cache
+def _text_reply_client(base: type) -> type:
+    """`ChatAnthropic` whose replies are plain text, thinking blocks dropped.
+
+    Current Claude models always think, so a reply arrives as a list of
+    blocks ([thinking, text]) instead of a string, and every caller here (the
+    agent loop, the tutor's cards, chat, critic and rubric) reads `.content`
+    as a string. Replies that call tools keep their blocks. Nothing replays
+    thinking blocks: the agent keeps each turn as text, so the API's check on
+    edited history never sees one.
+    """
+
+    class TextReplyChatAnthropic(base):
+        def _format_output(self, data, **kwargs):
+            result = super()._format_output(data, **kwargs)
+            for generation in result.generations:
+                message = generation.message
+                if isinstance(message.content, list) and not getattr(message, "tool_calls", None):
+                    message.content = "".join(
+                        block.get("text", "")
+                        for block in message.content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    )
+            return result
+
+    return TextReplyChatAnthropic
+
+
+def _anthropic_key_set() -> bool:
+    """A real key resolves (the `.env.example` placeholder doesn't count)."""
+    from biomentis.config import resolve_anthropic_key
+
+    return bool(resolve_anthropic_key())
+
+
 def get_llm(
     model: str | None = None,
     temperature: float | None = None,
@@ -206,7 +260,7 @@ def _build_llm(
         env_source = os.getenv("LLM_SOURCE")
         if env_source in ALLOWED_SOURCES:
             source = env_source
-        elif model[:7] == "claude-" and os.getenv("ANTHROPIC_API_KEY"):
+        elif model[:7] == "claude-" and _anthropic_key_set():
             # Require the key to be present — otherwise an explicit "claude-..."
             # model name without a key would produce a confusing auth error
             # when Ollama would have worked fine.
@@ -316,9 +370,9 @@ def _build_llm(
         if resolved:
             os.environ["ANTHROPIC_API_KEY"] = resolved
 
-        return ChatAnthropic(
+        return _text_reply_client(ChatAnthropic)(
             model=model,
-            temperature=temperature,
+            temperature=None if claude_rejects_sampling(model) else temperature,
             max_tokens=8192,
             stop_sequences=stop_sequences,
         )
@@ -386,7 +440,7 @@ def _build_llm(
             )
         return ChatBedrock(
             model=model,
-            temperature=temperature,
+            temperature=None if claude_rejects_sampling(model) else temperature,
             stop_sequences=stop_sequences,
             region_name=os.getenv("AWS_REGION", "us-east-1"),
         )

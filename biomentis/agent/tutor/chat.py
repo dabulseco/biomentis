@@ -44,6 +44,7 @@ _MAX_QUESTION_CHARS = 1000
 _MAX_ALSO_CONSIDER = 3
 _MAX_ALSO_CONSIDER_CHARS = 200
 _ANSWER_ATTEMPTS = 2            # one retry when the reply has no usable answer
+_MAX_STRUCTURE_INFO_CHARS = 1500  # header metadata shown back to the LLM
 # Keys a model sometimes uses for the answer instead of "answer".
 _ALT_ANSWER_KEYS = ("response", "text", "content", "reply", "message")
 
@@ -496,6 +497,13 @@ class TutorChat:
                 )
             except Exception as e:
                 print(f"tutor: structure {structure!r} not resolved: {e!r}")
+        # 5c. The reply names a molecule before having seen its file, so it
+        # can describe the wrong one (it called 6NK6 something it isn't).
+        # Show it the header it is about to display and let it correct itself.
+        if structure_path:
+            revised = self._revise_for_structure(messages, text, structure.strip(), structure_path)
+            if revised:
+                answer = revised
 
         # 6. Classify.
         cls = self.rubric.classify_qa(
@@ -558,6 +566,46 @@ class TutorChat:
         return turn
 
     # --- internals --------------------------------------------------------
+
+    def _revise_for_structure(self, messages: list, reply: str, name: str, path: str) -> str:
+        """The answer rewritten to agree with the structure's header, or "".
+
+        One more LLM call, only when the reply asked to display a structure.
+        Any failure keeps the original answer.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from biomentis.structure_info import metadata_text
+
+        try:
+            info = metadata_text(path).strip()
+        except Exception as e:
+            print(f"tutor: no metadata for {name!r}: {e!r}")
+            return ""
+        if not info:
+            return ""
+        check = (
+            f"STRUCTURE_INFO: the header of {name}, read from the file that will be shown "
+            f"next to your answer:\n{info[:_MAX_STRUCTURE_INFO_CHARS]}\n\n"
+            "Check your answer against it. Return the same JSON object, rewritten so that "
+            "everything it says about this structure (what it is, its molecules, organism, "
+            "method, ligands) agrees with STRUCTURE_INFO. Keep the rest. Output ONLY the JSON."
+        )
+        try:
+            response = self.llm.invoke([*messages, AIMessage(content=reply), HumanMessage(content=check)])
+            parsed = _extract_json(getattr(response, "content", "") or "")
+        except Exception as e:
+            print(f"tutor: structure check failed: {e!r}")
+            return ""
+        if parsed is None:
+            print("tutor: structure check returned no JSON; keeping the first answer")
+            return ""
+        data = _normalize_answer(parsed)
+        answer = str(data.get("answer", "") or "").strip()
+        follow_up = str(data.get("follow_up", "") or "").strip()
+        if answer and follow_up:
+            answer = f"{answer}\n\n**Follow-up:** {follow_up}"
+        return answer
 
     @staticmethod
     def _coerce_citations(

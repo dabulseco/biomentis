@@ -37,6 +37,9 @@ These tests pin down:
  12. The sidebar field prefills from the resolved key
  13. Typing a key in the sidebar applies it
  14. Typing garbage warns in-line and leaves the previous key alone
+ 15. The `.env.example` placeholder counts as not set, so a real shell key
+     behind it is used, and nothing is sent when there is none
+ 16. Typing the placeholder in the sidebar says so and applies nothing
 
 Tests 12-14 drive the real `render_anthropic_key_field` inside a Streamlit
 `AppTest` harness. Note the AppTest quirk called out in CLAUDE.md: an
@@ -341,6 +344,38 @@ def test_sidebar_flags_garbage_and_keeps_prior() -> None:
     _reset()
 
 
+def test_placeholder_counts_as_unset() -> None:
+    print("\n[15] the .env.example placeholder counts as not set")
+    from biomentis.config import is_placeholder_secret, secret_is_set
+
+    _reset()
+    path = _write_dotenv("ANTHROPIC_API_KEY=your_anthropic_api_key_here\n")
+    _check("placeholder alone resolves to nothing", resolve_anthropic_key(env={}, dotenv_path=path) is None)
+    got = resolve_anthropic_key(env={"ANTHROPIC_API_KEY": _GOOD}, dotenv_path=path)
+    _check("a real shell key behind it is used", got == _GOOD, f"got {got!r}")
+    for value in ("your_anthropic_api_key_here", '"your-api-key"', "<your key>", "sk-ant-...", "xxxx"):
+        _check(f"placeholder: {value}", is_placeholder_secret(value) and not secret_is_set(value))
+    _check("a real key is not a placeholder", not is_placeholder_secret(_GOOD) and secret_is_set(_GOOD))
+    _check("placeholder is not applied", apply_anthropic_key("your_anthropic_api_key_here") is False)
+    _reset()
+
+
+def test_sidebar_explains_placeholder() -> None:
+    print("\n[16] typing the placeholder in the sidebar says so")
+    _reset()
+    at = _app_test()
+    at.session_state["seed_config_key"] = _GOOD
+    at.run()
+    at.sidebar.text_input[0].set_value("your_anthropic_api_key_here").run()
+
+    _check("no exception", not at.exception, str(at.exception))
+    captions = [c.value for c in at.sidebar.caption]
+    _check("says it is the placeholder", any("placeholder" in c for c in captions), f"captions={captions}")
+    _check("does not say Applied", not any(c.startswith("Applied") for c in captions), f"captions={captions}")
+    _check("prior key survives", _line(at, "CONFIG=") == f"CONFIG={_GOOD!r}", f"got {_line(at, 'CONFIG=')!r}")
+    _reset()
+
+
 def main() -> int:
     for fn in (
         test_strips_surrounding_double_quotes,
@@ -357,6 +392,8 @@ def main() -> int:
         test_sidebar_prefills_from_resolved_key,
         test_sidebar_applies_a_typed_key,
         test_sidebar_flags_garbage_and_keeps_prior,
+        test_placeholder_counts_as_unset,
+        test_sidebar_explains_placeholder,
     ):
         fn()
 

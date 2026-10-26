@@ -668,11 +668,11 @@ def format_duration(seconds: float) -> str:
 
 
 _CLOUD_PROVIDER_CATALOG: dict[str, tuple[list[str], list[str]]] = {
-    "Anthropic": (["ANTHROPIC_API_KEY"], ["claude-sonnet-4-5", "claude-opus-4-1", "claude-3-5-haiku-20241022"]),
+    "Anthropic": (["ANTHROPIC_API_KEY"], ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]),
     "OpenAI": (["OPENAI_API_KEY"], ["gpt-5", "gpt-4.1", "gpt-4o", "gpt-4o-mini"]),
     "Gemini": (["GEMINI_API_KEY"], ["gemini-2.5-pro", "gemini-2.5-flash"]),
     "Groq": (["GROQ_API_KEY"], ["llama-3.3-70b-versatile"]),
-    "Bedrock": (["AWS_REGION"], ["anthropic.claude-3-5-sonnet-20241022-v2:0"]),
+    "Bedrock": (["AWS_REGION"], ["anthropic.claude-opus-5-5", "anthropic.claude-sonnet-5-5"]),
 }
 
 
@@ -692,8 +692,16 @@ def list_available_providers() -> dict[str, list[str]]:
     if ollama_models:
         providers["Ollama"] = ollama_models
 
+    from biomentis.config import resolve_anthropic_key, secret_is_set
+
     for source, (env_vars, models) in _CLOUD_PROVIDER_CATALOG.items():
-        if any(os.getenv(var) for var in env_vars):
+        # Anthropic goes through the shared resolver (session key, then .env,
+        # then the shell). Placeholders such as `your_..._here` count as unset.
+        if source == "Anthropic":
+            available = bool(resolve_anthropic_key())
+        else:
+            available = any(secret_is_set(os.getenv(var)) for var in env_vars)
+        if available:
             providers[source] = models
 
     return providers

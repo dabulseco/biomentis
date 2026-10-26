@@ -20,6 +20,7 @@ from biomentis.config import (
     apply_anthropic_key,
     apply_ncbi_email,
     default_config,
+    is_placeholder_secret,
     looks_like_anthropic_key,
     resolve_anthropic_key,
     verify_anthropic_key,
@@ -119,6 +120,13 @@ def render_anthropic_key_field(verify: bool = True) -> None:
 
     if not value.strip():
         st.caption("⚠️ Not set — web search will use the keyless DuckDuckGo fallback.")
+        return
+
+    if is_placeholder_secret(value):
+        st.caption(
+            "⚠️ That's the example placeholder from `.env.example`, not a key. "
+            "Paste your real key here, or set `ANTHROPIC_API_KEY=sk-ant-...` in .env."
+        )
         return
 
     if not apply_anthropic_key(value):

@@ -42,6 +42,7 @@ $P -m biomentis.agent.tests.test_stop_sequences     # turn boundaries + stop gua
 $P -m biomentis.agent.tests.test_context_budget     # context window guard
 $P -m biomentis.agent.tests.test_ncbi_email        # NCBI/Entrez email + sidebar field
 $P -m biomentis.agent.tests.test_anthropic_key     # Anthropic key resolution + web-search fallback
+$P -m biomentis.agent.tests.test_claude_models     # current Claude ids, no temperature, text-only replies
 $P -m biomentis.agent.tests.test_structure_artifacts  # structure artifact registry
 $P -m biomentis.agent.tests.test_structure_info  # structure metadata (no coordinates as text) + viewer models
 $P -m biomentis.agent.tests.test_runaway_generation # parse-error retry cap + Ollama turn cutoff

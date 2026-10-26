@@ -26,6 +26,9 @@ What these tests pin down:
   5.  A different model gets its own card
   6.  The UI-level card cache follows the same two rules
   7.  A reply with unescaped LaTeX (`$\\Delta\\lambda$`) still parses
+  8.  One bad card reply is retried once, and only once
+  9.  A tutor chat reply with no answer text is recovered or retried once
+      (session of 2026-10-26: "(tutor returned an empty answer)")
 
 Run with:
     python -m biomentis.agent.tests.test_tutor_card_cache
@@ -157,15 +160,17 @@ def test_failed_card_is_not_cached() -> None:
     print("\n[3] A failed card is not cached by the generator")
     from biomentis.agent.tutor.instruction import InstructionGenerator
 
-    llm = _ScriptedLLM([ConnectionError("ollama busy"), _CARD_JSON])
+    # Two failures: one card's worth of attempts (see test [8] for the retry).
+    llm = _ScriptedLLM([ConnectionError("ollama busy"), ConnectionError("ollama busy"), _CARD_JSON])
     gen = InstructionGenerator(llm)
     first = gen.generate(_event())
     second = gen.generate(_event())
     _check("the first card is the failure placeholder", first._generation_failed, repr(first))
-    _check("the retry calls the model again", llm.calls == 2, f"calls={llm.calls}")
-    _check("the retry gets a real card", not second._generation_failed and second.what == "Samples diameters", repr(second))
+    _check("the next step calls the model again", llm.calls == 3, f"calls={llm.calls}")
+    _check("and gets a real card", not second._generation_failed and second.what == "Samples diameters", repr(second))
 
-    llm = _ScriptedLLM(["Sure! Here is a teaching note without any JSON.", _CARD_JSON])
+    bad = "Sure! Here is a teaching note without any JSON."
+    llm = _ScriptedLLM([bad, bad, _CARD_JSON])
     gen = InstructionGenerator(llm)
     gen.generate(_event())
     second = gen.generate(_event())
@@ -214,7 +219,7 @@ def test_ui_card_cache() -> None:
 
     run = {"prompt": "Design a green quantum dot.", "step_id": 1}
     ui_tutor._CARD_CACHE.clear()
-    llm = _ScriptedLLM([ConnectionError("ollama busy"), _CARD_JSON])
+    llm = _ScriptedLLM([ConnectionError("ollama busy"), ConnectionError("ollama busy"), _CARD_JSON])
     tutor = _tutor(llm)
     first = ui_tutor._generate_or_get_card(_event(), run, tutor)
     second = ui_tutor._generate_or_get_card(_event(), run, tutor)
@@ -263,6 +268,51 @@ def test_latex_in_a_reply_still_parses() -> None:
     _check("the critic parses it too", critic._extract_json(latex) is not None)
 
 
+def test_one_bad_reply_is_retried() -> None:
+    print("\n[8] One bad reply is retried; two give up")
+    from biomentis.agent.tutor.instruction import InstructionGenerator
+
+    for label, first in (("an exception", ConnectionError("ollama busy")),
+                         ("a non-JSON reply", "Here is a teaching note."),
+                         ("an all-empty card", '{"technical": {}, "scientific": {}}')):
+        llm = _ScriptedLLM([first, _CARD_JSON])
+        card = InstructionGenerator(llm).generate(_event())
+        _check(f"after {label}, the retry gives a real card", not card._generation_failed and llm.calls == 2,
+               f"failed={card._generation_failed} calls={llm.calls}")
+
+    llm = _ScriptedLLM(["nope", "still nope", _CARD_JSON])
+    card = InstructionGenerator(llm).generate(_event())
+    _check("two bad replies give the placeholder, without a third call",
+           card._generation_failed and llm.calls == 2, f"failed={card._generation_failed} calls={llm.calls}")
+
+
+def test_empty_chat_answer() -> None:
+    print("\n[9] A chat reply with no answer text is recovered or retried")
+    from biomentis.agent.tutor.chat import TutorChat
+
+    good = json.dumps({"answer": "Yes: ZnTe shifts least per nm.", "follow_up": "", "citations": []})
+    for label, reply in (("a nested object", json.dumps({"response": {"answer": "Yes: nested."}})),
+                         ("a renamed key", json.dumps({"Response": "Yes: renamed."})),
+                         ("only a follow_up", json.dumps({"answer": "", "follow_up": "Yes: in follow_up."}))):
+        llm = _ScriptedLLM([reply])
+        turn = TutorChat(llm).ask("Is drift related to size?", mode="chat")
+        _check(f"{label} is recovered without a retry", turn.content.startswith("Yes:") and llm.calls == 2,
+               f"content={turn.content!r} calls={llm.calls}")
+
+    for label, first in (("an empty answer", json.dumps({"answer": "", "follow_up": ""})),
+                         ("a non-JSON reply", "Sure, here you go."),
+                         ("an exception", ConnectionError("ollama busy"))):
+        llm = _ScriptedLLM([first, good])
+        turn = TutorChat(llm).ask("Is drift related to size?", mode="chat")
+        _check(f"after {label}, the retry gives the answer", turn.content.startswith("Yes: ZnTe"),
+               f"content={turn.content!r}")
+
+    llm = _ScriptedLLM([json.dumps({"answer": ""}), json.dumps({"answer": ""})])
+    turn = TutorChat(llm).ask("Is drift related to size?", mode="chat")
+    _check("two empty replies still say so, without a third answer call",
+           "empty answer" in turn.content and llm.calls == 3, f"content={turn.content!r} calls={llm.calls}")
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Tutor card cache tests")
@@ -274,6 +324,8 @@ def run_all() -> int:
     test_model_switch_gets_its_own_card()
     test_ui_card_cache()
     test_latex_in_a_reply_still_parses()
+    test_one_bad_reply_is_retried()
+    test_empty_chat_answer()
 
     print("\n" + "=" * 60)
     print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")

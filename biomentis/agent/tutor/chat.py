@@ -42,6 +42,9 @@ _MAX_CITATION_SNIPPET = 200
 _MAX_QUESTION_CHARS = 1000
 _MAX_ALSO_CONSIDER = 3
 _MAX_ALSO_CONSIDER_CHARS = 200
+_ANSWER_ATTEMPTS = 2            # one retry when the reply has no usable answer
+# Keys a model sometimes uses for the answer instead of "answer".
+_ALT_ANSWER_KEYS = ("response", "text", "content", "reply", "message")
 
 # Two behavioral modes for the chat:
 #   "chat" — KB + LLM hybrid. Use the KB as the primary source, but the
@@ -226,6 +229,29 @@ def _build_user_prompt(
 # --- TutorChat -----------------------------------------------------------
 
 
+def _normalize_answer(data: dict) -> dict:
+    """Return `data` with the answer text under "answer" where the model put
+    it somewhere else: wrapped in a single outer object, under a differently
+    cased or named key, or only in "follow_up"."""
+    if "answer" not in data and len(data) == 1:
+        (inner,) = data.values()
+        if isinstance(inner, dict):
+            data = inner
+    if str(data.get("answer", "") or "").strip():
+        return data
+    data = dict(data)
+    lowered = {str(k).lower(): v for k, v in data.items()}
+    for key in ("answer",) + _ALT_ANSWER_KEYS:
+        value = lowered.get(key)
+        if isinstance(value, str) and value.strip():
+            data["answer"] = value
+            return data
+    follow_up = str(data.get("follow_up", "") or "").strip()
+    if follow_up:
+        data["answer"], data["follow_up"] = follow_up, ""
+    return data
+
+
 class TutorChat:
     """Stateful, KB-grounded tutor chatbot.
 
@@ -375,22 +401,35 @@ class TutorChat:
         system_prompt = (
             _SYSTEM_PROMPT_CHAT if mode == _ASK_MODE_CHAT else _SYSTEM_PROMPT
         )
-        try:
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=user_prompt),
-                ]
-            )
-            text = getattr(response, "content", str(response)) or ""
-        except Exception as e:
-            print(f"tutor: chat LLM call failed: {e!r}")
-            return self._soft_failure(question, f"LLM call failed: {e!r}", step_id)
-
-        # 4. Parse JSON.
-        data = _extract_json(text)
+        # The reply is retried once when the call fails, isn't JSON, or has
+        # no answer text; each failed attempt is printed with the raw reply.
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+        data, reason = None, ""
+        for attempt in range(1, _ANSWER_ATTEMPTS + 1):
+            try:
+                response = self.llm.invoke(messages)
+                text = getattr(response, "content", str(response)) or ""
+            except Exception as e:
+                reason = f"LLM call failed: {e!r}"
+            else:
+                # 4. Parse JSON.
+                parsed = _extract_json(text)
+                if parsed is None:
+                    reason = "tutor returned an unparseable response"
+                else:
+                    data = _normalize_answer(parsed)
+                    if str(data.get("answer", "") or "").strip():
+                        break
+                    reason = "reply had no answer text"
+                print(f"tutor: chat attempt {attempt}/{_ANSWER_ATTEMPTS} failed: "
+                      f"{reason} ({len(text)} chars): {text[:500]!r}")
+                continue
+            print(f"tutor: chat attempt {attempt}/{_ANSWER_ATTEMPTS} failed: {reason}")
         if data is None:
-            return self._soft_failure(question, "tutor returned an unparseable response", step_id)
+            return self._soft_failure(question, reason, step_id)
 
         # 5. Coerce answer, follow_up, citations.
         answer = str(data.get("answer", "") or "").strip()

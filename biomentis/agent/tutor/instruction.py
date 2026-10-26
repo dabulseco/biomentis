@@ -273,6 +273,7 @@ _MAX_WHY_CHARS = {MODE_TECHNICAL: 1200, MODE_SCIENTIFIC: 2400}
 _MAX_IMPACT_CHARS = 1200
 _MAX_CITATIONS = 3
 _CITATION_SNIPPET_MAX = 200
+_CARD_ATTEMPTS = 2  # one retry for a failed or unusable card
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -916,16 +917,31 @@ class InstructionGenerator:
                 )
             ),
         ]
+        # One retry. A bad card is occasional, not systematic — the same step
+        # replayed 8/8 clean after one failed in the app — so a second try
+        # usually rescues it, and on a local model it costs ~5 s. Every failed
+        # attempt says why: an unusable reply used to fail silently, which
+        # left nothing to diagnose from.
+        for attempt in range(1, _CARD_ATTEMPTS + 1):
+            card, reason = self._attempt_card(messages, event, allowed_sources, modes)
+            if card is not None:
+                return card
+            print(f"tutor: card attempt {attempt}/{_CARD_ATTEMPTS} failed: {reason}")
+        return _build_soft_failure_card(event, modes)
+
+    def _attempt_card(
+        self, messages: list, event, allowed_sources: set[str], modes: tuple[str, ...]
+    ) -> tuple[InstructionCard | None, str]:
+        """One card request: the card, or None and why it was unusable."""
         try:
             response = self.llm.invoke(messages)
             text = getattr(response, "content", str(response)) or ""
         except Exception as e:
-            print(f"tutor: LLM call failed: {e!r}")
-            return _build_soft_failure_card(event, modes)
+            return None, f"LLM call failed: {e!r}"
 
         data = _extract_json(text)
         if data is None:
-            return _build_soft_failure_card(event, modes)
+            return None, f"reply was not card JSON ({len(text)} chars): {text[:300]!r}"
 
         bloom_fallback = _BLOOM_DEFAULTS.get(event.type, "")
         dok_fallback = _DOK_DEFAULTS.get(event.type, 0)
@@ -946,8 +962,8 @@ class InstructionGenerator:
         # with nothing usable. That reads to the student exactly like a
         # failed call, so flag it as one and let the renderer say so.
         if card.is_empty():
-            return _build_soft_failure_card(event, modes)
-        return card
+            return None, f"every section came back empty: {text[:300]!r}"
+        return card, ""
 
 
 # --- helpers --------------------------------------------------------------

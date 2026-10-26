@@ -2,6 +2,7 @@ import json
 import os
 import pickle
 import time
+from dataclasses import asdict
 from typing import Any
 
 import requests
@@ -10,6 +11,7 @@ from Bio.Seq import Seq
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from biomentis.llm import get_llm
+from biomentis.structures import default_artifact_dir, record_download
 from biomentis.utils import parse_hpo_obo
 
 
@@ -609,10 +611,13 @@ def query_alphafold(
 
         # Handle download request if specified
         download_info = None
+        artifacts: list[dict] = []
         if download:
-            # Ensure output directory exists
+            # Default to the run-scoped artifact directory. This used to be
+            # ".", which is why loose AF-*.pdb files accumulate wherever the
+            # app happens to be started from.
             if not output_dir:
-                output_dir = "."
+                output_dir = default_artifact_dir()
             os.makedirs(output_dir, exist_ok=True)
 
             # Generate standard AlphaFold filename
@@ -633,6 +638,11 @@ def query_alphafold(
                     "file_path": file_path,
                     "url": download_url,
                 }
+                artifacts.append(
+                    asdict(record_download(file_path, source_db="alphafold", accession=uniprot_id))
+                )
+                # Printed so the UI's file-detection seam can find it.
+                print(f"Downloaded structure: {os.path.abspath(file_path)}")
             else:
                 download_info = {
                     "success": False,
@@ -653,6 +663,8 @@ def query_alphafold(
 
         if download_info:
             response_data["download"] = download_info
+        if artifacts:
+            response_data["artifacts"] = artifacts
 
         return response_data
 
@@ -984,6 +996,7 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                 detailed_results.append({"identifier": identifier, "error": str(e)})
 
         # Download structure files if requested
+        downloaded: list[dict] = []
         if download:
             for identifier in identifiers:
                 if "_" in identifier or "." in identifier or "-" in identifier:
@@ -1003,8 +1016,10 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                     pdb_response = requests.get(pdb_url)
 
                     if pdb_response.status_code == 200:
-                        # Create data directory if it doesn't exist
-                        data_dir = os.path.join(os.path.dirname(__file__), "data", "pdb")
+                        # This used to write inside the installed package
+                        # (biomentis/tool/data/pdb/), which is not a place a
+                        # user's downloads belong and is not configurable.
+                        data_dir = default_artifact_dir()
                         os.makedirs(data_dir, exist_ok=True)
 
                         # Save PDB file
@@ -1016,12 +1031,20 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                         for result in detailed_results:
                             if result["identifier"] == identifier or result["identifier"].startswith(pdb_id):
                                 result["pdb_file_path"] = pdb_file_path
+                        downloaded.append(
+                            asdict(record_download(pdb_file_path, source_db="rcsb", accession=pdb_id))
+                        )
+                        # Printed so the UI's file-detection seam can find it.
+                        print(f"Downloaded structure: {os.path.abspath(pdb_file_path)}")
                 except Exception as e:
                     for result in detailed_results:
                         if result["identifier"] == identifier or result["identifier"].startswith(pdb_id):
                             result["download_error"] = str(e)
 
-        return {"detailed_results": detailed_results}
+        payload = {"detailed_results": detailed_results}
+        if downloaded:
+            payload["artifacts"] = downloaded
+        return payload
 
     except Exception as e:
         return {"error": f"Error retrieving PDB details: {str(e)}"}

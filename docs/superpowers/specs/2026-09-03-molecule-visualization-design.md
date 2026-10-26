@@ -1,7 +1,7 @@
 # Molecule visualization harness — design
 
 **Date:** 2026-09-03
-**Status:** approved for sub-project 1
+**Status:** superseded by `2026-10-26-visualization-design.md` (never built)
 **Scope of this document:** the overall architecture, then a full specification
 of **sub-project 1, the structure artifact layer**. Sub-projects 2–4 are
 outlined only, and each gets its own spec before implementation.

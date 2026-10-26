@@ -212,30 +212,12 @@ def _build_user_prompt(
 
 
 def _extract_json(text: str) -> dict | None:
-    """Best-effort JSON extraction. Reuses the same pattern as
-    `instruction._extract_json` (fenced block, then loose match, then
-    plain json.loads). Returns None on any failure."""
-    if not text:
-        return None
-    import json
-    import re
+    """Best-effort JSON extraction — `instruction._extract_json`, so the
+    critic gets the same tolerance for unescaped LaTeX as the cards.
+    Returns None on any failure."""
+    from biomentis.agent.tutor.instruction import _extract_json as extract
 
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fence:
-        try:
-            return json.loads(fence.group(1))
-        except Exception:
-            pass
-    loose = re.search(r"\{.*\}", text, re.DOTALL)
-    if loose:
-        try:
-            return json.loads(loose.group(0))
-        except Exception:
-            pass
-    try:
-        return json.loads(text)
-    except Exception:
-        return None
+    return extract(text)
 
 
 def _coerce_weaknesses(value: Any) -> list[Weakness]:

@@ -25,6 +25,7 @@ What these tests pin down:
   4.  A good card is still cached
   5.  A different model gets its own card
   6.  The UI-level card cache follows the same two rules
+  7.  A reply with unescaped LaTeX (`$\\Delta\\lambda$`) still parses
 
 Run with:
     python -m biomentis.agent.tests.test_tutor_card_cache
@@ -229,6 +230,39 @@ def test_ui_card_cache() -> None:
     ui_tutor._CARD_CACHE.clear()
 
 
+def test_latex_in_a_reply_still_parses() -> None:
+    print("\n[7] A reply with unescaped LaTeX still parses")
+    from biomentis.agent.tutor import critic
+    from biomentis.agent.tutor.instruction import InstructionGenerator, _extract_json
+
+    # What gemma4:26b-mlx actually wrote, 4/4 times, for a step about
+    # "color shift per nanometer": `\D` and `\l` are not JSON escapes, so a
+    # strict parse rejected the whole otherwise-complete card.
+    latex = (
+        '{"technical": {"what": "Defines the metric ($\\Delta\\lambda / \\Delta d$)", "why": "Stability"},'
+        ' "scientific": {"what": "Quantum confinement", "why": "Smaller dots, wider gap"}}'
+    )
+    data = _extract_json(latex)
+    _check("the card JSON parses", data is not None)
+    _check(
+        "the LaTeX survives as written",
+        bool(data) and data["technical"]["what"] == "Defines the metric ($\\Delta\\lambda / \\Delta d$)",
+        repr(data and data["technical"]["what"]),
+    )
+
+    escaped = '{"what": "line one\\nline two, a \\"quote\\", and \\\\Delta"}'
+    data = _extract_json(escaped)
+    _check(
+        "properly escaped text is untouched",
+        bool(data) and data["what"] == 'line one\nline two, a "quote", and \\Delta',
+        repr(data and data["what"]),
+    )
+
+    card = InstructionGenerator(_ScriptedLLM([latex])).generate(_event())
+    _check("the generator makes a real card from it", not card._generation_failed, repr(card))
+    _check("the critic parses it too", critic._extract_json(latex) is not None)
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Tutor card cache tests")
@@ -239,6 +273,7 @@ def run_all() -> int:
     test_good_card_is_cached()
     test_model_switch_gets_its_own_card()
     test_ui_card_cache()
+    test_latex_in_a_reply_still_parses()
 
     print("\n" + "=" * 60)
     print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")

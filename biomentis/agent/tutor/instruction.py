@@ -288,31 +288,54 @@ def _truncate(text: str, max_chars: int) -> str:
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _JSON_LOOSE = re.compile(r"\{.*\}", re.DOTALL)
+# A valid JSON escape (kept as one unit, so `\\` is never split), or any other
+# backslash — which is the model writing LaTeX like `$\Delta\lambda$` without
+# escaping it.
+_JSON_ESCAPE = re.compile(r'\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})|\\')
+
+
+def _loads(text: str):
+    """`json.loads`, then once more with stray backslashes escaped.
+
+    Science cards invite LaTeX, and `gemma4:26b-mlx` wrote `\\Delta` and
+    `\\lambda` unescaped inside otherwise complete card JSON (4/4 tries for a
+    step about color shift per nanometer). `\\D` is not a JSON escape, so the
+    strict parse rejected the whole card. Only a reply that already failed is
+    repaired, so well-formed JSON is never touched.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        repaired = _JSON_ESCAPE.sub(lambda m: m.group(0) if len(m.group(0)) > 1 else r"\\", text)
+        if repaired == text:
+            raise
+        return json.loads(repaired)
 
 
 def _extract_json(text: str) -> dict | None:
     """Best-effort JSON extraction from an LLM response.
 
     Tries, in order: a fenced ```json``` block, a loose {...} match, then
-    a plain json.loads. Returns None on any failure — the caller falls
-    back to a soft-failure card.
+    a plain parse — each tolerating unescaped LaTeX backslashes (see
+    `_loads`). Returns None on any failure — the caller falls back to a
+    soft-failure card.
     """
     if not text:
         return None
     m = _JSON_FENCE.search(text)
     if m:
         try:
-            return json.loads(m.group(1))
+            return _loads(m.group(1))
         except Exception:
             pass
     m = _JSON_LOOSE.search(text)
     if m:
         try:
-            return json.loads(m.group(0))
+            return _loads(m.group(0))
         except Exception:
             pass
     try:
-        return json.loads(text)
+        return _loads(text)
     except Exception:
         return None
 

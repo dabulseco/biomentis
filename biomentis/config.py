@@ -85,6 +85,12 @@ class BiomentisConfig:
     # env var or by passing ncbi_email= when constructing BiomentisConfig.
     ncbi_email: str | None = None
 
+    # Anthropic
+    # Session-scoped override for ANTHROPIC_API_KEY, set by the sidebar field.
+    # This is the highest-precedence tier in `resolve_anthropic_key` — see the
+    # note there for why the environment is *not* the top tier.
+    anthropic_key: str | None = None
+
     def __post_init__(self):
         """Load any environment variable overrides if they exist."""
         # Check for environment variable overrides (optional)
@@ -226,3 +232,133 @@ def apply_ncbi_email(email: str | None) -> bool:
     except Exception:
         pass
     return True
+
+
+# --- Anthropic API key ---------------------------------------------------
+#
+# The key reaches the process by three routes that historically disagreed:
+#
+#   1. `.env`, loaded by `biomentis.agent.a1` with `load_dotenv(override=False)`
+#   2. an exported shell variable
+#   3. (removed) a `source ~/.bash_profile` subprocess in `biomentis.llm`
+#
+# `override=False` means an already-exported value wins, so a stale key left in
+# a shell profile silently shadowed a good key in `.env` and produced
+# "Error code: 401 - invalid x-api-key" with nothing pointing at the cause.
+#
+# `resolve_anthropic_key` inverts that for this one variable: `.env` is the
+# project-local, deliberate source, so it beats an inherited shell value. The
+# global `override=False` is deliberately left alone — flipping it would
+# clobber intentional shell overrides for every other variable.
+
+# Anthropic's own keys carry this prefix. It is a *hint*, not a gate: users
+# pointing ANTHROPIC_BASE_URL at a gateway legitimately hold tokens that don't.
+_ANTHROPIC_KEY_PREFIX = "sk-ant-"
+
+_QUOTE_CHARS = "\"'"
+
+
+def _normalize_secret(raw: str | None) -> str:
+    """Strip whitespace and one layer of surrounding quotes.
+
+    `KEY="sk-ant-..."` in a `.env` file, or a trailing newline picked up from a
+    `source`d shell profile, would otherwise go into the `x-api-key` header
+    verbatim and come back as a 401 that looks exactly like a revoked key.
+    """
+    value = (raw or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in _QUOTE_CHARS:
+        value = value[1:-1].strip()
+    return value
+
+
+def looks_like_anthropic_key(key: str | None) -> bool:
+    """True if `key` has the shape of a first-party Anthropic key.
+
+    Used only to render a hint in the UI. A False here does not mean the key
+    is unusable — see `_ANTHROPIC_KEY_PREFIX`.
+    """
+    return _normalize_secret(key).startswith(_ANTHROPIC_KEY_PREFIX)
+
+
+def resolve_anthropic_key(env=None, dotenv_path: str = ".env") -> str | None:
+    """Return the Anthropic key this process should use, or None.
+
+    Precedence, highest first:
+
+      1. `default_config.anthropic_key` — applied this session (the sidebar)
+      2. `ANTHROPIC_API_KEY` in `dotenv_path` — project-local and deliberate
+      3. `ANTHROPIC_API_KEY` in the environment — possibly a stale export
+
+    Every tier is passed through `_normalize_secret`.
+    """
+    env = os.environ if env is None else env
+
+    session = _normalize_secret(default_config.anthropic_key)
+    if session:
+        return session
+
+    try:
+        from dotenv import dotenv_values
+
+        from_file = _normalize_secret(dotenv_values(dotenv_path).get("ANTHROPIC_API_KEY"))
+        if from_file:
+            return from_file
+    except Exception:
+        # A missing or unreadable .env is normal; fall through to the shell.
+        pass
+
+    return _normalize_secret(env.get("ANTHROPIC_API_KEY")) or None
+
+
+def apply_anthropic_key(key: str | None) -> bool:
+    """Apply an Anthropic key for this session.
+
+    Returns True if `key` was usable and applied, False if it was blank or
+    contained internal whitespace — in which case nothing changes, so a stray
+    keystroke in the UI can't wipe out a key that already works.
+
+    Writes both `default_config.anthropic_key` (the top precedence tier, read
+    by `resolve_anthropic_key`) and `os.environ["ANTHROPIC_API_KEY"]`, which is
+    what a bare `anthropic.Anthropic()` and any subprocess will pick up.
+
+    Note the shape check is deliberately loose: anything non-blank with no
+    internal whitespace is accepted, because gateway and proxy tokens are valid
+    here too. `looks_like_anthropic_key` is the cosmetic check.
+    """
+    candidate = _normalize_secret(key)
+    if not candidate or any(c.isspace() for c in candidate):
+        return False
+
+    default_config.anthropic_key = candidate
+    os.environ["ANTHROPIC_API_KEY"] = candidate
+    return True
+
+
+def verify_anthropic_key(key: str | None) -> tuple[bool, str]:
+    """Check a key against the API without spending any tokens.
+
+    Uses `GET /v1/models` (`client.models.list`), which authenticates the key
+    but runs no inference — so this can be called on a settings change without
+    a cost. Returns `(ok, message)`; `message` is short and safe to render.
+
+    A network failure returns `(False, ...)` with a message that says so, so
+    the caller can distinguish "rejected" from "couldn't check".
+    """
+    candidate = _normalize_secret(key)
+    if not candidate:
+        return False, "No key set."
+
+    try:
+        import anthropic
+    except ImportError:
+        return False, "The `anthropic` package isn't installed."
+
+    try:
+        anthropic.Anthropic(api_key=candidate).models.list(limit=1)
+        return True, "Key accepted by the Anthropic API."
+    except anthropic.AuthenticationError:
+        return False, "Anthropic rejected this key (401). It may be revoked or mistyped."
+    except anthropic.PermissionDeniedError:
+        return False, "Key authenticated but lacks permission (403)."
+    except Exception as e:  # network down, proxy misconfigured, SDK too old
+        return False, f"Couldn't verify the key: {type(e).__name__}."

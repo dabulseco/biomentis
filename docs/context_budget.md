@@ -81,12 +81,29 @@ one more full-history request at exactly the wrong moment.
 2. a limit **learned from a previous context-length error** — the provider's
    own number, for the exact deployment, persisted to
    `runs/context_limits.json` so a given model can only surprise you once
-3. `KNOWN_CONTEXT_LIMITS`, matched on model name
-4. otherwise **no guard at all**
+3. `OLLAMA_CLOUD_LIMIT` (262,144) for any model whose tag ends in `:cloud`
+   or `-cloud`
+4. `KNOWN_CONTEXT_LIMITS`, matched on model name
+5. otherwise **no guard at all**
 
-Point 4 is deliberate. A guessed ceiling that is too low cuts runs short for
+Point 5 is deliberate. A guessed ceiling that is too low cuts runs short for
 no reason; one that is too high protects nothing. Silence is the honest
 default, and point 2 means the first failure is also the last.
+
+Point 3 is what point 2 alone could not do. `gemma4:31b-cloud` was not in the
+name table, so a 50-minute run died on a 262,170-token request; learning the
+limit from that 400 protects the *next* run, not the one that paid for it.
+The model dropdown is whatever the user has pulled, so a hand-kept list of
+names is always one `ollama pull` behind — and a name it is missing is a run
+with no guard at all. Ollama's hosted models all sit behind one gateway
+enforcing one ceiling (`deepseek-v4-pro:cloud` and `gemma4:31b-cloud` were
+both refused at exactly 262,144), so the tag is enough to know the limit
+without knowing the model.
+
+It is checked **before** the name table on purpose: `qwen3-coder:480b-cloud`
+matches the `qwen` row and would otherwise be held to 32k, a truncation the
+gateway never asked for. Local models are left alone — they are served with
+whatever `num_ctx` the daemon was given, which is not ours to guess.
 
 Ollama's `/api/show` is deliberately **not** consulted: for
 `deepseek-v4-pro:cloud` it reports `context_length: 1048576` while the

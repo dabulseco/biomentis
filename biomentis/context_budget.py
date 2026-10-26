@@ -25,15 +25,19 @@ Two things it deliberately does not do:
   * It never mutates the run's own message history. Only the outgoing request
     is trimmed, so the transcript and the journal stay complete and the trim
     is recomputed from scratch on the next call.
-  * It never guesses a limit it does not have. An unknown model gets no guard
-    rather than a made-up ceiling that truncates a run early.
+  * It never guesses a limit it does not have. An unknown *local* model gets
+    no guard rather than a made-up ceiling that truncates a run early — the
+    daemon serves it with whatever `num_ctx` it was given. A cloud model is
+    not an unknown: the ceiling belongs to the gateway, not the model.
 
 Where the limit comes from, in order:
 
   1. `BIOMNI_MAX_CONTEXT_TOKENS` — an explicit override always wins
   2. a limit learned from a previous context-length error, which is the
      provider's own number and therefore the most trustworthy source there is
-  3. `KNOWN_CONTEXT_LIMITS`, matched on the model name
+  3. `OLLAMA_CLOUD_LIMIT`, for any `:cloud` model — one gateway, one ceiling,
+     so a model nobody has listed yet is still guarded on its first run
+  4. `KNOWN_CONTEXT_LIMITS`, matched on the model name
 
 Ollama's `/api/show` is deliberately NOT consulted: for `deepseek-v4-pro:cloud`
 it reports `context_length: 1048576` while the endpoint enforces 262144, so
@@ -53,6 +57,7 @@ __all__ = [
     "ContextFit",
     "HARD_STOP_AFTER_WRAP_UPS",
     "KNOWN_CONTEXT_LIMITS",
+    "OLLAMA_CLOUD_LIMIT",
     "WRAP_UP_INSTRUCTION",
     "estimate_messages_tokens",
     "estimate_tokens",
@@ -61,6 +66,15 @@ __all__ = [
     "learn_limit_from_error",
     "resolve_context_limit",
 ]
+
+# Ollama's hosted models all run behind one gateway, and the gateway enforces
+# the same ceiling whatever the model is: `deepseek-v4-pro:cloud` and
+# `gemma4:31b-cloud` were both refused at exactly this number, in the
+# endpoint's own words. Keeping it as a family rule rather than a row per
+# model matters because the model dropdown is whatever the user has pulled —
+# a hand-kept list of names is always one `ollama pull` behind, and a name it
+# is missing is a run with no guard at all.
+OLLAMA_CLOUD_LIMIT = 262_144
 
 # Model-name substring -> context window in tokens. Substrings, because model
 # names carry tags (`deepseek-v4-pro:cloud`) and deployment prefixes.
@@ -194,6 +208,18 @@ def model_name(llm: Any) -> str:
     return ""
 
 
+def _is_ollama_cloud(name: str) -> bool:
+    """Whether a model name is one of Ollama's hosted models.
+
+    Ollama tags them two ways — `glm-5.1:cloud` and `gemma4:31b-cloud` — and
+    both mean the same thing: the request leaves the daemon for the gateway,
+    which is where the ceiling comes from. A local model is left alone; it is
+    served with whatever `num_ctx` the daemon was given, which is not ours to
+    guess.
+    """
+    return name.endswith(":cloud") or name.endswith("-cloud")
+
+
 def _limits_path() -> Path:
     from biomentis.run_journal import default_run_dir
 
@@ -244,6 +270,13 @@ def resolve_context_limit(llm: Any) -> int | None:
     learned = _load_learned().get(name)
     if learned:
         return learned
+
+    # Before the name table, not after: a cloud tag says which endpoint is
+    # enforcing the limit, which beats guessing from the family name. A
+    # `qwen*:cloud` matches the "qwen" row and would be held to 32k, a
+    # truncation the gateway never asked for.
+    if _is_ollama_cloud(name):
+        return OLLAMA_CLOUD_LIMIT
 
     for fragment, limit in KNOWN_CONTEXT_LIMITS.items():
         if fragment in name:

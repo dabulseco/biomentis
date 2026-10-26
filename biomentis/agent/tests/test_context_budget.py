@@ -233,6 +233,56 @@ def test_an_unknown_model_gets_no_guard() -> None:
     # that is too high protects nothing. Silence is the honest default.
 
 
+def test_every_ollama_cloud_model_is_guarded() -> None:
+    print("\n[10b] a cloud model is guarded before its first crash, not after")
+    import biomentis.context_budget as cb
+
+    # The real failure this pins down: `gemma4:31b-cloud` was not in the
+    # table, so `resolve_context_limit` returned None, the guard was off, and
+    # a 50-minute run died on a 262,170-token request. Learning the limit
+    # from that error protects the *next* run; this test is about the first
+    # one. The dropdown is whatever the user has pulled, so a hand-kept list
+    # of names will always be one `ollama pull` behind.
+    previous_dir = os.environ.get("BIOMENTIS_RUN_DIR")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["BIOMENTIS_RUN_DIR"] = tmp  # nothing learned yet
+        cb._learned_limits.clear()
+        try:
+            for name in (
+                "gemma4:31b-cloud",
+                "glm-5.1:cloud",
+                "kimi-k2.7-code:cloud",
+                "minimax-m3:cloud",
+                "gpt-oss:120b-cloud",
+            ):
+                _check(
+                    f"{name} is guarded",
+                    resolve_context_limit(_FakeLLM(name)) == 262_144,
+                    str(resolve_context_limit(_FakeLLM(name))),
+                )
+            # The gateway's cap has to win over a substring match on the local
+            # family's much smaller window, or a cloud run gets truncated at
+            # 32k for no reason.
+            _check(
+                "the gateway cap beats a local family's window",
+                resolve_context_limit(_FakeLLM("qwen3-coder:480b-cloud")) == 262_144,
+                str(resolve_context_limit(_FakeLLM("qwen3-coder:480b-cloud"))),
+            )
+            # Local models are a different matter: whatever `num_ctx` the
+            # daemon serves them with is not ours to guess.
+            _check(
+                "a local model is still left unguarded",
+                resolve_context_limit(_FakeLLM("gemma4:31b")) is None,
+                str(resolve_context_limit(_FakeLLM("gemma4:31b"))),
+            )
+        finally:
+            cb._learned_limits.clear()
+            if previous_dir is None:
+                os.environ.pop("BIOMENTIS_RUN_DIR", None)
+            else:
+                os.environ["BIOMENTIS_RUN_DIR"] = previous_dir
+
+
 def test_the_limit_is_learned_from_the_error() -> None:
     print("\n[11] the provider's own limit is learned and persisted")
     import biomentis.context_budget as cb
@@ -395,6 +445,7 @@ def run_all() -> int:
     test_an_agent_that_will_not_stop_is_stopped()
     test_limit_resolution()
     test_an_unknown_model_gets_no_guard()
+    test_every_ollama_cloud_model_is_guarded()
     test_the_limit_is_learned_from_the_error()
     test_a_context_error_is_not_retried()
     test_both_llm_call_sites_are_guarded()

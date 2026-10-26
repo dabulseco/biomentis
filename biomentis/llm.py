@@ -261,22 +261,17 @@ def _build_llm(
                 "langchain-anthropic package is required for Anthropic models. Install with: pip install langchain-anthropic"
             )
 
-        # Ensure ANTHROPIC_API_KEY is loaded from bash_profile if not in environment
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            try:
-                import subprocess
+        # Resolve the key through the one shared resolver rather than reading
+        # the environment directly. This used to `source ~/.bash_profile` in a
+        # subprocess, which made the profile a third, invisible key source: it
+        # could disagree with `.env` and with the environment, and nothing said
+        # which one won. `resolve_anthropic_key` normalizes quotes/whitespace
+        # and gives `.env` precedence over an inherited shell value.
+        from biomentis.config import resolve_anthropic_key
 
-                result = subprocess.run(
-                    ["bash", "-c", "source ~/.bash_profile 2>/dev/null && echo $ANTHROPIC_API_KEY"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.stdout.strip():
-                    os.environ["ANTHROPIC_API_KEY"] = result.stdout.strip()
-                    print("✓ Loaded ANTHROPIC_API_KEY from ~/.bash_profile")
-            except Exception as e:
-                print(f"Note: Could not load ANTHROPIC_API_KEY from bash_profile: {e}")
+        resolved = resolve_anthropic_key()
+        if resolved:
+            os.environ["ANTHROPIC_API_KEY"] = resolved
 
         return ChatAnthropic(
             model=model,

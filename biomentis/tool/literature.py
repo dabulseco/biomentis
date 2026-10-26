@@ -441,7 +441,12 @@ def advanced_web_search_claude(
     """
     import random
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    from biomentis.config import resolve_anthropic_key
+
+    # Not `os.getenv` — a stale exported key would shadow the one in `.env`,
+    # and an unstripped quoted/newline-padded value produces a 401 that looks
+    # identical to a revoked key. See `resolve_anthropic_key`.
+    api_key = resolve_anthropic_key()
 
     # Explicit opt-out: never touch a paid API for web search.
     if os.getenv("BIOMENTIS_WEB_SEARCH", "").strip().lower() in {"keyless", "free", "local"}:
@@ -460,16 +465,16 @@ def advanced_web_search_claude(
     except ImportError:
         return _advanced_web_search_fallback(query, reason="the 'anthropic' package is not installed")
 
-    try:
-        from biomentis.config import default_config
-
-        model = default_config.llm
-    except ImportError:
-        model = "claude-4-sonnet-latest"
+    # This tool must name an *Anthropic* model, which the chat model may not be.
+    # It previously used `default_config.llm` unconditionally, so running the
+    # chat on Ollama sent an Ollama model id (e.g. "gpt-oss:120b") to Anthropic
+    # and drew a 404 — which lands in the same silent-degradation path as the
+    # 401 and is just as hard to read.
+    model = _resolve_web_search_model()
 
     client = anthropic.Anthropic(api_key=api_key)
     tool_def = {
-        "type": "web_search_20250305",
+        "type": _WEB_SEARCH_TOOL_TYPE,
         "name": "web_search",
         "max_uses": max_searches,
     }
@@ -505,13 +510,70 @@ def advanced_web_search_claude(
             # burning ~15s of backoff to arrive at the same 401. Bail out to
             # the keyless path immediately instead.
             if _is_non_retryable_anthropic_error(e):
-                return _advanced_web_search_fallback(query, reason=f"Anthropic rejected the request ({e})")
+                return _advanced_web_search_fallback(query, reason=_classify_anthropic_failure(e), detail=str(e))
             if attempt < max_retries:
                 time.sleep(delay)
                 delay *= 2
                 continue
-            print(f"Error performing web search after {max_retries} attempts: {e}")
-            return _advanced_web_search_fallback(query, reason=f"Anthropic web_search failed {max_retries}x ({e})")
+            return _advanced_web_search_fallback(
+                query,
+                reason=f"Anthropic web search failed after {max_retries} attempts",
+                detail=str(e),
+            )
+
+
+# The chat model can be an Ollama model, so this tool pins its own Anthropic
+# model. Override with BIOMENTIS_WEB_SEARCH_MODEL if you want a cheaper tier.
+_DEFAULT_WEB_SEARCH_MODEL = "claude-opus-5"
+
+# `web_search_20250305` is the pre-4.6 variant. The dated-2026 variant adds
+# dynamic filtering and is what current models expect; naming the old type
+# against a current model is one more way to land in the fallback path.
+_WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
+
+
+def _resolve_web_search_model() -> str:
+    """Pick the Anthropic model this tool sends its web_search request to.
+
+    Order: `BIOMENTIS_WEB_SEARCH_MODEL`, then the configured chat model *only
+    if* it is itself a Claude model, then the pinned default. The middle case
+    keeps the old behaviour for users already on Anthropic for chat, without
+    letting an Ollama or OpenAI model id leak into an Anthropic request.
+    """
+    override = os.getenv("BIOMENTIS_WEB_SEARCH_MODEL", "").strip()
+    if override:
+        return override
+
+    try:
+        from biomentis.config import default_config
+
+        configured = (default_config.llm or "").strip()
+        if configured.startswith("claude-"):
+            return configured
+    except Exception:
+        pass
+
+    return _DEFAULT_WEB_SEARCH_MODEL
+
+
+def _classify_anthropic_failure(exc: Exception) -> str:
+    """Turn an Anthropic exception into one short, actionable clause.
+
+    The agent sees this string. The full exception — status dict, `request_id`
+    and all — used to be interpolated straight into the tool's return value,
+    which put several lines of API noise into the reasoning trace and told the
+    model nothing it could act on. The detail still goes to the console.
+    """
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+
+    if status == 401 or "authentication_error" in text or "invalid x-api-key" in text:
+        return "the Anthropic API key was rejected (401)"
+    if status == 403 or "permission_error" in text:
+        return "the Anthropic API key lacks permission for web search (403)"
+    if status == 404 or "not_found_error" in text:
+        return "the Anthropic model or endpoint was not found (404)"
+    return "the Anthropic web search request failed"
 
 
 def _is_non_retryable_anthropic_error(exc: Exception) -> bool:
@@ -537,7 +599,27 @@ def _is_non_retryable_anthropic_error(exc: Exception) -> bool:
     )
 
 
-def _advanced_web_search_fallback(query: str, num_results: int = 5, reason: str = "") -> str:
+# Reasons already printed this process. A single agent turn can issue several
+# searches, and a bad key fails all of them identically — printing the same
+# paragraph five times buries anything else on the console.
+_LOGGED_FALLBACK_REASONS: set[str] = set()
+
+
+def _log_fallback_once(reason: str, detail: str = "") -> None:
+    """Print a degraded-search notice the first time each distinct reason occurs.
+
+    The full exception text goes here and nowhere else: the console is for the
+    operator, the returned note is for the model.
+    """
+    if reason in _LOGGED_FALLBACK_REASONS:
+        return
+    _LOGGED_FALLBACK_REASONS.add(reason)
+    print(f"[advanced_web_search_claude] {reason} — using keyless web search.")
+    if detail:
+        print(f"[advanced_web_search_claude]   detail: {detail}")
+
+
+def _advanced_web_search_fallback(query: str, num_results: int = 5, reason: str = "", detail: str = "") -> str:
     """Fallback for `advanced_web_search_claude` when Anthropic is unavailable.
 
     Routes to `keyless_web_search` (free, no API key) and prepends a short note
@@ -549,14 +631,14 @@ def _advanced_web_search_fallback(query: str, num_results: int = 5, reason: str 
     `query_pubmed` for biomedical queries, and respect a per-tool
     fallback-policy config.
     """
-    reason = reason or "Anthropic web_search unavailable"
+    reason = reason or "Anthropic web search is unavailable"
     note = (
         f"[advanced_web_search_claude: {reason} — falling back to a keyless "
         f"DuckDuckGo search (top {num_results} results). Results are plain "
         "search hits, not a multi-round agentic search; use extract_url_content "
         "on the most promising URLs to read further.]\n\n"
     )
-    print(f"[advanced_web_search_claude] {reason} — using keyless web search.")
+    _log_fallback_once(reason, detail)
     try:
         results = keyless_web_search(query, num_results=num_results, language="en")
     except Exception as e:

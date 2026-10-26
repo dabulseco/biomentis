@@ -68,6 +68,18 @@ def test_run_plot_code() -> None:
     _check("isolated from REPL", run_plot_code("print(_persistent_namespace)", out).error is not None)
     _check("no figure reported", "drew no figure" in (run_plot_code("x = 1", out).error or ""))
 
+    steer = run_plot_code("import os\nprint('PNG:/etc/hosts')\nos._exit(0)", out)
+    _check("child cannot steer the png path", steer.png_path is None, repr(steer))
+    os.environ["BIOMENTIS_SENTINEL_KEY"] = "s3cret"
+    leak = run_plot_code("import os\nassert 'BIOMENTIS_SENTINEL_KEY' not in os.environ, 'leaked'", out)
+    _check("parent env not visible in child", leak.error is None or "leaked" not in leak.error, repr(leak))
+    del os.environ["BIOMENTIS_SENTINEL_KEY"]
+    import time
+
+    t0 = time.time()
+    res = run_plot_code("import subprocess, sys\nsubprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\nwhile True: pass", out, timeout=2)
+    _check("timeout with a grandchild returns promptly", time.time() - t0 < 10 and "longer than 2 s" in (res.error or ""), repr(res))
+
 
 def test_show_mode_draws() -> None:
     print("\n[2] show mode draws")
@@ -93,6 +105,11 @@ def test_structure_field() -> None:
     print("\n[5] structure field")
     turn = _ask({"answer": "See it.", "structure": "mini_xray.pdb"}, search_dirs=[FIXTURES])
     _check("resolved from search dirs", turn.structure_path.endswith(".pdb"), turn.structure_path)
+    from biomentis.structures import resolve_structure_source
+
+    absolute = os.path.join(FIXTURES, "mini_xray.pdb")
+    _check("absolute path ignored on the chat path", resolve_structure_source(absolute, None, []) is None)
+    _check("path allowed when asked", bool(resolve_structure_source(absolute, None, [], allow_paths=True)))
     _check("unknown name ignored", _ask({"answer": "x", "structure": "nope.pdb"}).structure_path == "")
 
 

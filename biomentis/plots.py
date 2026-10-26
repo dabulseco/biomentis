@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -69,49 +70,64 @@ class PlotResult:
 
 
 _RUNNER = """
-import sys, uuid
+import sys
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-code, out_dir = sys.argv[1], sys.argv[2]
+code, path = sys.argv[1], sys.argv[2]
 exec(compile(code, "<plot>", "exec"), {"__name__": "__main__"})
 nums = plt.get_fignums()
-if not nums:
-    sys.stdout.write("NOFIG")
-    sys.exit(0)
-import os
-os.makedirs(out_dir, exist_ok=True)
-path = os.path.join(out_dir, "chat-plot-" + uuid.uuid4().hex[:8] + ".png")
-plt.figure(nums[-1]).savefig(path, dpi=120, bbox_inches="tight")
-sys.stdout.write("PNG:" + path)
+if nums:
+    plt.figure(nums[-1]).savefig(path, dpi=120, bbox_inches="tight")
 """
+
+# What the plot child may see of the parent's environment. Everything else,
+# API keys above all, stays out of reach of model-written code.
+_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH")
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, AttributeError, OSError):
+        proc.kill()
 
 
 def run_plot_code(code: str, out_dir: str, timeout: float = 20.0) -> PlotResult:
     """Run matplotlib `code` in a subprocess and save the last open figure.
 
     A fresh interpreter in a fresh temp dir shares nothing with the agent's
-    REPL, so tutor-written code cannot see or disturb the agent's variables.
+    REPL, so tutor-written code cannot see or disturb the agent's variables,
+    nor read the parent's environment. The parent picks the PNG path and
+    accepts only that exact file, whatever the child prints.
     """
     out_dir = os.path.abspath(out_dir)
-    env = dict(os.environ, MPLBACKEND="Agg")
+    png = os.path.join(out_dir, f"chat-plot-{uuid.uuid4().hex[:8]}.png")
     try:
+        os.makedirs(out_dir, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="plotrun-") as cwd:
-            proc = subprocess.run(
-                [sys.executable, "-I", "-c", _RUNNER, code, out_dir],
-                cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout,
+            env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
+            env.update(MPLBACKEND="Agg", MPLCONFIGDIR=cwd)
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", _RUNNER, code, png],
+                cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, start_new_session=True,
             )
-    except subprocess.TimeoutExpired:
-        return PlotResult(error="Plot code took longer than 20 s and was stopped.")
+            try:
+                _, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_group(proc)
+                proc.communicate()
+                return PlotResult(error=f"Plot code took longer than {timeout:g} s and was stopped.")
+            finally:
+                _kill_group(proc)  # no grandchild outlives the run
     except Exception as exc:
         return PlotResult(error=f"{type(exc).__name__}: {exc}")
     if proc.returncode != 0:
-        lines = [ln for ln in (proc.stderr or "").strip().splitlines() if ln.strip()]
+        lines = [ln for ln in (stderr or "").strip().splitlines() if ln.strip()]
         return PlotResult(error=lines[-1] if lines else f"Plot code exited with status {proc.returncode}.")
-    out = (proc.stdout or "").strip()
-    marker = out.rfind("PNG:")
-    if marker >= 0 and os.path.exists(out[marker + 4 :]):
-        return PlotResult(png_path=out[marker + 4 :])
+    if os.path.isfile(png):
+        return PlotResult(png_path=png)
     return PlotResult(error="The code ran but drew no figure.")
 
 

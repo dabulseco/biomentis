@@ -427,12 +427,15 @@ def resolve_structure_reason(
     run_id: str | None,
     search_dirs: list[str],
     source_db: str = "agent",
+    allow_paths: bool = True,
 ) -> tuple[str | None, str]:
     """Turn a PDB ID, file path/name, or SMILES string into a structure file.
 
     Returns (path, "") on success, or (None, reason). A bare file name with a
     structure extension is looked up in `search_dirs` (knowledge-base and upload
-    folders) when no such file exists as given. Never raises.
+    folders) when no such file exists as given. With `allow_paths=False` an
+    existing file path is never opened: only bare names in `search_dirs`, PDB IDs
+    and SMILES resolve. Never raises.
     """
     src = source.strip() if isinstance(source, str) else ""
     if not src:
@@ -448,7 +451,7 @@ def resolve_structure_reason(
                 return None, result.get("error") or f"PDB entry {src.upper()} could not be downloaded"
             return os.path.join(artifact_dir, artifacts[0]["path"]), ""
 
-        found = src if os.path.isfile(src) else None
+        found = src if allow_paths and os.path.isfile(src) else None
         if found is None and format_for_path(src) != "unknown" and os.path.basename(src) == src:
             for directory in search_dirs or []:
                 candidate = os.path.join(directory, src)
@@ -472,6 +475,12 @@ def resolve_structure_reason(
         return None, f"{type(exc).__name__}: {exc}"
 
 
-def resolve_structure_source(source: str, run_id: str | None, search_dirs: list[str]) -> str | None:
-    """Path of the structure file for `source`, or None when it cannot be resolved."""
-    return resolve_structure_reason(source, run_id, search_dirs, source_db="chat")[0]
+def resolve_structure_source(
+    source: str, run_id: str | None, search_dirs: list[str], allow_paths: bool = False
+) -> str | None:
+    """Path of the structure file for `source`, or None when it cannot be resolved.
+
+    Built for text a model wrote, so file paths are refused by default; see
+    `resolve_structure_reason`.
+    """
+    return resolve_structure_reason(source, run_id, search_dirs, source_db="chat", allow_paths=allow_paths)[0]

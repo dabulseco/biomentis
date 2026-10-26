@@ -59,15 +59,17 @@ def _build_model_choices() -> list[tuple[str, str]]:
 
 
 def _default_selection(choices: list[tuple[str, str]]) -> tuple[str, str] | None:
-    """Pick the initial dropdown selection. Prefers the first Ollama model;
-    falls back to whatever default_config resolved to, or the first choice."""
+    """Pick the initial dropdown selection.
+
+    A model named in BIOMNI_LLM (with BIOMNI_SOURCE, if set) wins when it is
+    available; otherwise the first Ollama model, otherwise the first choice.
+    """
     if not choices:
         return None
-    if choices and choices[0][0] == "Ollama":
-        return choices[0]
-    if default_config.llm and default_config.source:
+    configured = os.getenv("BIOMNI_LLM") or os.getenv("BIOMNI_LLM_MODEL")
+    if configured:
         for c in choices:
-            if c[1] == default_config.llm and c[0] == default_config.source:
+            if c[1] == configured and (not default_config.source or c[0] == default_config.source):
                 return c
     return choices[0]
 
@@ -96,7 +98,8 @@ with st.sidebar:
         index=default_index,
         format_func=lambda i: labels[i],
         key="biomni_model_idx",
-        help="First Ollama model is selected by default. Pull more with `ollama pull <name>`.",
+        help="Set the default with BIOMNI_LLM in .env; otherwise the first Ollama model. "
+        "Pull more with `ollama pull <name>`.",
     )
     selected_source, selected_model = choices[selected_idx]
 

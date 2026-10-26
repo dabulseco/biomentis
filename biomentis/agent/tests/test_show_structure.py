@@ -23,6 +23,8 @@ What these tests pin down:
   12. render_entry draws a structure with render_structure
   13. The tool description lists show_structure with one required `source`
   14. The execute node clears the run id after each execution
+  15. Tutor: an uploaded structure starts no step; the roadmap comes from the plan
+  16. Tutor: plots and structures join the current step with no card or pause
 
 Run with:
     python -m biomentis.agent.tests.test_show_structure
@@ -437,6 +439,85 @@ def test_execute_resets_run_id():
     _check("reset in a finally after running code", 0 <= i_try < i_run < i_finally < i_reset, f"{i_try} {i_run} {i_finally} {i_reset}")
 
 
+# --- Tutor path -------------------------------------------------------------
+
+
+def _drive_tutor(events: list) -> tuple[list, list, list]:
+    """Run `_advance_run_live` to exhaustion over scripted events.
+
+    Returns (yielded events, roadmap source events, card source events). The
+    LLM-backed roadmap/card builders are replaced by recorders.
+    """
+    from biomentis import ui_tutor
+
+    roadmaps: list = []
+    cards: list = []
+    saved = (
+        ui_tutor._generate_roadmap_for_run,
+        ui_tutor._generate_or_get_card,
+        ui_tutor._log_event_seen,
+        ui_tutor._log_advance,
+        ui_tutor._record_run_snapshot,
+    )
+    ui_tutor._generate_roadmap_for_run = lambda ev, run, tutor: roadmaps.append(ev) or SimpleNamespace()
+    ui_tutor._generate_or_get_card = lambda ev, run, tutor: cards.append(ev) or None
+    ui_tutor._log_event_seen = lambda *a, **k: None
+    ui_tutor._log_advance = lambda *a, **k: None
+    ui_tutor._record_run_snapshot = lambda *a, **k: None
+    saved_roadmap_event = ui_tutor._make_roadmap_event
+    ui_tutor._make_roadmap_event = lambda roadmap: SimpleNamespace(type="roadmap")
+    run = {"gen": iter(events), "events": [], "run_id": "r1", "step_id": 0, "paused_at": None, "roadmap_shown": False}
+    out: list = []
+    try:
+        while run.get("phase") != "done":
+            out.extend(ui_tutor._advance_run_live(run, tutor=SimpleNamespace()))
+    finally:
+        (
+            ui_tutor._generate_roadmap_for_run,
+            ui_tutor._generate_or_get_card,
+            ui_tutor._log_event_seen,
+            ui_tutor._log_advance,
+            ui_tutor._record_run_snapshot,
+        ) = saved
+        ui_tutor._make_roadmap_event = saved_roadmap_event
+    return out, roadmaps, cards
+
+
+def test_tutor_upload_does_not_start_a_step():
+    print("\n[15] Tutor: an uploaded structure is not a step; the roadmap comes from the plan")
+    from biomentis.ui_core import UIEvent
+
+    upload = UIEvent(type="file", file_kind="structure", title="🧬 my_upload.pdb", file_path=XRAY_COPY)
+    plan = UIEvent(type="reasoning", title="🤔 Reasoning", content="1. Fetch the structure\n2. Inspect it")
+    out, roadmaps, cards = _drive_tutor([upload, plan])
+    _check("roadmap built from the plan", roadmaps == [plan], f"{[getattr(e, 'title', None) for e in roadmaps]}")
+    _check("no card for the upload", upload not in cards and cards == [plan], f"{[getattr(e, 'title', None) for e in cards]}")
+    pauses = [e for e in out if getattr(e, "type", None) == "paused"]
+    _check("one pause, for the plan only", len(pauses) == 1, f"{len(pauses)}")
+    _check("upload yielded before the pause", out.index(upload) < out.index(pauses[0]) if pauses else False, "")
+    _check("upload is ungrouped (no step)", getattr(upload, "step_id", None) is None, f"{getattr(upload, 'step_id', None)}")
+    _check("plan is step 1", getattr(plan, "step_id", None) == 1, f"{getattr(plan, 'step_id', None)}")
+
+
+def test_tutor_plot_joins_its_step():
+    print("\n[16] Tutor: a plot / structure joins the current step with no card or pause")
+    from biomentis.ui_core import UIEvent
+
+    code = UIEvent(type="code", content="plt.plot([1, 2])", language="python", title="🛠️ Executing code...")
+    plot = UIEvent(type="file", file_kind="plot", title="📈 Plot", file_path="/tmp/plot-001.png")
+    held = UIEvent(type="file", file_kind="plot_withheld", title="📈 Plot", file_path="/tmp/plot-002.png")
+    mol = UIEvent(type="file", file_kind="structure", title="🧬 6NK5.pdb", file_path=XRAY)
+    image = UIEvent(type="file", file_kind="image", title="🖼️ Image Preview", file_path="/tmp/x.png")
+    out, roadmaps, cards = _drive_tutor([code, plot, held, mol, image])
+    _check("plot shares the code step's step_id", getattr(plot, "step_id", None) == getattr(code, "step_id", "x") == 1, "")
+    _check("withheld plot and structure too", held.step_id == 1 and mol.step_id == 1, f"{held.step_id} {mol.step_id}")
+    _check("run_id carried", plot.run_id == "r1" and mol.run_id == "r1", "")
+    _check("no card for visuals", not any(e in cards for e in (plot, held, mol)), f"{[e.title for e in cards]}")
+    _check("a plain image still gets its own step and card", image.step_id == 2 and image in cards, f"{getattr(image, 'step_id', None)}")
+    pauses = [e for e in out if getattr(e, "type", None) == "paused"]
+    _check("two pauses: code, image", len(pauses) == 2, f"{len(pauses)}")
+
+
 def run_all() -> int:
     print("=" * 60)
     print("show_structure / plot guidance tests")
@@ -456,6 +537,8 @@ def run_all() -> int:
         test_render_entry_branch,
         test_tool_description,
         test_execute_resets_run_id,
+        test_tutor_upload_does_not_start_a_step,
+        test_tutor_plot_joins_its_step,
     ):
         try:
             test()

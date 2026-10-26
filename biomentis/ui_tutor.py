@@ -58,6 +58,21 @@ from typing import Any
 # pass-through — they don't carry new pedagogical content.
 _INSTRUCTION_BEARING = {"reasoning", "code", "observation", "solution", "file", "summary"}
 
+# File events that are visuals of a step, not steps of their own: a figure the
+# step's code drew, or a molecule it showed. They get no pause, no teaching
+# card and never trigger the roadmap; they join the current step's box
+# (`step_id` of the step in progress). An uploaded structure arrives before any
+# step and so renders ungrouped. Plain images and PDFs are unaffected.
+_STEP_VISUAL_FILE_KINDS = {"plot", "plot_withheld", "structure"}
+
+
+def _is_step_visual(event) -> bool:
+    return event.type == "file" and getattr(event, "file_kind", None) in _STEP_VISUAL_FILE_KINDS
+
+
+def _is_instruction_bearing(event) -> bool:
+    return event.type in _INSTRUCTION_BEARING and not _is_step_visual(event)
+
 # Sub-captions for the per-mode expanders. They exist because
 # "prerequisites" means something different under each lens, and a student
 # reading both boxes needs to know which is which at a glance.
@@ -492,8 +507,15 @@ def _advance_run_live(run: dict, tutor):
         # This must happen before the yield, not after, since the raw
         # event has already left this generator by the time we'd
         # otherwise know its step_id.
-        if event.type in _INSTRUCTION_BEARING:
+        if _is_instruction_bearing(event):
             run["step_id"] += 1
+            try:
+                event.step_id = run["step_id"]
+                event.run_id = run["run_id"]
+            except Exception:
+                pass
+        elif _is_step_visual(event) and run["step_id"] > 0:
+            # A figure or molecule belongs to the step in progress.
             try:
                 event.step_id = run["step_id"]
                 event.run_id = run["run_id"]
@@ -502,7 +524,7 @@ def _advance_run_live(run: dict, tutor):
 
         yield event
 
-        if event.type not in _INSTRUCTION_BEARING:
+        if not _is_instruction_bearing(event):
             continue
 
         try:

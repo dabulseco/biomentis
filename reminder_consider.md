@@ -32,17 +32,60 @@ You said your cost concern with Anthropic is "minimize it — use it only when t
 
 So the cost is bounded, but the LLM's behavior — not yours — is what determines the spend. A daily cap is the right defense.
 
-## 2. Keep the end of long step output, not just the start
+## Notes seen in agent runs (added 2026-10-28)
 
-**Status today (2026-10-28):** when a step prints more than 10,000 characters, the agent passes only the first 10,000 back to the model, behind the note "The output is too long to be added to context. Here are the first 10K characters..." (`biomentis/agent/a1.py`, execute node). The code itself ran in full, so files, variables and plots are intact.
+Items 2–5 come from notes that show up in the agent's step observations. Each one lists what the note means, how much it matters, and the options to choose from. **Magnitude** uses three levels:
 
-**Why this is worth revisiting:** results and summaries usually print last (a best match, a p-value, a final table row). When a step prints a big table first, the model never sees the part that matters, and either guesses or spends a step reprinting it.
+- **Low:** costs a wasted step at most; answers are not affected.
+- **Medium:** can occasionally make an answer less complete or less accurate.
+- **High:** regularly breaks runs or gives wrong answers. None of these items is high today.
 
-**What "implementing" this would look like:**
+## 2. "The output is too long to be added to context. Here are the first 10K characters..."
 
-- [ ] Keep the first ~6K and last ~4K characters, joined by a marker such as `… 12,345 characters omitted …`, and reword the note to match.
-- [ ] Update `_TRUNCATED_RE` in `biomentis/eval/step_trace.py` if the note's wording changes.
-- [ ] Add a check to a test suite (e.g. `test_context_budget`) that a long output keeps both ends.
+**What it means:** a step printed more than 10,000 characters, so the agent passed only the first 10,000 back to the model (`biomentis/agent/a1.py`, execute node). The code ran in full, so files, variables and plots are intact. It isn't an error.
 
-## 3. Other items TBD
+**Magnitude: Medium.** Results and summaries usually print last (a best match, a p-value, a final table row). When a step prints a big table first, the model never sees the part that matters, and it either guesses or spends a step reprinting it. Usually the model notices and prints a smaller summary next step, which costs a step but not accuracy.
+
+**Options:**
+
+- [ ] **A. Leave it.** No work. The occasional extra step remains.
+- [ ] **B. Keep both ends (recommended).** Keep the first ~6K and last ~4K characters, joined by a marker such as `… 12,345 characters omitted …`, and reword the note to match. Small change: also update `_TRUNCATED_RE` in `biomentis/eval/step_trace.py`, and add a test (e.g. in `test_context_budget`) that a long output keeps both ends.
+
+## 3. "The model's reply had no <execute> or <solution> tag — asking it to try again."
+
+**What it means:** the model's reply had neither code to run (`<execute>`) nor a final answer (`<solution>`), so the agent sent a short correction asking for one. Two in a row end the run ("Execution terminated due to repeated parsing errors"). A safety refusal ends the run right away.
+
+**Magnitude: Low, already mostly fixed.** Each note costs one extra model call; answers aren't affected. Fixes already in place: DeepSeek's turns are taken from its thinking when the reply is empty, Claude's tool-call syntax is converted to `<execute>`, and the correction message was reworded so Claude doesn't refuse it. What's left is mostly DeepSeek spending its whole 8,192-token output allowance on thinking during the self-critique round (about 2 notes per DeepSeek design run in the 2026-10-26 comparison).
+
+**Options:**
+
+- [ ] **A. Leave it.** The cap stops loops, and runs finish.
+- [ ] **B. Give DeepSeek more output room (`num_predict`) in the self-critique round.** Small change. Should remove most remaining notes for DeepSeek; slightly longer calls.
+- [ ] **C. Track the count per model** in the run summary, to see whether it gets worse with a new model before deciding.
+
+## 4. "Error: Protocols.io access token is not configured. Set PROTOCOLS_IO_ACCESS_TOKEN ..."
+
+**What it means:** the model called `search_protocols` or `get_protocol_details` (`biomentis/tool/protocols.py`), which need a protocols.io API token, and none is set in `.env`. Not a bug.
+
+**Magnitude: Low.** Only that step fails; the model moves on to the local protocol library (`biomentis/tool/protocols/`: Addgene, Thermo Fisher) or web and literature search. Answers to lab-methods questions may be less specific when the best protocol is only on protocols.io. Mostly shows up on lab-methods questions.
+
+**Options:**
+
+- [ ] **A. Leave it.** One wasted step when a model tries the tool.
+- [ ] **B. Add a token.** Make a free protocols.io account, generate an access token in its developer settings, add `PROTOCOLS_IO_ACCESS_TOKEN=...` to `.env` yourself (never commit it), and restart the app. No code change.
+- [ ] **C. Hide the two tools when no token is set**, so the model never tries them. Small code change; the tools come back automatically once a token is added.
+
+## 5. "Error: No module named 'scholarly'"
+
+**What it means:** the model called `query_scholar` (`biomentis/tool/literature.py`), which searches Google Scholar through the `scholarly` package. That package isn't installed in the `biomni` conda env.
+
+**Magnitude: Low.** Only that step fails; the model switches to PubMed (`query_pubmed`), arXiv (`query_arxiv`) or web search, which cover most biology literature. Answers are only affected when a paper is findable solely through Google Scholar, which is rare.
+
+**Options:**
+
+- [ ] **A. Leave it.** One wasted step when a model tries the tool.
+- [ ] **B. Install it:** `pip install scholarly==1.7.11` in the `biomni` env (the version the old env files pin). Quick, but unreliable: Google Scholar has no official API, `scholarly` scrapes it through free proxies, and Scholar often blocks that with CAPTCHAs, so the tool would fail some of the time with a different error.
+- [ ] **C. Remove `query_scholar` from the model's tool list (recommended).** Small change. Stops the wasted step without adding a flaky dependency.
+
+## 6. Other items TBD
 _(none yet — add here as you think of them, promote to `recommend.md` when ready to act)_

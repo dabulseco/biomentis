@@ -114,7 +114,9 @@ OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 BIOMNI_PATH=/path/to/data                   # default: ./data
 BIOMNI_TIMEOUT_SECONDS=1200                 # default: 600
 BIOMNI_LLM=model_name                       # default: "auto" (picks first local Ollama model)
-BIOMNI_TEMPERATURE=0.7                      # default: 0.7
+BIOMNI_TEMPERATURE=0.2                      # default: 0.2 — agent loop (code, tools, answers)
+BIOMNI_CREATIVE_TEMPERATURE=0.7             # default: 0.7 — the agent's self-critique only
+BIOMENTIS_OLLAMA_NUM_PREDICT=32768          # default: 8192 — max tokens per Ollama reply
 BIOMNI_USE_TOOL_RETRIEVER=true              # default: true
 BIOMNI_SOURCE=Anthropic                     # default: auto-detected from model name
 BIOMNI_DISABLE_LOCAL_FALLBACK=false         # default: false
@@ -134,13 +136,28 @@ default_config.path = "./data"
 default_config.timeout_seconds = 600
 default_config.llm = "auto"                       # "auto" → first local Ollama model
 default_config.source = None                      # auto-detected from model name
-default_config.temperature = 0.7
+default_config.temperature = 0.2                  # agent loop
+default_config.creative_temperature = 0.7         # self-critique
 default_config.use_tool_retriever = True
 default_config.commercial_mode = False
 default_config.base_url = None                    # for custom OpenAI-compatible servers
 default_config.api_key = None
 default_config.protocols_io_access_token = None
 ```
+
+## Answer quality and reproducibility (Streamlit sidebar)
+
+These apply from the next run; the "Run quality" line under each answer records them.
+
+| Setting | Default | What it does |
+|---|---|---|
+| Agent temperature | `BIOMNI_TEMPERATURE` (0.2) | 0 is the most repeatable. Claude models ignore it. |
+| Self-critique temperature | `BIOMNI_CREATIVE_TEMPERATURE` (0.7) | Higher finds more varied gaps; lower is more repeatable. |
+| Self-critique rounds | 2 | Reviews by the agent's own model; each checks that numbers were computed in code. 0 turns it off. |
+| Require evidence before answering | on | Sends an answer back (at most twice) until the run has a literature source, a calculation in code and a figure. |
+| Independent review | the Critic model (Tutor → Self-improvement) | A different model reviews the final answer against the run's code output and sources. "Needs rework" triggers one correction round and a re-review; both are shown under the answer. Off when the Critic is "stub". |
+
+Temperature 0 makes a model pick its most likely next token, so repeated runs mostly match; it is not a guarantee. Cloud-hosted models can still vary between runs, and every run that searches the literature or the web can get different results back.
 
 ## Important Notes
 

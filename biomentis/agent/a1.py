@@ -107,6 +107,14 @@ from biomentis.tool.tool_registry import ToolRegistry
 from biomentis.run_journal import RunJournal, journaled
 from biomentis.plots import plot_guidance, save_plot_pngs
 from biomentis.structures import default_artifact_dir, set_current_run_id
+from biomentis.independent_review import (
+    REVIEW_SYSTEM_PROMPT,
+    Review,
+    build_review_prompt,
+    feedback_for_agent,
+    parse_review,
+    review_inputs,
+)
 from biomentis.run_quality import MAX_EVIDENCE_ASKS, evidence_nudge, missing_evidence, run_evidence
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
@@ -624,6 +632,27 @@ class A1:
         )
         # Force a rebuild on next access so the hot client follows the switch.
         self._creative_llm = None
+
+    def set_temperatures(self, temperature: float, creative_temperature: float) -> bool:
+        """Change the sampling temperatures, rebuilding the clients if they changed.
+
+        `temperature` is the agent loop's (code, tools, answers);
+        `creative_temperature` the self-critique's. Returns True when anything
+        changed, so a caller holding the old client (the tutor) can re-thread it.
+        """
+        if (temperature, creative_temperature) == (self.temperature, self.creative_temperature):
+            return False
+        self.temperature = temperature
+        self.creative_temperature = creative_temperature
+        if getattr(self, "_llm_model", None):
+            self.set_model(self._llm_model, source=self._llm_source)
+        self._creative_llm = None
+        return True
+
+    def reset_review(self) -> None:
+        """Start a run with no independent reviews done."""
+        self.review_count = 0
+        self.run_reviews: list[dict] = []
 
     def add_tool(self, api):
         """Add a new tool to the agent's tool registry and make it available for retrieval.
@@ -1725,6 +1754,7 @@ Each library is listed with its description to help you understand its functiona
         # priorities before each query), so resetting here also gives the
         # same "one self-critic pass per task" semantics as `go`/`go_stream`.
         self.critic_count = 0
+        self.reset_review()
 
         # Get data lake content
         data_lake_path = self.path + "/data_lake"
@@ -2276,6 +2306,44 @@ Each library is listed with its description to help you understand its functiona
 
             return state
 
+        def independent_review(state: AgentState) -> AgentState:
+            """A second model checks the answer; one correction round if it needs rework.
+
+            See biomentis.independent_review. Runs only when a review model is
+            set (`self.review_llm`), the run ended on a <solution>, and fewer
+            than two reviews were done. The first "needs rework" verdict sends
+            the problems back to the agent; the review after that correction
+            is reported, whatever it says.
+            """
+            state["next_step"] = "end"
+            reviewer_llm = getattr(self, "review_llm", None)
+            last = state["messages"][-1].content if state["messages"] else ""
+            if reviewer_llm is None or self.review_count >= 2:
+                return state
+            if not isinstance(last, str) or not re.search(r"<solution>.*?</solution>", last, re.DOTALL | re.IGNORECASE):
+                return state
+            reviewer = getattr(self, "review_model_name", "") or get_llm_display_name(reviewer_llm)
+            prompt = build_review_prompt(review_inputs(state["messages"]))
+            print(f"independent review {self.review_count + 1} by {reviewer}...")
+            try:
+                reply = _invoke_llm_with_retry(
+                    reviewer_llm,
+                    [SystemMessage(content=REVIEW_SYSTEM_PROMPT), HumanMessage(content=prompt)],
+                )
+                review = parse_review(_reply_text(reply))
+            except Exception as exc:  # a failed review must not cost the answer
+                review = Review(error=f"the review call failed ({type(exc).__name__}: {exc})")
+            self.review_count += 1
+            self.run_reviews.append(
+                {"review": review, "reviewer": reviewer, "after_correction": self.review_count > 1}
+            )
+            print(f"independent review: {review.verdict or review.error}")
+            # One correction round, and not when the context is already full.
+            if self.review_count == 1 and review.needs_rework and not getattr(self, "_context_wrap_ups", 0):
+                state["messages"].append(HumanMessage(content=feedback_for_agent(review, reviewer)))
+                state["next_step"] = "generate"
+            return state
+
         # Create the workflow
         workflow = StateGraph(AgentState)
 
@@ -2298,15 +2366,23 @@ Each library is listed with its description to help you understand its functiona
             workflow.add_conditional_edges(
                 "self_critic",
                 routing_function_self_critic,
-                path_map={"generate": "generate", "end": END},
+                path_map={"generate": "generate", "end": "independent_review"},
             )
         else:
             # Add conditional edges
             workflow.add_conditional_edges(
                 "generate",
                 routing_function,
-                path_map={"execute": "execute", "generate": "generate", "end": END},
+                path_map={"execute": "execute", "generate": "generate", "end": "independent_review"},
             )
+        # Every run that ends passes the reviewer, which only acts on a real
+        # answer and only when a review model is set.
+        workflow.add_node("independent_review", independent_review)
+        workflow.add_conditional_edges(
+            "independent_review",
+            lambda state: "generate" if state.get("next_step") == "generate" else "end",
+            path_map={"generate": "generate", "end": END},
+        )
         # Back to generate, unless the repeated-step guard ended the run. Not
         # via self_critic: its feedback would only restart the loop.
         workflow.add_conditional_edges(
@@ -2515,6 +2591,7 @@ Each library is listed with its description to help you understand its functiona
         self.user_task = prompt
         self._context_wrap_ups = 0
         self._reset_step_guard()
+        self.reset_review()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
@@ -2571,6 +2648,7 @@ Each library is listed with its description to help you understand its functiona
         self.user_task = prompt
         self._context_wrap_ups = 0
         self._reset_step_guard()
+        self.reset_review()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)

@@ -118,6 +118,28 @@ with st.sidebar:
         help="Sends the first answer back (at most twice) until the run has consulted a "
         "literature source, computed its numbers in code and made a figure.",
     )
+    # Temperatures, for reproducibility. 0 is the most repeatable (the model
+    # always takes its most likely next token); higher values vary more from
+    # run to run. Read below when the agent is configured.
+    _temperature_steps = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
+    st.select_slider(
+        "Agent temperature",
+        options=_temperature_steps,
+        value=default_config.temperature if default_config.temperature in _temperature_steps else 0.2,
+        key="biomentis_temperature",
+        help="Code, tool calls and answers. 0 gives the most repeatable runs. Default from "
+        "BIOMNI_TEMPERATURE in .env (0.2 if unset). Claude models ignore it.",
+    )
+    st.select_slider(
+        "Self-critique temperature",
+        options=_temperature_steps,
+        value=default_config.creative_temperature
+        if default_config.creative_temperature in _temperature_steps
+        else 0.7,
+        key="biomentis_creative_temperature",
+        help="The agent's own review of its answer. Higher finds more varied gaps; lower is more "
+        "repeatable. Default from BIOMNI_CREATIVE_TEMPERATURE (0.7 if unset).",
+    )
     st.segmented_control(
         "Self-critique rounds",
         options=[0, 1, 2, 3],
@@ -218,6 +240,18 @@ tutor.load_priorities(user_id)
 # one — which would mutate the agent out from under the worker driving it.
 # Between turns there is nothing to disturb, which is when it matters anyway.
 if not st.session_state.get("biomni_run_active"):
+    # Temperatures from the sidebar; the tutor follows the rebuilt client.
+    if agent.set_temperatures(
+        st.session_state.get("biomentis_temperature", default_config.temperature),
+        st.session_state.get("biomentis_creative_temperature", default_config.creative_temperature),
+    ):
+        tutor.set_llm(agent.llm)
+    # The independent reviewer is the Critic model picked under Tutor →
+    # Self-improvement; with the Critic off ("stub") there is no review.
+    _critic = tutor.critic
+    _reviewing = _critic is not None and _critic.model_name != "stub" and _critic.llm is not None
+    agent.review_llm = _critic.llm if _reviewing else None
+    agent.review_model_name = _critic.model_name if _reviewing else ""
     # A deselected segmented control reads None; treat it as the default.
     _critique_rounds = st.session_state.get("biomentis_critique_rounds")
     _critique_rounds = 2 if _critique_rounds is None else _critique_rounds

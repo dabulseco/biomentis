@@ -24,7 +24,14 @@ from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
-from biomentis.run_quality import EVIDENCE_ITEMS, EVIDENCE_NUDGE_PREFIX, format_quality_summary, run_evidence
+from biomentis.independent_review import format_review
+from biomentis.run_quality import (
+    EVIDENCE_ITEMS,
+    EVIDENCE_NUDGE_PREFIX,
+    REVIEW_FEEDBACK_PREFIX,
+    format_quality_summary,
+    run_evidence,
+)
 from biomentis.utils import NOT_DONE_NUDGE, PARSE_ERROR_NUDGE
 
 SUPPORTED_FILE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".pdf")
@@ -237,6 +244,10 @@ def stream_agent_events(
     reset_step_guard = getattr(agent, "_reset_step_guard", None)
     if callable(reset_step_guard):
         reset_step_guard()
+    # And the independent reviewer: no reviews done yet this run.
+    reset_review = getattr(agent, "reset_review", None)
+    if callable(reset_review):
+        reset_review()
 
     # Same reasoning for the step tracer, and it had been missed. `start_run`
     # is what gives the tracer a file to write to; every `record_generate` /
@@ -334,6 +345,11 @@ def stream_agent_events(
                 yield UIEvent(
                     type="status",
                     content="The model gave an answer that says the work isn't finished — asking it to continue.",
+                )
+            elif content.startswith(REVIEW_FEEDBACK_PREFIX):
+                yield UIEvent(
+                    type="status",
+                    content="The independent review found problems — sending them back for one correction round.",
                 )
             elif content.startswith(EVIDENCE_NUDGE_PREFIX):
                 labels = ", ".join(EVIDENCE_ITEMS[key][0] for key in EVIDENCE_ITEMS if EVIDENCE_ITEMS[key][1] in content)
@@ -505,18 +521,45 @@ def stream_agent_events(
         except Exception as exc:
             print(f"[step_trace] could not close run: {exc}")
 
+    for entry in getattr(agent, "run_reviews", None) or []:
+        try:
+            title, body = format_review(entry["review"], entry["reviewer"], entry["after_correction"])
+            yield UIEvent(type="status", channel="main", title=title, content=body)
+        except Exception as exc:
+            print(f"[independent_review] could not show a review: {exc}")
+
     if s and s.get("messages"):
         try:
             yield UIEvent(
                 type="status",
                 channel="main",
                 title="📊 Run quality",
-                content=format_quality_summary(run_evidence(s["messages"])),
+                content=format_quality_summary(run_evidence(s["messages"]), run_settings(agent)),
             )
         except Exception as exc:  # the summary must never cost the answer
             print(f"[run_quality] could not summarize the run: {exc}")
 
     yield UIEvent(type="complete", content="👈 Returning the result to the main interface...", title="🔄 Complete")
+
+
+def run_settings(agent: Any) -> str:
+    """Model, temperatures and reviewer of a run, for comparing runs."""
+    llm = getattr(agent, "llm", None)
+    if llm is None:
+        return ""
+    parts = [get_llm_display_name(llm)]
+    temperature = getattr(agent, "temperature", None)
+    if temperature is not None:
+        parts.append(f"temperature {temperature:g}")
+    if getattr(agent, "self_critic", False):
+        creative = getattr(agent, "creative_temperature", None)
+        parts.append(f"self-critique temperature {creative:g}" if creative is not None else "self-critique on")
+    reviewer = getattr(agent, "review_llm", None)
+    if reviewer is not None:
+        parts.append("independent review by " + (getattr(agent, "review_model_name", "") or get_llm_display_name(reviewer)))
+    else:
+        parts.append("independent review off")
+    return " · ".join(parts)
 
 
 def transcript_entry_for_event(

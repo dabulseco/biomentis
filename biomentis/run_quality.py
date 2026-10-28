@@ -42,6 +42,9 @@ PROTOCOL_TOOLS = ("read_local_protocol", "list_local_protocols", "search_protoco
 
 # The critic's feedback starts with this (see A1.execute_self_critic).
 CRITIC_FEEDBACK_PREFIX = "Wait... this is not enough to solve the task."
+# The independent reviewer's findings, sent back to the agent, start with this
+# (see biomentis.independent_review).
+REVIEW_FEEDBACK_PREFIX = "An independent reviewer checked your final answer"
 
 MAX_EVIDENCE_ASKS = 2
 EVIDENCE_NUDGE_PREFIX = "Before this can be the final answer, the run still needs:"
@@ -64,6 +67,7 @@ class RunEvidence:
     unfinished_sent_back: int = 0
     critique_rounds: int = 0
     evidence_asks: int = 0
+    review_corrections: int = 0
 
 
 def _is_loop_message(content: str) -> bool:
@@ -74,6 +78,7 @@ def _is_loop_message(content: str) -> bool:
         content in (PARSE_ERROR_NUDGE, NOT_DONE_NUDGE, ANSWER_CONTINUE_NUDGE, WRAP_UP_INSTRUCTION)
         or content.startswith(EVIDENCE_NUDGE_PREFIX)
         or content.startswith(CRITIC_FEEDBACK_PREFIX)
+        or content.startswith(REVIEW_FEEDBACK_PREFIX)
         or content.lstrip().startswith("<observation>")
     )
 
@@ -105,6 +110,8 @@ def run_evidence(messages: list[BaseMessage]) -> RunEvidence:
                 ev.evidence_asks += 1
             elif content.startswith(CRITIC_FEEDBACK_PREFIX):
                 ev.critique_rounds += 1
+            elif content.startswith(REVIEW_FEEDBACK_PREFIX):
+                ev.review_corrections += 1
             # observations are HumanMessages on Claude; fall through for them
             if not content.lstrip().startswith("<observation>"):
                 continue
@@ -172,8 +179,12 @@ def evidence_nudge(missing: list[str]) -> str:
     )
 
 
-def format_quality_summary(ev: RunEvidence) -> str:
-    """One line on how the answer was made, plus a line on what was missing."""
+def format_quality_summary(ev: RunEvidence, settings: str = "") -> str:
+    """One line on how the answer was made, plus lines on what was missing.
+
+    `settings` (model, temperatures, reviewer) is shown as its own line, so
+    runs can be compared for reproducibility.
+    """
 
     def n(count: int, word: str) -> str:
         return f"{count} {word}{'' if count == 1 else 's'}"
@@ -197,7 +208,11 @@ def format_quality_summary(ev: RunEvidence) -> str:
         issues.append(n(ev.unfinished_sent_back, "unfinished answer") + " sent back")
     if ev.evidence_asks:
         issues.append(f"asked {n(ev.evidence_asks, 'time')} for missing evidence")
+    if ev.review_corrections:
+        issues.append(n(ev.review_corrections, "correction round") + " from the independent review")
     lines = ["**How this answer was made:** " + " · ".join(parts)]
+    if settings:
+        lines.append(f"**Settings:** {settings}")
     if issues:
         lines.append("**Along the way:** " + "; ".join(issues))
     missing = missing_evidence(ev)

@@ -1042,6 +1042,37 @@ PARSE_ERROR_NUDGE = (
     "<solution></solution>."
 )
 
+# A final answer that runs into the model's output cap arrives with its
+# `<solution>` open. `generate` used to close the tag and end the run on it: a
+# deepseek-v4.1-flash:cloud workflow answer stopped mid-sentence at exactly
+# 8,192 tokens, half its sections missing, shown as complete (2026-10-28).
+# Now the model is asked to carry on from where it stopped, up to
+# MAX_ANSWER_CONTINUATIONS times; an answer still cut off after that carries
+# ANSWER_CUT_OFF_NOTE so the reader knows.
+MAX_ANSWER_CONTINUATIONS = 2
+ANSWER_CONTINUE_NUDGE = (
+    "Your final answer was cut off by the output limit. Continue it from exactly where it stopped, "
+    "without repeating anything already written, and end with </solution>."
+)
+ANSWER_CUT_OFF_NOTE = (
+    "\n\n---\n**⚠️ This answer is incomplete.** It reached the model's output limit and was cut off here. "
+    "Raise the limit (BIOMENTIS_OLLAMA_NUM_PREDICT for Ollama models) or ask for a shorter answer, then run it again."
+)
+
+
+def hit_output_limit(response) -> bool:
+    """Whether the provider stopped this reply because it reached the output cap.
+
+    Ollama reports `done_reason: "length"`, Anthropic `stop_reason: "max_tokens"`,
+    OpenAI-style clients `finish_reason: "length"`.
+    """
+    meta = getattr(response, "response_metadata", None) or {}
+    return (
+        meta.get("done_reason") == "length"
+        or meta.get("stop_reason") == "max_tokens"
+        or meta.get("finish_reason") == "length"
+    )
+
 
 def truncate_after_first_tag(message: str) -> tuple[str, str]:
     """Cut a model response at the end of its first `</execute>`/`</solution>`.

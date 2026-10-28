@@ -364,8 +364,10 @@ def test_both_llm_call_sites_are_guarded() -> None:
     src = open(path, encoding="utf-8").read()
 
     invocations = src.count("_invoke_llm_with_retry(")
-    # One definition, one call in `generate`, one in `execute_self_critic`.
-    _check("still two call sites", invocations == 3, f"{invocations} occurrences")
+    # One definition; calls in `generate`, in its continuation of a cut-off
+    # answer, and in `execute_self_critic`.
+    _check("still three call sites", invocations == 4, f"{invocations} occurrences")
+    _check("a continued answer fits its request too", "continue_messages, _ = self._fit_request(" in src)
     _check("generate fits its request", "messages, context_fit = self._fit_request(messages)" in src)
     _check("the self-critic fits its request too", "critic_messages, _ = self._fit_request(" in src)
     # The critic is the largest request the graph makes — it re-sends the whole

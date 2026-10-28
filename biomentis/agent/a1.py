@@ -121,7 +121,10 @@ from biomentis.ui_core import (
     ui_event_to_export_entry,
 )
 from biomentis.utils import (
+    ANSWER_CONTINUE_NUDGE,
+    ANSWER_CUT_OFF_NOTE,
     FIRST_CLOSING_TAG_RE,
+    MAX_ANSWER_CONTINUATIONS,
     PARSE_ERROR_NUDGE,
     check_and_download_s3_files,
     clean_message_content,
@@ -145,6 +148,7 @@ from biomentis.utils import (
     textify_api_dict,
     AGENT_STOP_SEQUENCES,
     coerce_invoke_syntax,
+    hit_output_limit,
     truncate_after_first_tag,
     turn_from_reasoning,
 )
@@ -227,6 +231,37 @@ def _observations_as_user_turns(messages: list) -> list:
         else m
         for m in messages
     ]
+
+
+def _reply_text(response) -> str:
+    """The text of a model reply, with Responses-API content blocks joined."""
+    content = response.content
+    if isinstance(content, list):
+        # Concatenate textual parts; ignore tool_use or other non-text blocks
+        text_parts: list[str] = []
+        for block in content:
+            try:
+                if isinstance(block, dict):
+                    btype = block.get("type")
+                    if btype in ("text", "output_text", "redacted_text"):
+                        part = block.get("text") or block.get("content") or ""
+                        if isinstance(part, str):
+                            text_parts.append(part)
+            except Exception:
+                # Be conservative; skip malformed blocks
+                continue
+        return "".join(text_parts)
+    # Fallback to string conversion for legacy content
+    return str(content)
+
+
+def _answer_cut_off(response, msg: str) -> bool:
+    """A `<solution>` left open because the reply reached the output cap."""
+    return (
+        hit_output_limit(response)
+        and re.search(r"<solution>", msg, re.IGNORECASE) is not None
+        and re.search(r"</solution>", msg, re.IGNORECASE) is None
+    )
 
 
 def _is_ollama(llm) -> bool:
@@ -1795,27 +1830,8 @@ Each library is listed with its description to help you understand its functiona
             trace_latency = time.time() - trace_t0
             trace_attempts = LAST_LLM_CALL.get("attempts", 1)
             trace_coerced = False
-
-            # Normalize Responses API content blocks (list of dicts) into a plain string
-            content = response.content
-            if isinstance(content, list):
-                # Concatenate textual parts; ignore tool_use or other non-text blocks
-                text_parts: list[str] = []
-                for block in content:
-                    try:
-                        if isinstance(block, dict):
-                            btype = block.get("type")
-                            if btype in ("text", "output_text", "redacted_text"):
-                                part = block.get("text") or block.get("content") or ""
-                                if isinstance(part, str):
-                                    text_parts.append(part)
-                    except Exception:
-                        # Be conservative; skip malformed blocks
-                        continue
-                msg = "".join(text_parts)
-            else:
-                # Fallback to string conversion for legacy content
-                msg = str(content)
+            trace_usage = dict(getattr(response, "usage_metadata", None) or {})
+            msg = _reply_text(response)
 
             # A thinking model can leave content empty and put the whole turn,
             # tag and all, in its thinking (deepseek-v4.1-flash:cloud did, every
@@ -1828,6 +1844,30 @@ Each library is listed with its description to help you understand its functiona
                     print("took the turn from the model's thinking: its reply had no tag")
                     msg = (msg.strip() + "\n" + salvaged).strip()
                     trace_coerced = True
+
+            # A final answer cut off by the output cap: ask for the rest
+            # rather than ending the run on half an answer.
+            continuations = 0
+            while _answer_cut_off(response, msg) and continuations < MAX_ANSWER_CONTINUATIONS:
+                continuations += 1
+                print(f"the answer hit the output limit; asking the model to continue ({continuations})")
+                # The cut-off answer is now part of the request, so fit it again.
+                continue_messages, _ = self._fit_request(
+                    messages + [AIMessage(content=msg), HumanMessage(content=ANSWER_CONTINUE_NUDGE)]
+                )
+                response = _invoke_llm_with_retry(self.llm, continue_messages, stop_at_first_tag=True)
+                for key, value in (getattr(response, "usage_metadata", None) or {}).items():
+                    if isinstance(value, int):
+                        trace_usage[key] = trace_usage.get(key, 0) + value
+                piece = _reply_text(response)
+                # A model that starts the answer over opens a second tag.
+                piece = re.sub(r"^\s*<solution>", "", piece, flags=re.IGNORECASE)
+                if not piece.strip():
+                    break
+                msg += piece
+            if _answer_cut_off(response, msg):
+                print("the answer is still cut off at the output limit; marking it incomplete")
+                msg += ANSWER_CUT_OFF_NOTE
 
             # Claude can write the turn as a tool call instead of <execute>.
             coerced = coerce_invoke_syntax(msg)
@@ -1968,7 +2008,7 @@ Each library is listed with its description to help you understand its functiona
                 llm_attempts=trace_attempts,
                 coerced_from_markdown=trace_coerced,
                 parse_error=trace_parse_error,
-                usage=dict(getattr(response, "usage_metadata", None) or {}),
+                usage=trace_usage,
                 thinking_chars=len(think_match.group(1)) if think_match else 0,
             )
             return state
@@ -2340,7 +2380,7 @@ Each library is listed with its description to help you understand its functiona
     def _fit_request(self, messages: list[BaseMessage]) -> tuple[list[BaseMessage], Any]:
         """Trim an outgoing request to fit the model's context window.
 
-        Both LLM call sites in the graph go through this. The window fills the
+        Every LLM call in the graph goes through this. The window fills the
         same way every long run: a ~42k-token system prompt, plus an
         observation per execute step that never comes back out. Left
         unwatched, the first symptom is the provider refusing the request and

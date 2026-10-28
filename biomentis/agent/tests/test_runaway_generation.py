@@ -35,6 +35,10 @@ What these tests pin down:
  12.  The correction doesn't ask for the model's "thinking process" (Claude
       refused that as reasoning extraction), and a refusal ends the run with
       a message instead of being asked again
+ 13.  A final answer cut off by the output cap is continued, not ended on;
+      one still cut off after the continuations says it is incomplete
+      (deepseek-v4.1-flash:cloud stopped mid-sentence at 8,192 tokens,
+      2026-10-28)
 
 Run with:
     python -m biomentis.agent.tests.test_runaway_generation
@@ -223,6 +227,8 @@ def test_ollama_client_has_an_output_cap() -> None:
     print("\n[6] the Ollama client carries an output cap")
     from biomentis.llm import OLLAMA_NUM_PREDICT_DEFAULT, get_llm
 
+    # The user's .env may set the cap (a1 loads it on import); test the default without it.
+    saved = os.environ.pop("BIOMENTIS_OLLAMA_NUM_PREDICT", None)
     llm = get_llm("llama3", source="Ollama")
     _check("a default cap is set", llm.num_predict == OLLAMA_NUM_PREDICT_DEFAULT, str(llm.num_predict))
     _check(
@@ -236,6 +242,8 @@ def test_ollama_client_has_an_output_cap() -> None:
         overridden = get_llm("llama3", source="Ollama")
     finally:
         del os.environ["BIOMENTIS_OLLAMA_NUM_PREDICT"]
+        if saved is not None:
+            os.environ["BIOMENTIS_OLLAMA_NUM_PREDICT"] = saved
     _check("the env var overrides it", overridden.num_predict == 1234, str(overridden.num_predict))
 
 
@@ -390,6 +398,97 @@ def test_refusal_ends_the_run() -> None:
     _check("no correction was sent", not any(PARSE_ERROR_NUDGE in m for m in log), "")
 
 
+class _CutOffLLM:
+    """Answers in pieces, each reaching the output cap except the last.
+
+    `pieces` are the replies in order; every one but the last is marked as cut
+    off. With `always_cut`, the last one is too. Records every request.
+    """
+
+    def __init__(self, pieces: list[str], always_cut: bool = False, meta_key: str = "done_reason"):
+        self.pieces = list(pieces)
+        self.always_cut = always_cut
+        self.meta_key = meta_key
+        self.requests: list = []
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.requests.append(list(messages))
+        i = len(self.requests) - 1
+        if i >= len(self.pieces):
+            raise RuntimeError("asked to continue more times than allowed")
+        cut = self.always_cut or i < len(self.pieces) - 1
+        value = {"done_reason": "length", "stop_reason": "max_tokens", "finish_reason": "length"}[self.meta_key]
+        meta = {self.meta_key: value} if cut else {}
+        return AIMessage(content=self.pieces[i], response_metadata=meta)
+
+
+def test_cut_off_answer_is_continued() -> None:
+    print("\n[13] a final answer cut off by the output cap")
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from biomentis.agent.a1 import _stream_to_first_tag
+    from biomentis.utils import (
+        ANSWER_CONTINUE_NUDGE,
+        ANSWER_CUT_OFF_NOTE,
+        MAX_ANSWER_CONTINUATIONS,
+        hit_output_limit,
+    )
+
+    _check("Ollama cap seen", hit_output_limit(AIMessage(content="", response_metadata={"done_reason": "length"})))
+    _check("Anthropic cap seen", hit_output_limit(AIMessage(content="", response_metadata={"stop_reason": "max_tokens"})))
+    _check("OpenAI cap seen", hit_output_limit(AIMessage(content="", response_metadata={"finish_reason": "length"})))
+    _check("a normal stop is not", not hit_output_limit(AIMessage(content="", response_metadata={"done_reason": "stop"})))
+    _check("no metadata is not", not hit_output_limit(AIMessage(content="")))
+
+    # The streamed Ollama path keeps the cap signal from the final chunk.
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.outputs import ChatGenerationChunk
+    from langchain_ollama import ChatOllama
+
+    class _CappedStream(ChatOllama):
+        def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+            yield ChatGenerationChunk(message=AIMessageChunk(content="<solution>Stage 1 ... Stage 8 is"))
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content="", response_metadata={"done_reason": "length"})
+            )
+
+    streamed = _stream_to_first_tag(_CappedStream(model="canned", temperature=0.0), [])
+    _check("a streamed Ollama reply carries the cap", hit_output_limit(streamed), repr(streamed.response_metadata))
+
+    # Continued once, and the pieces join into one answer.
+    llm = _CutOffLLM(["<solution>Stage 1. Stage 2 is", " cell culture.</solution>"])
+    log, final = _agent(llm).go("build a workflow")
+    _check("asked once to continue", len(llm.requests) == 2, str(len(llm.requests)))
+    second = llm.requests[1] if len(llm.requests) > 1 else []
+    _check("the request carries the cut-off answer", bool(second) and isinstance(second[-2], AIMessage)
+           and second[-2].content == "<solution>Stage 1. Stage 2 is", repr(second[-2:])[:300])
+    _check("and asks to continue", bool(second) and isinstance(second[-1], HumanMessage)
+           and second[-1].content == ANSWER_CONTINUE_NUDGE, repr(second[-1:])[:300])
+    _check("the answer is whole", "Stage 1. Stage 2 is cell culture." in final, final)
+    _check("not marked incomplete", ANSWER_CUT_OFF_NOTE.strip() not in final, final)
+    _check("the request to continue isn't in the history", not any(ANSWER_CONTINUE_NUDGE in m for m in log), "")
+
+    # A continuation that opens the tag again doesn't nest it.
+    llm = _CutOffLLM(["<solution>Part A,", "<solution> part B.</solution>"], meta_key="stop_reason")
+    _, final = _agent(llm).go("anything")
+    _check("restarted tag dropped (Anthropic signal)", "Part A, part B." in final and final.count("<solution>") == 1, final)
+
+    # Still cut off after every continuation: say so.
+    pieces = ["<solution>One,"] + [f" more {i}," for i in range(MAX_ANSWER_CONTINUATIONS)]
+    llm = _CutOffLLM(pieces, always_cut=True)
+    _, final = _agent(llm).go("anything")
+    _check("continued at most the limit", len(llm.requests) == 1 + MAX_ANSWER_CONTINUATIONS, str(len(llm.requests)))
+    _check("what it got is kept", f"more {MAX_ANSWER_CONTINUATIONS - 1}," in final, final)
+    _check("marked incomplete", "This answer is incomplete" in final, final)
+
+    # An answer that ends normally is not continued.
+    llm = _CutOffLLM(["<solution>42</solution>"])
+    _, final = _agent(llm).go("anything")
+    _check("a complete answer is one call", len(llm.requests) == 1 and "42" in final, str(len(llm.requests)))
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Runaway generation tests")
@@ -407,6 +506,7 @@ def run_all() -> int:
         test_invoke_turn_runs,
         test_claude_requests_end_on_a_user_turn,
         test_refusal_ends_the_run,
+        test_cut_off_answer_is_continued,
     ):
         try:
             test()

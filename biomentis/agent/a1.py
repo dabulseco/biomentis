@@ -125,6 +125,7 @@ from biomentis.utils import (
     ANSWER_CUT_OFF_NOTE,
     FIRST_CLOSING_TAG_RE,
     MAX_ANSWER_CONTINUATIONS,
+    NOT_DONE_NUDGE,
     PARSE_ERROR_NUDGE,
     check_and_download_s3_files,
     clean_message_content,
@@ -149,6 +150,7 @@ from biomentis.utils import (
     AGENT_STOP_SEQUENCES,
     coerce_invoke_syntax,
     hit_output_limit,
+    is_unfinished_answer,
     truncate_after_first_tag,
     turn_from_reasoning,
 )
@@ -1840,6 +1842,14 @@ Each library is listed with its description to help you understand its functiona
                 salvaged = turn_from_reasoning(
                     (getattr(response, "additional_kwargs", None) or {}).get("reasoning_content")
                 )
+                # Only code is taken from the thinking. A <solution> there may be
+                # the model musing about whether it is done ("<solution>Not yet —
+                # I still have steps to run.</solution>" ended a research phase
+                # after 3 steps, 2026-10-28), and a final answer should be one the
+                # model gave, so the reply is sent back for its answer instead.
+                if salvaged.lower().startswith("<solution>"):
+                    print("the model's thinking held a <solution> its reply didn't; asking for it in the reply")
+                    salvaged = ""
                 if salvaged:
                     print("took the turn from the model's thinking: its reply had no tag")
                     msg = (msg.strip() + "\n" + salvaged).strip()
@@ -1908,6 +1918,15 @@ Each library is listed with its description to help you understand its functiona
             execute_match = re.search(r"<execute>(.*?)</execute>", msg, re.DOTALL | re.IGNORECASE)
             answer_match = re.search(r"<solution>(.*?)</solution>", msg, re.DOTALL | re.IGNORECASE)
 
+            # A <solution> that only says the work isn't finished goes back to
+            # the model (see NOT_DONE_NUDGE). Its tags come off, so the history
+            # and the UI don't show it as an answer.
+            unfinished_answer = None
+            if answer_match and not execute_match and is_unfinished_answer(answer_match.group(1)):
+                unfinished_answer = msg
+                msg = re.sub(r"</?solution>", "", msg, flags=re.IGNORECASE).strip() or "(empty answer)"
+                answer_match = None
+
             # Alternative patterns for OpenAI models that might use different formatting
             if not execute_match:
                 # Try to find code blocks that might be intended as execute blocks
@@ -1935,7 +1954,8 @@ Each library is listed with its description to help you understand its functiona
             else:
                 trace_branch = "none"
                 trace_parse_error = True
-                print("parsing error...")
+                nudge = NOT_DONE_NUDGE if unfinished_answer else PARSE_ERROR_NUDGE
+                print("the answer says the work isn't finished..." if unfinished_answer else "parsing error...")
 
                 # Corrections already spent on this streak: walk back over
                 # (nudge, reply) pairs from the reply just appended. This used
@@ -1949,7 +1969,7 @@ Each library is listed with its description to help you understand its functiona
                 while (
                     i >= 0
                     and isinstance(state["messages"][i], HumanMessage)
-                    and state["messages"][i].content == PARSE_ERROR_NUDGE
+                    and state["messages"][i].content in (PARSE_ERROR_NUDGE, NOT_DONE_NUDGE)
                 ):
                     error_count += 1
                     i -= 2
@@ -1963,6 +1983,15 @@ Each library is listed with its description to help you understand its functiona
                     trace_branch = "abort_refusal"
                     self.critic_count = 10**9
                     state["messages"].append(AIMessage(content=MODEL_REFUSED_MESSAGE))
+                elif error_count >= 2 and unfinished_answer:
+                    # Asked twice and it still says it isn't done: take the
+                    # reply as given rather than end the run with nothing. A
+                    # short real answer can trip the check.
+                    print("the model kept its unfinished-sounding answer; accepting it")
+                    state["messages"][-1] = AIMessage(content=unfinished_answer.strip())
+                    state["next_step"] = "end"
+                    trace_branch = "solution"
+                    trace_parse_error = False
                 elif error_count >= 2:
                     # If we've already tried to correct the model twice, just end the conversation
                     print("Detected repeated parsing errors, ending conversation")
@@ -1976,9 +2005,9 @@ Each library is listed with its description to help you understand its functiona
                     )
                 else:
                     # Try to correct it
-                    state["messages"].append(HumanMessage(content=PARSE_ERROR_NUDGE))
+                    state["messages"].append(HumanMessage(content=nudge))
                     state["next_step"] = "generate"
-                    trace_branch = "retry_parse_error"
+                    trace_branch = "retry_unfinished_answer" if unfinished_answer else "retry_parse_error"
 
             # Out of runway and still running code. Two nudges are a fair
             # chance to wrap up; a third means the agent is not going to stop

@@ -45,7 +45,7 @@ $P -m biomentis.agent.tests.test_anthropic_key     # Anthropic key resolution + 
 $P -m biomentis.agent.tests.test_claude_models     # current Claude ids, no temperature, text-only replies
 $P -m biomentis.agent.tests.test_structure_artifacts  # structure artifact registry
 $P -m biomentis.agent.tests.test_structure_info  # structure metadata (no coordinates as text) + viewer models
-$P -m biomentis.agent.tests.test_runaway_generation # parse-error retry cap, Ollama turn cutoff, turns in thinking or tool-call syntax, cut-off answers continued
+$P -m biomentis.agent.tests.test_runaway_generation # parse-error retry cap, Ollama turn cutoff, turns in thinking or tool-call syntax, cut-off answers continued, "not yet" answers sent back
 $P -m biomentis.agent.tests.test_kb_context         # knowledge base → agent + Clear KB confirm
 $P -m biomentis.agent.tests.test_tutor_card_cache   # failed cards/empty chat answers retried + loop messages not shown as steps
 $P -m biomentis.agent.tests.test_kb_structures      # PDB/SDF/SMILES in the KB: metadata only + View

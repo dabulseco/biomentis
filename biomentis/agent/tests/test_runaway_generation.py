@@ -39,6 +39,10 @@ What these tests pin down:
       one still cut off after the continuations says it is incomplete
       (deepseek-v4.1-flash:cloud stopped mid-sentence at 8,192 tokens,
       2026-10-28)
+ 14.  A <solution> that only says the work isn't finished is sent back, not
+      taken as the answer, and a <solution> found only in the thinking is not
+      taken either (deepseek-v4.1-flash:cloud ended a research phase on
+      "Not yet — I still have steps to run.", 2026-10-28)
 
 Run with:
     python -m biomentis.agent.tests.test_runaway_generation
@@ -489,6 +493,67 @@ def test_cut_off_answer_is_continued() -> None:
     _check("a complete answer is one call", len(llm.requests) == 1 and "42" in final, str(len(llm.requests)))
 
 
+class _ScriptedLLM:
+    """Replies from a script of (content, reasoning) pairs; records requests."""
+
+    def __init__(self, script: list[tuple[str, str | None]]):
+        self.script = list(script)
+        self.requests: list = []
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.requests.append(list(messages))
+        if not self.script:
+            raise RuntimeError("called more times than scripted")
+        content, reasoning = self.script.pop(0)
+        kwargs = {"reasoning_content": reasoning} if reasoning else {}
+        return AIMessage(content=content, additional_kwargs=kwargs)
+
+
+def test_unfinished_answer_is_sent_back() -> None:
+    print("\n[14] an answer that says it isn't finished")
+    from biomentis.utils import NOT_DONE_NUDGE, PARSE_ERROR_NUDGE, is_unfinished_answer
+
+    not_yet = "Not yet — I still have steps to run."
+    _check("'not yet' is unfinished", is_unfinished_answer(not_yet))
+    _check("empty is unfinished", is_unfinished_answer("  "))
+    _check("a number is an answer", not is_unfinished_answer("42"))
+    _check("a word is an answer", not is_unfinished_answer("ZnTe"))
+    long_answer = "Stage 1 ... " * 40 + "Further steps: validate the assay; potency is not yet established."
+    _check("a full answer mentioning further steps is an answer", not is_unfinished_answer(long_answer))
+
+    # The 2026-10-28 shape: a "not yet" answer, then real work, then the answer.
+    llm = _ScriptedLLM([
+        (f"<solution>{not_yet}</solution>", None),
+        ("<execute>print(6 * 7)</execute>", None),
+        ("<solution>42</solution>", None),
+    ])
+    log, final = _agent(llm).go("multiply")
+    _check("the run went on", len(llm.requests) == 3, str(len(llm.requests)))
+    second = llm.requests[1] if len(llm.requests) > 1 else []
+    _check("it was asked to continue", bool(second) and second[-1].content == NOT_DONE_NUDGE, repr(second[-1:])[:200])
+    _check("the code ran", any("<observation>42" in m for m in log), str(log[-3:])[:300])
+    _check("the 'not yet' isn't kept as an answer", not any(f"<solution>{not_yet}" in m for m in log), "")
+    _check("the real answer is the result", "<solution>42</solution>" in final, final)
+
+    # Asked twice and still "not yet": accepted, not ended with nothing.
+    llm = _ScriptedLLM([(f"<solution>{not_yet}</solution>", None)] * 3)
+    _, final = _agent(llm).go("anything")
+    _check("asked at most twice more", len(llm.requests) == 3, str(len(llm.requests)))
+    _check("then taken as given", not_yet in final and "repeated parsing errors" not in final, final)
+
+    # A <solution> only in the thinking is not taken; the reply is asked for.
+    llm = _ScriptedLLM([
+        ("", "Am I done? <solution>42</solution> would do."),
+        ("<solution>42</solution>", None),
+    ])
+    log, final = _agent(llm).go("anything")
+    _check("asked for the answer in the reply", len(llm.requests) == 2 and llm.requests[1][-1].content == PARSE_ERROR_NUDGE,
+           str(len(llm.requests)))
+    _check("answered from the reply", "<solution>42</solution>" in final, final)
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Runaway generation tests")
@@ -507,6 +572,7 @@ def run_all() -> int:
         test_claude_requests_end_on_a_user_turn,
         test_refusal_ends_the_run,
         test_cut_off_answer_is_continued,
+        test_unfinished_answer_is_sent_back,
     ):
         try:
             test()

@@ -1042,6 +1042,35 @@ PARSE_ERROR_NUDGE = (
     "<solution></solution>."
 )
 
+# A `<solution>` that says the work isn't finished is not an answer. In a
+# 2026-10-28 run, deepseek-v4.1-flash:cloud gave "<solution>Not yet — I still
+# have steps to run.</solution>" after 3 code steps; it was taken as the final
+# answer, so the research phase ended there, with no plots or calculations.
+# `generate` now hands such a reply back with NOT_DONE_NUDGE. It counts toward
+# the same retry streak as PARSE_ERROR_NUDGE; at the streak's end the reply is
+# accepted rather than ending the run, in case it was a real (short) answer.
+NOT_DONE_NUDGE = (
+    "Your <solution> said the work isn't finished, so it was not taken as the final answer. "
+    "Continue with the next step inside <execute></execute>, and give <solution></solution> "
+    "only when the answer is complete."
+)
+_UNFINISHED_ANSWER_RE = re.compile(
+    r"\b(not (yet|done|finished|complete|ready)|still (have|need|working|to (run|do))"
+    r"|(more|remaining|further) steps|in progress|to be continued|placeholder)\b",
+    re.IGNORECASE,
+)
+
+
+def is_unfinished_answer(body: str) -> bool:
+    """A `<solution>` body that is empty or only says the work isn't done.
+
+    Only short bodies are judged: a full answer can mention "further steps"
+    or "not yet validated" without being unfinished.
+    """
+    body = body.strip()
+    return not body or (len(body) < 300 and _UNFINISHED_ANSWER_RE.search(body) is not None)
+
+
 # A final answer that runs into the model's output cap arrives with its
 # `<solution>` open. `generate` used to close the tag and end the run on it: a
 # deepseek-v4.1-flash:cloud workflow answer stopped mid-sentence at exactly

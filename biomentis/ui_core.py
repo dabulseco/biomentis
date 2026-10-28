@@ -24,7 +24,7 @@ from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
-from biomentis.utils import PARSE_ERROR_NUDGE
+from biomentis.utils import NOT_DONE_NUDGE, PARSE_ERROR_NUDGE
 
 SUPPORTED_FILE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".pdf")
 
@@ -328,6 +328,11 @@ def stream_agent_events(
                 yield UIEvent(
                     type="status",
                     content="The model's reply had no <execute> or <solution> tag — asking it to try again.",
+                )
+            elif content == NOT_DONE_NUDGE:
+                yield UIEvent(
+                    type="status",
+                    content="The model gave an answer that says the work isn't finished — asking it to continue.",
                 )
             t = time()
             continue

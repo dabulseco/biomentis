@@ -140,6 +140,26 @@ def test_correction_is_a_status_not_reasoning() -> None:
         f"statuses: {statuses}",
     )
 
+    from biomentis.utils import NOT_DONE_NUDGE
+
+    events = _stream(
+        [
+            AIMessage(content="Not yet — I still have steps to run."),
+            HumanMessage(content=NOT_DONE_NUDGE),
+            AIMessage(content="Next, the scale-up numbers.\n<execute>print(1)</execute>"),
+        ]
+    )
+    _check(
+        "the not-finished correction is a status line",
+        any("isn't finished" in e.content for e in events if e.type == "status"),
+        f"events: {[(e.type, e.content[:60]) for e in events]}",
+    )
+    _check(
+        "and nothing is shown as an answer",
+        not any(e.type == "solution" for e in events),
+        f"events: {[(e.type, e.content[:60]) for e in events]}",
+    )
+
 
 def test_critic_feedback_is_not_reasoning() -> None:
     print("\n[2] Self-critic feedback that mentions a tag is not a reasoning step")

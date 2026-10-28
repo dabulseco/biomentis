@@ -23,6 +23,9 @@ What these tests pin down:
   7.  Same code with a different output is not a repeat
   8.  With self-critic on, the stopped run does not go back to the critic
   9.  Each run starts with no steps seen (go, and stream_agent_events)
+ 10.  A step that raises keeps what it printed, and says which error and which
+      line ("Error: GUARD FAILED" alone hid an agent's own self-check
+      results, 2026-10-28); a figure still open when it raises is captured
 
 Run with:
     python -m biomentis.agent.tests.test_plot_feedback
@@ -285,6 +288,38 @@ def test_each_run_starts_fresh() -> None:
     _check("stream_agent_events: no stale repeat", obs and not any("NOTE" in o for o in obs), str(obs))
 
 
+def test_error_keeps_output_and_line() -> None:
+    print("\n[10] a step that raises keeps its output, the error type and the line")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from biomentis.tool.support_tools import run_python_repl
+
+    out = run_python_repl(
+        'ok = {"glucose": False}\nprint("peak VCC 21.0 e6/mL")\nprint("titer 4.2 g/L")\nassert all(ok.values())'
+    )
+    _check("still starts with Error:", out.startswith("Error: AssertionError"), out)
+    _check("names the failing line", "at line 4: assert all(ok.values())" in out, out)
+    _check("keeps what was printed", "peak VCC 21.0 e6/mL" in out and "titer 4.2 g/L" in out, out)
+    _check("the error comes before the output", out.index("Error:") < out.index("peak VCC"), out)
+
+    out = run_python_repl('print("results")\nraise RuntimeError("GUARD FAILED")')
+    _check("a message is kept", out.startswith("Error: RuntimeError: GUARD FAILED"), out)
+
+    out = run_python_repl("import numpy as np\nx = 2\nnp.zeros(3).reshape(2, 2)")
+    _check("an error inside a library points at the agent's line",
+           "at line 3: np.zeros(3).reshape(2, 2)" in out and "ValueError" in out, out)
+    _check("no empty output section", "Output printed before" not in out, out)
+
+    out = run_python_repl("def f(:\n    pass")
+    _check("a syntax error names its line", out.startswith("Error: SyntaxError") and "at line 1: def f(:" in out, out)
+
+    out = run_python_repl(
+        "import matplotlib.pyplot as plt\nplt.plot([1, 2], [3, 4])\nplt.title('VCD')\nraise ValueError('bad fit')"
+    )
+    _check("an open figure is still captured", "Error: ValueError: bad fit" in out and "Plot captured." in out, out)
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Plot feedback + repeat guard tests")
@@ -299,6 +334,7 @@ def run_all() -> int:
         test_changed_output_is_not_a_repeat,
         test_self_critic_does_not_restart,
         test_each_run_starts_fresh,
+        test_error_keeps_output_and_line,
     ):
         try:
             test()

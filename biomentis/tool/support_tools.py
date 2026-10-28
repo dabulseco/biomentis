@@ -13,6 +13,37 @@ _persistent_namespace = {}
 _captured_plots = []
 
 
+def _error_report(exc: BaseException, command: str, printed: str) -> str:
+    """The observation for a step that raised: the error, where, and what it printed first.
+
+    It used to be only "Error: {exc}". A self-check the agent wrote
+    (`raise RuntimeError("GUARD FAILED")` after printing its simulation
+    results, 2026-10-28) came back as "Error: GUARD FAILED", without the
+    results, the failing line or which check failed; a bare `assert` came back
+    as "Error: " and nothing more. The first line still starts with "Error:",
+    which other code looks for, and comes first so it survives truncation.
+    """
+    lineno = None
+    if isinstance(exc, SyntaxError):
+        lineno = exc.lineno
+    else:
+        # The agent's own code runs as "<string>"; its last frame is the line
+        # that failed, even when the error was raised inside a library.
+        tb = exc.__traceback__
+        while tb is not None:
+            if tb.tb_frame.f_code.co_filename == "<string>":
+                lineno = tb.tb_lineno
+            tb = tb.tb_next
+    message = str(exc).strip()
+    head = f"Error: {type(exc).__name__}" + (f": {message}" if message else "")
+    lines = command.splitlines()
+    if lineno and 0 < lineno <= len(lines):
+        head += f"\n  at line {lineno}: {lines[lineno - 1].strip()}"
+    if printed.strip():
+        head += "\n\nOutput printed before the error:\n" + printed.rstrip("\n")
+    return head
+
+
 def run_python_repl(command: str) -> str:
     """Executes the provided Python command in a persistent environment and returns the output.
     Variables defined in one execution will be available in subsequent executions.
@@ -35,7 +66,7 @@ def run_python_repl(command: str) -> str:
             output = mystdout.getvalue()
 
         except Exception as e:
-            output = f"Error: {str(e)}"
+            output = _error_report(e, command, mystdout.getvalue())
         finally:
             sys.stdout = old_stdout
             # Capture figures the code left open (no plt.show / savefig);

@@ -108,6 +108,7 @@ from biomentis.run_journal import RunJournal, journaled
 from biomentis.plots import plot_guidance, save_plot_pngs
 from biomentis.structures import default_artifact_dir, set_current_run_id
 from biomentis.independent_review import (
+    REVIEW_RETRY_MESSAGE,
     REVIEW_SYSTEM_PROMPT,
     Review,
     build_review_prompt,
@@ -648,6 +649,23 @@ class A1:
             self.set_model(self._llm_model, source=self._llm_source)
         self._creative_llm = None
         return True
+
+    def _save_review_replies(self, replies: list[str]) -> None:
+        """Keep the reviewer's raw replies beside the run's plots, for diagnosis.
+
+        Written to `review-<n>.txt` in the run's artifact directory. Never
+        raises: a reply that can't be saved must not cost the review.
+        """
+        if not replies:
+            return
+        try:
+            out_dir = default_artifact_dir(getattr(self, "current_run_id", None))
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, f"review-{self.review_count}.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n\n----- retry -----\n\n".join(replies))
+        except Exception as exc:
+            print(f"[independent_review] could not save the reviewer's reply: {exc}")
 
     def reset_review(self) -> None:
         """Start a run with no independent reviews done."""
@@ -2325,15 +2343,29 @@ Each library is listed with its description to help you understand its functiona
             reviewer = getattr(self, "review_model_name", "") or get_llm_display_name(reviewer_llm)
             prompt = build_review_prompt(review_inputs(state["messages"]))
             print(f"independent review {self.review_count + 1} by {reviewer}...")
-            try:
-                reply = _invoke_llm_with_retry(
-                    reviewer_llm,
-                    [SystemMessage(content=REVIEW_SYSTEM_PROMPT), HumanMessage(content=prompt)],
-                )
-                review = parse_review(_reply_text(reply))
-            except Exception as exc:  # a failed review must not cost the answer
-                review = Review(error=f"the review call failed ({type(exc).__name__}: {exc})")
+            # One retry when the reply can't be read: in a 2026-10-28 run,
+            # gemma4:31b-cloud's reply was "not valid JSON", and the same
+            # request answered properly when sent again.
+            review_messages = [SystemMessage(content=REVIEW_SYSTEM_PROMPT), HumanMessage(content=prompt)]
+            raw_replies: list[str] = []
+            review = Review(error="no reply")
+            for _attempt in range(2):
+                try:
+                    reply_text = _reply_text(_invoke_llm_with_retry(reviewer_llm, review_messages))
+                except Exception as exc:  # a failed review must not cost the answer
+                    review = Review(error=f"the review call failed ({type(exc).__name__}: {exc})")
+                    break
+                raw_replies.append(reply_text)
+                review = parse_review(reply_text)
+                if not review.error:
+                    break
+                print(f"independent review: {review.error}; asking once more")
+                review_messages = review_messages + [
+                    AIMessage(content=reply_text or "(empty reply)"),
+                    HumanMessage(content=REVIEW_RETRY_MESSAGE),
+                ]
             self.review_count += 1
+            self._save_review_replies(raw_replies)
             self.run_reviews.append(
                 {"review": review, "reviewer": reviewer, "after_correction": self.review_count > 1}
             )

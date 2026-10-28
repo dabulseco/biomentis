@@ -23,6 +23,9 @@ What these tests pin down:
   7.  The UI shows the reviews under the answer, before the run-quality line,
       which names the model, temperatures and reviewer
   8.  set_temperatures rebuilds the clients only when a value changes
+  9.  An unreadable reply is asked for once more, and the raw replies are saved
+      beside the run's plots; the prompt asks whether inputs are realistic,
+      not only whether the arithmetic is right
 
 Run with:
     python -m biomentis.agent.tests.test_independent_review
@@ -31,8 +34,14 @@ Run with:
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 from types import SimpleNamespace
+
+# Reviews write the reviewer's raw replies under the run's artifact directory;
+# keep the test runs' copies out of the repo.
+os.environ["BIOMENTIS_ARTIFACT_DIR"] = tempfile.mkdtemp(prefix="biomentis_review_")
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -301,6 +310,37 @@ def test_set_temperatures() -> None:
     _check("the model is kept", agent.llm.model == "llama3", agent.llm.model)
 
 
+def test_retry_and_saved_replies() -> None:
+    print("\n[9] an unreadable reply is retried once; raw replies are saved; inputs are checked")
+    from biomentis.independent_review import REVIEW_RETRY_MESSAGE, REVIEW_SYSTEM_PROMPT
+
+    llm = _Scripted(["<solution>Answer</solution>"])
+    reviewer = _Scripted(["I think it looks fine overall.", _review_json("accept", problems=[])])
+    agent = _agent(llm, reviewer)
+    agent.current_run_id = "run-retry"
+    _, final = agent.go("Q")
+    _check("asked twice", len(reviewer.requests) == 2, str(len(reviewer.requests)))
+    _check("the retry says what was wrong", reviewer.requests[1][-1].content == REVIEW_RETRY_MESSAGE
+           if len(reviewer.requests) > 1 else False)
+    _check("the second reply is the review", agent.run_reviews and agent.run_reviews[0]["review"].verdict == "accept",
+           str(agent.run_reviews))
+    path = os.path.join(os.environ["BIOMENTIS_ARTIFACT_DIR"], "run-retry", "review-1.txt")
+    saved = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+    _check("both raw replies are saved", "looks fine overall" in saved and '"verdict"' in saved, path)
+
+    llm = _Scripted(["<solution>Answer</solution>"])
+    reviewer = _Scripted(["not json", "still not json"])
+    agent = _agent(llm, reviewer)
+    _, final = agent.go("Q")
+    _check("only one retry", len(reviewer.requests) == 2, str(len(reviewer.requests)))
+    _check("then reported as no review, answer kept",
+           agent.run_reviews and agent.run_reviews[0]["review"].error and "<solution>Answer</solution>" in final,
+           str(agent.run_reviews))
+
+    _check("the prompt checks inputs, not just arithmetic", "only as good as its inputs" in REVIEW_SYSTEM_PROMPT)
+    _check("an unrealistic input is a problem kind", '"assumption"' in REVIEW_SYSTEM_PROMPT)
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Independent review tests")
@@ -314,6 +354,7 @@ def run_all() -> int:
         test_with_self_critique,
         test_ui,
         test_set_temperatures,
+        test_retry_and_saved_replies,
     ):
         try:
             test()

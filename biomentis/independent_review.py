@@ -39,10 +39,13 @@ _EVIDENCE_TOTAL_CHARS = 90_000
 
 REVIEW_SYSTEM_PROMPT = """You are an independent scientific reviewer. A research agent (a different model) worked on a task by writing and running code, consulting sources, and drafting an answer; its own self-critique then revised the draft. You check the work. You cannot run code: judge from the code outputs and sources shown in EVIDENCE.
 
+A number computed in code is only as good as its inputs. Correct arithmetic on an unrealistic input gives a wrong answer, so "the code computed it" is never enough on its own. For every assumed input that drives a decision (a rate, a concentration, a yield, an efficiency, a limit), ask whether it is realistic for the field, using your own knowledge of typical published values.
+
 Check, in this order:
-1. CHANGES: every substantive difference between FIRST_DRAFT and FINAL_ANSWER. For each, is the change valid (supported by EVIDENCE or sound domain knowledge), invalid (wrong, or made worse), or unverified (nothing in EVIDENCE settles it)?
+1. CHANGES: every substantive difference between FIRST_DRAFT and FINAL_ANSWER. For each, is the change valid (the result is right AND its inputs are realistic), invalid (wrong, made worse, or built on an input outside the typical range, even if the arithmetic is right), or unverified (nothing settles it)? A change that replaces a typical value with an atypical one is invalid unless EVIDENCE shows why.
 2. PROBLEMS in FINAL_ANSWER:
    - number: a value that disagrees with what the code in EVIDENCE computed, or that is wrong for the domain
+   - assumption: an input to a calculation that is outside the range typically reported for this kind of process, so the computed result cannot be trusted
    - unit: a unit error or an inconsistent unit (e.g. rpm used where rev/s is needed, pg vs ng)
    - unsupported: a factual claim, limit or specification that no source in EVIDENCE supports and that is doubtful
    - contradiction: two parts of the answer that disagree
@@ -50,7 +53,7 @@ Check, in this order:
 3. RATIONALE: the 3 to 8 most important decisions in FINAL_ANSWER (choices of method, order of steps, criteria, limits). Is the reason given for each sound?
 
 Verdict:
-- "needs_rework" if any problem would change a decision, a quantity someone would act on, or a safety/quality limit
+- "needs_rework" if any problem would change a decision, a quantity someone would act on, or a safety/quality limit (including a decision that rests on an unrealistic assumption)
 - "accept_with_corrections" if the problems are minor and local
 - "accept" if you found no problems
 
@@ -61,9 +64,16 @@ Return ONLY a JSON object, no markdown fences, with exactly these keys:
   "verdict": "accept" | "accept_with_corrections" | "needs_rework",
   "summary": "<2-3 sentences: overall judgment>",
   "changes": [{"change": "<what changed>", "status": "valid" | "invalid" | "unverified", "reason": "<why, citing EVIDENCE where possible>"}],
-  "problems": [{"kind": "number" | "unit" | "unsupported" | "contradiction" | "rationale", "quote": "<exact text from FINAL_ANSWER>", "issue": "<what is wrong>", "fix": "<the correct value or reasoning>"}],
+  "problems": [{"kind": "number" | "assumption" | "unit" | "unsupported" | "contradiction" | "rationale", "quote": "<exact text from FINAL_ANSWER>", "issue": "<what is wrong>", "fix": "<the correct value or reasoning>"}],
   "rationale": [{"decision": "<the decision>", "sound": "yes" | "no" | "unverified", "note": "<one sentence>"}]
 }"""
+
+
+# Sent once when the reviewer's reply could not be read as the JSON asked for.
+REVIEW_RETRY_MESSAGE = (
+    "Your reply could not be read as the JSON object requested. Reply again with only that JSON object: "
+    "no markdown, no commentary, starting with { and ending with }."
+)
 
 
 @dataclass

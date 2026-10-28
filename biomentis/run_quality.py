@@ -187,7 +187,9 @@ def format_quality_summary(ev: RunEvidence, settings: str = "") -> str:
     """
 
     def n(count: int, word: str) -> str:
-        return f"{count} {word}{'' if count == 1 else 's'}"
+        if count == 1:
+            return f"{count} {word}"
+        return f"{count} {word[:-1] + 'ies' if word.endswith('y') and word[-2] not in 'aeiou' else word + 's'}"
 
     parts = [
         n(ev.code_steps, "code step"),

@@ -120,6 +120,8 @@ def test_summary_line() -> None:
                                               protocol_steps=4, figures=3, critique_rounds=1, truncated_outputs=3))
     _check("counts", "19 code steps · 7 calculations · 1 literature source · 4 protocol lookups · 3 figures · 1 critique round" in full, full)
     _check("issues", "3 outputs cut at 10,000 characters" in full, full)
+    _check("plural of reply", "12 replies without a tag" in format_quality_summary(RunEvidence(retries=12)),
+           format_quality_summary(RunEvidence(retries=12)))
     _check("nothing missing", "Missing" not in full, full)
     thin = format_quality_summary(RunEvidence(code_steps=6, protocol_steps=5, calculation_steps=1))
     _check("a thin run says what it lacks", "no literature source" in thin and "no figure" in thin

@@ -81,7 +81,7 @@ description = [
         ],
     },
     {
-        "description": "Search the web and return formatted results (title, URL, description). Requires no API key: uses DuckDuckGo, falling back to Google.",
+        "description": "Search the web and return formatted results (title, URL, and the passage of each page that best matches the query). Uses Ollama's web search when OLLAMA_API_KEY is set, falling back to DuckDuckGo and Google. Read a result in full with extract_url_content.",
         "name": "search_google",
         "optional_parameters": [
             {
@@ -107,7 +107,7 @@ description = [
         ],
     },
     {
-        "description": "Extract the text content of a webpage using requests and BeautifulSoup.",
+        "description": "Extract the full text content of a webpage, e.g. a result from search_google.",
         "name": "extract_url_content",
         "optional_parameters": [],
         "required_parameters": [

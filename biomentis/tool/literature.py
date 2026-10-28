@@ -335,6 +335,84 @@ def _search_googlesearch_python(query: str, num_results: int, language: str = "e
     ]
 
 
+# Ollama's hosted web search (https://ollama.com/api/web_search), reached with
+# the same OLLAMA_API_KEY as Ollama Cloud models. Added 2026-10-28, when
+# DuckDuckGo began answering the scrapers below with its bot-detection page and
+# every search came back empty. Its results carry each page's full text, kept
+# here so `extract_url_content` can return a page the agent just found without
+# fetching it again.
+_WEB_PAGE_CACHE: dict[str, str] = {}
+_WEB_PAGE_CACHE_SIZE = 64
+_SNIPPET_CHARS = 700
+
+
+def _ollama_web_client():
+    """An `ollama.Client` for ollama.com's web tools, or None without a key."""
+    from biomentis.config import resolve_ollama_key
+
+    key = resolve_ollama_key()
+    if not key:
+        return None
+    import ollama
+
+    return ollama.Client(host="https://ollama.com", headers={"Authorization": f"Bearer {key}"})
+
+
+def _remember_page(url: str, content: str) -> None:
+    if not url or not content:
+        return
+    _WEB_PAGE_CACHE.pop(url, None)
+    _WEB_PAGE_CACHE[url] = content
+    while len(_WEB_PAGE_CACHE) > _WEB_PAGE_CACHE_SIZE:
+        _WEB_PAGE_CACHE.pop(next(iter(_WEB_PAGE_CACHE)))
+
+
+def _best_passage(content: str, query: str, limit: int = _SNIPPET_CHARS) -> str:
+    """The stretch of a page that best matches the query, for the result's description.
+
+    A page's opening is often navigation or a cookie notice; the passage that
+    shares the most query words is a better preview of why the page matched.
+    """
+    text = re.sub(r"\s+", " ", content or "").strip()
+    if len(text) <= limit:
+        return text
+    words = {w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 3}
+    if not words:
+        return text[:limit] + " ..."
+    step = limit // 2
+    best_start, best_score = 0, -1
+    for start in range(0, len(text) - step, step):
+        window = text[start : start + limit].lower()
+        score = sum(window.count(w) for w in words)
+        if score > best_score:
+            best_start, best_score = start, score
+    # Start at the sentence holding the window's first query word, so the
+    # preview doesn't open on the tail of the navigation before it.
+    window = text[best_start : best_start + limit].lower()
+    hits = [i for i in (window.find(w) for w in words) if i != -1]
+    if hits:
+        first = best_start + min(hits)
+        sentence = text.rfind(". ", best_start, first)
+        best_start = sentence + 2 if sentence != -1 else first
+    passage = text[best_start : best_start + limit]
+    return ("... " if best_start else "") + passage + " ..."
+
+
+def _search_ollama(query: str, num_results: int) -> list[dict]:
+    """Ollama's web search API; raises when there is no OLLAMA_API_KEY."""
+    client = _ollama_web_client()
+    if client is None:
+        raise RuntimeError("no OLLAMA_API_KEY")
+    response = client.web_search(query, max_results=max(1, min(num_results, 10)))
+    results = []
+    for r in response.results or []:
+        url = getattr(r, "url", "") or ""
+        content = getattr(r, "content", "") or ""
+        _remember_page(url, content)
+        results.append({"title": getattr(r, "title", "") or "", "url": url, "description": _best_passage(content, query)})
+    return results
+
+
 def _format_search_results(results: list[dict]) -> str:
     """Render provider hits in the shape the agent has always seen."""
     return "".join(
@@ -344,10 +422,11 @@ def _format_search_results(results: list[dict]) -> str:
 
 
 def keyless_web_search(query: str, num_results: int = 5, language: str = "en") -> str:
-    """Search the web without any API key.
+    """Search the web: Ollama's web search when OLLAMA_API_KEY is set, else scrapers.
 
-    Tries DuckDuckGo's HTML endpoint, then its Lite endpoint, then
-    googlesearch-python, returning the first provider that yields hits.
+    Tries Ollama's web search API (needs OLLAMA_API_KEY; the name predates it),
+    then DuckDuckGo's HTML endpoint, its Lite endpoint, and googlesearch-python,
+    returning the first provider that yields hits.
 
     Args:
         query: The search query.
@@ -360,6 +439,7 @@ def keyless_web_search(query: str, num_results: int = 5, language: str = "en") -
 
     """
     providers = (
+        ("ollama-web-search", lambda: _search_ollama(query, num_results)),
         ("duckduckgo-html", lambda: _search_duckduckgo_html(query, num_results)),
         ("duckduckgo-lite", lambda: _search_duckduckgo_lite(query, num_results)),
         ("googlesearch-python", lambda: _search_googlesearch_python(query, num_results, language)),
@@ -387,10 +467,11 @@ def search_google(query: str, num_results: int = 3, language: str = "en") -> str
     """Search the web and return formatted results. No API key required.
 
     Despite the name (kept for backwards compatibility with the tool registry
-    and existing prompts), this now runs the keyless provider chain in
-    `keyless_web_search`: DuckDuckGo HTML, DuckDuckGo Lite, then
-    googlesearch-python. Google alone was too easy to block — a 429 from the
-    scraper used to leave the agent with an empty string.
+    and existing prompts), this runs the provider chain in
+    `keyless_web_search`: Ollama's web search when OLLAMA_API_KEY is set, then
+    DuckDuckGo HTML, DuckDuckGo Lite and googlesearch-python. Google alone was
+    too easy to block — a 429 from the scraper used to leave the agent with an
+    empty string.
 
     Args:
         query (str): The search query (e.g., "protocol text or search question")
@@ -649,7 +730,11 @@ def _advanced_web_search_fallback(query: str, num_results: int = 5, reason: str 
 
 
 def extract_url_content(url: str) -> str:
-    """Extract the text content of a webpage using requests and BeautifulSoup.
+    """Extract the text content of a webpage.
+
+    A page returned by the last web searches comes from their text, without a
+    new request. Otherwise Ollama's web fetch API is tried (with
+    OLLAMA_API_KEY), then a direct download parsed with BeautifulSoup.
 
     Args:
         url: Webpage URL to extract content from
@@ -658,6 +743,27 @@ def extract_url_content(url: str) -> str:
         Text content of the webpage
 
     """
+    if url in _WEB_PAGE_CACHE:
+        return _WEB_PAGE_CACHE[url]
+    client = None
+    try:
+        client = _ollama_web_client()
+    except Exception:
+        pass
+    if client is not None:
+        try:
+            page = client.web_fetch(url)
+            content = (getattr(page, "content", "") or "").strip()
+            if content:
+                _remember_page(url, content)
+                return content
+        except Exception as e:  # some sites aren't reachable this way (404); scrape instead
+            print(f"[extract_url_content] Ollama web fetch failed for {url}: {e}")
+    return _scrape_url_content(url)
+
+
+def _scrape_url_content(url: str) -> str:
+    """Download a page and keep its paragraphs and headings."""
     response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
 
     # Check if the response is in text format

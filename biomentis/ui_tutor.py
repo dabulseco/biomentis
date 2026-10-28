@@ -1688,7 +1688,7 @@ def render_tutor_chat_panel(tutor) -> None:
                 st.download_button(
                     "📥 Export to HTML",
                     data=_html,
-                    file_name="biomni_chat_export.html",
+                    file_name="biomentis_chat_export.html",
                     mime="text/html",
                     key="biomni_tutor_chat_export",
                     use_container_width=True,

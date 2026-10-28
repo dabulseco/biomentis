@@ -1081,7 +1081,7 @@ def save_html_export(html_doc: str, filename_prefix: str, downloads_dir: str | N
     target_dir = downloads_dir or default_downloads_dir()
     os.makedirs(target_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"biomni_{filename_prefix}_{timestamp}.html"
+    filename = f"biomentis_{filename_prefix}_{timestamp}.html"
     path = os.path.join(target_dir, filename)
     with open(path, "w", encoding="utf-8") as f:
         f.write(html_doc)

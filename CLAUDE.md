@@ -57,6 +57,7 @@ $P -m biomentis.agent.tests.test_plot_mode         # class plot setting + run_st
 $P -m biomentis.agent.tests.test_step_plots        # plots shown in their step, or withheld under "student"
 $P -m biomentis.agent.tests.test_plot_feedback     # figure summaries in observations + repeated-step guard
 $P -m biomentis.agent.tests.test_show_structure    # plot guidance, show_structure tool, uploaded structures
+$P -m biomentis.agent.tests.test_run_quality       # evidence check before an answer, run-quality summary, critic checks numbers
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

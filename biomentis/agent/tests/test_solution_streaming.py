@@ -88,9 +88,14 @@ def _run(message_contents: list[str]) -> list:
     )
 
 
+def _is_answer_event(e) -> bool:
+    """A main-panel event other than the run-quality line that follows every answer."""
+    return getattr(e, "channel", None) == "main" and getattr(e, "title", None) != "📊 Run quality"
+
+
 def _main_texts(events) -> list[str]:
-    """Content of everything that reaches the main (answer) panel."""
-    return [e.content for e in events if getattr(e, "channel", None) == "main"]
+    """Content of the answers that reach the main (answer) panel."""
+    return [e.content for e in events if _is_answer_event(e)]
 
 
 # --- Tests ----------------------------------------------------------------
@@ -126,7 +131,7 @@ def test_revised_solution_reaches_the_main_panel() -> None:
         any(_PLAN in m for m in main),
         f"main panel got: {[m[:60] for m in main]}",
     )
-    titles = [e.title for e in events if getattr(e, "channel", None) == "main"]
+    titles = [e.title for e in events if _is_answer_event(e)]
     _check(
         "the revision is labelled as one, so two answers aren't confusing",
         any("revised after self-critique" in (t or "") for t in titles),
@@ -146,7 +151,7 @@ def test_single_solution_is_unchanged() -> None:
     main = _main_texts(events)
     _check("exactly one main-panel entry", len(main) == 1, f"got {len(main)}")
     _check("it is the answer", main and _ANSWER in main[0], f"got {main[:1]}")
-    titles = [e.title for e in events if getattr(e, "channel", None) == "main"]
+    titles = [e.title for e in events if _is_answer_event(e)]
     _check("titled '✅ Answer', not a revision", titles == ["✅ Answer"], f"{titles}")
 
 

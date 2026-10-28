@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from biomentis.run_quality import EVIDENCE_ITEMS, EVIDENCE_NUDGE_PREFIX, format_quality_summary, run_evidence
 from biomentis.utils import NOT_DONE_NUDGE, PARSE_ERROR_NUDGE
 
 SUPPORTED_FILE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".pdf")
@@ -334,6 +335,12 @@ def stream_agent_events(
                     type="status",
                     content="The model gave an answer that says the work isn't finished — asking it to continue.",
                 )
+            elif content.startswith(EVIDENCE_NUDGE_PREFIX):
+                labels = ", ".join(EVIDENCE_ITEMS[key][0] for key in EVIDENCE_ITEMS if EVIDENCE_ITEMS[key][1] in content)
+                yield UIEvent(
+                    type="status",
+                    content=f"The answer was sent back for missing evidence ({labels}).",
+                )
             t = time()
             continue
 
@@ -498,6 +505,17 @@ def stream_agent_events(
         except Exception as exc:
             print(f"[step_trace] could not close run: {exc}")
 
+    if s and s.get("messages"):
+        try:
+            yield UIEvent(
+                type="status",
+                channel="main",
+                title="📊 Run quality",
+                content=format_quality_summary(run_evidence(s["messages"])),
+            )
+        except Exception as exc:  # the summary must never cost the answer
+            print(f"[run_quality] could not summarize the run: {exc}")
+
     yield UIEvent(type="complete", content="👈 Returning the result to the main interface...", title="🔄 Complete")
 
 
@@ -527,7 +545,9 @@ def transcript_entry_for_event(
     entry: dict[str, Any] | None = None
 
     if kind == "status":
-        entry = {"panel": "inner", "role": "assistant", "content": event.content}
+        entry = {"panel": "main" if event.channel == "main" else "inner", "role": "assistant", "content": event.content}
+        if event.title:
+            entry["title"] = event.title
     elif kind == "reasoning":
         entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "solution":

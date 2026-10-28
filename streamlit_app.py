@@ -109,6 +109,24 @@ with st.sidebar:
 
     st.caption(f"Active: **{selected_model}** via **{selected_source}**")
 
+    # How hard the agent works before an answer is accepted. Read below when
+    # the agent is configured, so a change applies from the next run.
+    st.toggle(
+        "Require evidence before answering",
+        value=True,
+        key="biomentis_evidence_gate",
+        help="Sends the first answer back (at most twice) until the run has consulted a "
+        "literature source, computed its numbers in code and made a figure.",
+    )
+    st.segmented_control(
+        "Self-critique rounds",
+        options=[0, 1, 2, 3],
+        default=2,
+        key="biomentis_critique_rounds",
+        help="Reviews of the answer by the agent's model before it is final. Each round can "
+        "send the agent back to recompute numbers or find sources. 0 turns review off.",
+    )
+
     # NCBI contact email. Rendered here (early, before the agent is built)
     # so `Bio.Entrez.email` is in place before any Entrez-touching code runs
     # — including the agent's own generated snippets, which `run_python_repl`
@@ -188,10 +206,11 @@ tutor.load_priorities(user_id)
 # 3. Re-thread them into the agent's system prompt. `agent.configure()`
 #    rebuilds the system prompt; if there are priorities we want them
 #    appended on the *next* invocation, which is what `configure()` does.
-# self_critic=True adds one "think hard about what's missing" pass after
-# the agent proposes a solution (see A1.execute_self_critic) before it's
-# shown to the user — a built-in gap-check that was previously wired but
-# never enabled here.
+# self_critic=True adds "think hard about what's missing" passes after the
+# agent proposes a solution (see A1.execute_self_critic), as many as the
+# sidebar's "Self-critique rounds"; the critic also checks that each number
+# was computed in code. evidence_gate sends an answer back until the run has
+# a source, a calculation and a figure (see biomentis/run_quality.py).
 #
 # Skipped while a run is in flight. `configure()` rebuilds the system prompt
 # and recompiles the LangGraph app, and since runs moved onto a background
@@ -199,10 +218,14 @@ tutor.load_priorities(user_id)
 # one — which would mutate the agent out from under the worker driving it.
 # Between turns there is nothing to disturb, which is when it matters anyway.
 if not st.session_state.get("biomni_run_active"):
+    # A deselected segmented control reads None; treat it as the default.
+    _critique_rounds = st.session_state.get("biomentis_critique_rounds")
+    _critique_rounds = 2 if _critique_rounds is None else _critique_rounds
     agent.configure(
-        self_critic=True,
-        test_time_scale_round=1,
+        self_critic=_critique_rounds > 0,
+        test_time_scale_round=_critique_rounds,
         critic_priorities=list(tutor.active_priorities),
+        evidence_gate=st.session_state.get("biomentis_evidence_gate", True),
     )
 
 # Sidebar order: Model picker (above) → REPL (existing) → Tutor (new).

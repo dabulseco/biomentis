@@ -107,6 +107,7 @@ from biomentis.tool.tool_registry import ToolRegistry
 from biomentis.run_journal import RunJournal, journaled
 from biomentis.plots import plot_guidance, save_plot_pngs
 from biomentis.structures import default_artifact_dir, set_current_run_id
+from biomentis.run_quality import MAX_EVIDENCE_ASKS, evidence_nudge, missing_evidence, run_evidence
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
     ExportEntry,
@@ -1696,7 +1697,7 @@ Each library is listed with its description to help you understand its functiona
 
         return formatted_prompt
 
-    def configure(self, self_critic=False, test_time_scale_round=0, critic_priorities=None):
+    def configure(self, self_critic=False, test_time_scale_round=0, critic_priorities=None, evidence_gate=False):
         """Configure the agent with the initial system prompt and workflow.
 
         Args:
@@ -1708,9 +1709,13 @@ Each library is listed with its description to help you understand its functiona
                 shaping" hook — no model weights change, but the agent
                 enters the session aware of its own past failure modes.
                 When None or empty, the system prompt is unchanged.
+            evidence_gate: Send a final answer back, at most MAX_EVIDENCE_ASKS
+                times, until the run has consulted a literature source, made a
+                calculation in code and drawn a figure (see run_quality).
         """
         # Store self_critic for later use
         self.self_critic = self_critic
+        self.evidence_gate = evidence_gate
         # `go`/`go_stream` reset this per call, but callers that drive the
         # graph directly (e.g. the Streamlit UI's stream_agent_events,
         # which invokes `self.app.stream` without going through either
@@ -1941,8 +1946,27 @@ Each library is listed with its description to help you understand its functiona
             # Add the message to the state before checking for errors
             state["messages"].append(AIMessage(content=msg.strip()))
 
+            # With the evidence check on, a final answer from a run that never
+            # consulted a source, calculated or plotted goes back for those
+            # first. Not when the context is nearly full: then the wrap-up
+            # instruction has already asked for the answer now.
+            missing = []
+            if answer_match and getattr(self, "evidence_gate", False) and not getattr(self, "_context_wrap_ups", 0):
+                evidence = run_evidence(state["messages"])
+                if evidence.evidence_asks < MAX_EVIDENCE_ASKS:
+                    missing = missing_evidence(evidence)
+            if missing:
+                print(f"the answer lacks evidence ({', '.join(missing)}); sending it back")
+                # Tags off, so the draft isn't shown or taken as the answer.
+                state["messages"][-1] = AIMessage(content=re.sub(r"</?solution>", "", msg, flags=re.IGNORECASE).strip())
+                state["messages"].append(HumanMessage(content=evidence_nudge(missing)))
+                answer_match = None
+
             trace_parse_error = False
-            if answer_match:
+            if missing:
+                state["next_step"] = "generate"
+                trace_branch = "retry_missing_evidence"
+            elif answer_match:
                 state["next_step"] = "end"
                 trace_branch = "solution"
             elif execute_match:
@@ -2218,10 +2242,15 @@ Each library is listed with its description to help you understand its functiona
                 messages = state["messages"]
                 feedback_prompt = f"""
                 Here is a reminder of what is the user requested: {getattr(self, "user_task", "")}
-                Examine the previous executions, reaosning, and solutions.
+                Examine the previous executions, reasoning, and solutions.
                 Critic harshly on what could be improved?
                 Be specific and constructive.
                 Think hard what are missing to solve the task.
+                Check every number in the solution (rates, speeds, power, mass transfer, yields,
+                concentrations, doses, regulatory limits). For each, say whether it was computed in
+                code in this run and whether its units are right. List the ones that were only
+                stated, or look wrong, and tell the agent to recompute them in code.
+                Name design choices or limits that no source consulted in this run supports.
                 No question asked, just feedbacks.
                 """
                 # Divergent by design ("think hard what are missing"), so this is

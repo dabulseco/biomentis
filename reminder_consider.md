@@ -32,5 +32,17 @@ You said your cost concern with Anthropic is "minimize it — use it only when t
 
 So the cost is bounded, but the LLM's behavior — not yours — is what determines the spend. A daily cap is the right defense.
 
-## 2. Other items TBD
+## 2. Keep the end of long step output, not just the start
+
+**Status today (2026-10-28):** when a step prints more than 10,000 characters, the agent passes only the first 10,000 back to the model, behind the note "The output is too long to be added to context. Here are the first 10K characters..." (`biomentis/agent/a1.py`, execute node). The code itself ran in full, so files, variables and plots are intact.
+
+**Why this is worth revisiting:** results and summaries usually print last (a best match, a p-value, a final table row). When a step prints a big table first, the model never sees the part that matters, and either guesses or spends a step reprinting it.
+
+**What "implementing" this would look like:**
+
+- [ ] Keep the first ~6K and last ~4K characters, joined by a marker such as `… 12,345 characters omitted …`, and reword the note to match.
+- [ ] Update `_TRUNCATED_RE` in `biomentis/eval/step_trace.py` if the note's wording changes.
+- [ ] Add a check to a test suite (e.g. `test_context_budget`) that a long output keeps both ends.
+
+## 3. Other items TBD
 _(none yet — add here as you think of them, promote to `recommend.md` when ready to act)_

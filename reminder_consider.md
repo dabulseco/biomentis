@@ -87,5 +87,43 @@ Items 2–5 come from notes that show up in the agent's step observations. Each 
 - [ ] **B. Install it:** `pip install scholarly==1.7.11` in the `biomni` env (the version the old env files pin). Quick, but unreliable: Google Scholar has no official API, `scholarly` scrapes it through free proxies, and Scholar often blocks that with CAPTCHAs, so the tool would fail some of the time with a different error.
 - [ ] **C. Remove `query_scholar` from the model's tool list (recommended).** Small change. Stops the wasted step without adding a flaky dependency.
 
-## 6. Other items TBD
+## 6. Evaluate the knowledge base for constraints and repeatability (added 2026-10-28)
+
+**When:** once runs without the knowledge base (KB) are robust, so there is a baseline to compare against.
+
+**How the KB reaches the agent today:** at the start of each run, the 4 passages that best match the prompt are retrieved (`_AGENT_CONTEXT_K = 4` in `biomentis/agent/tutor/kb.py`). They are added to the prompt, and the agent is asked to cite them. The same prompt against an unchanged KB retrieves the same 4 passages every time, so they are a fixed input to every run.
+
+**Repeatability (a modest gain).** Temperature controls only the model's sampling, which is already small at 0 or 0.2. Most run-to-run variation comes from elsewhere:
+- different paths taken early (19 steps vs 6 in the two CHO runs of 2026-10-28), which compound;
+- inputs that change: PubMed and web results vary from day to day, and so does which searches the agent chooses;
+- cloud models, which can vary slightly even at temperature 0.
+
+The KB reduces the first two: with the key facts already in the prompt, the agent anchors its early decisions on them, so runs tend to converge. It narrows the variation but doesn't remove it.
+
+**Constraints and accuracy (the bigger gain).**
+- Limits and specifications come from your documents rather than the model's memory. Errors like "10 pg/dose" (correct: 10 ng/dose) are memory errors that a passage corrects directly.
+- The independent reviewer sees the passages too, because they are part of the task it is given. It can then check the answer against your sources, not just its own knowledge, which matters most with a smaller reviewer such as gpt-oss:20b.
+- The instruction cards already cite the KB, so vetted sources keep the agent's workflow and the teaching material consistent.
+
+**Limits to plan around (possible changes when the KB is in use):**
+- [ ] **Only 4 passages per run, matched to the whole prompt.** For an 8-stage workflow that may cover only one or two stages. Retrieve per stage, or more passages for long workflows.
+- [ ] **The evidence check doesn't count the KB as a source** (`missing_evidence` in `biomentis/run_quality.py`). It still demands a PubMed or web search when the KB already holds the answer. Count cited KB passages as evidence.
+- [ ] **Answers are only as good as the documents.** Where a document is wrong, or disagrees with the literature, the agent will follow the document. Prefer authoritative sources: ICH Q5A/Q5B/Q5D/Q6B/Q11, the WHO limit on residual DNA, peer-reviewed process papers such as the NISTCHO benchmark. Course notes are a weaker basis.
+
+**The experiment:**
+1. Pick one prompt (e.g. the CHO antibody workflow) and fix the settings: same agent model, agent temperature 0, self-critique temperature ~0.3, same self-critique rounds, evidence check on, same Critic model.
+2. Run it 3 times **without** the KB. For each run, record:
+   - the key decisions (e.g. scale-up criterion, purification order);
+   - the key numbers (e.g. agitation speed, residual DNA limit, titer);
+   - the independent review verdicts and the number of problems found;
+   - the run-quality line.
+3. Load the KB and run the same prompt 3 times **with** it, at the same settings, recording the same things.
+4. Compare. Signs the KB helps:
+   - less spread in decisions and numbers across the 3 runs;
+   - fewer review findings, especially on numbers, units and limits;
+   - more statements citing KB sources;
+   - no new errors where a KB document disagrees with the literature.
+5. Optionally, repeat on a second machine or model, to separate model and hardware effects from KB effects.
+
+## 7. Other items TBD
 _(none yet — add here as you think of them, promote to `recommend.md` when ready to act)_

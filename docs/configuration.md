@@ -155,7 +155,7 @@ These apply from the next run; the "Run quality" line under each answer records 
 | Self-critique temperature | `BIOMNI_CREATIVE_TEMPERATURE` (0.7) | Higher finds more varied gaps; lower is more repeatable. |
 | Self-critique rounds | 2 | Reviews by the agent's own model; each checks that numbers were computed in code. 0 turns it off. |
 | Require evidence before answering | on | Sends an answer back (at most twice) until the run has a literature source, a calculation in code and a figure. It also asks, once each, for figures of computed tables that no figure shows (named by their printed headings) and for figures the answer cites but never drew. |
-| Independent review | the Critic model (Tutor → Self-improvement) | A different model reviews the final answer against the run's code output and sources. "Needs rework" triggers one correction round and a re-review; both are shown under the answer. Off when the Critic is "stub". |
+| Independent review | the Critic model (Tutor → Self-improvement) | A different model reviews the final answer against the run's code output and sources. Before the review it web-searches the answer's key assumptions; a "supported" or "contradicted" status that cites none of the searched sources becomes "unclear", and one whose converted value the reviewer itself puts more than 3× outside the reported range becomes "contradicted". "Needs rework" triggers one correction round and a re-review; both are shown under the answer. Off when the Critic is "stub". |
 
 Temperature 0 makes a model pick its most likely next token, so repeated runs mostly match; it is not a guarantee. Cloud-hosted models can still vary between runs, and every run that searches the literature or the web can get different results back.
 

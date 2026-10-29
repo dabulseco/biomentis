@@ -300,6 +300,118 @@ def require_sources(review: Review, assumption_checks: str) -> Review:
     return review
 
 
+# How far outside the reported range the answer's value may sit before the
+# reviewer's own numbers overrule its status.
+OUTSIDE_FACTOR = 3.0
+
+_SUPERSCRIPTS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
+_SCALE_WORDS = {"thousand": 1e3, "million": 1e6, "billion": 1e9}
+_QUANTITY_RE = re.compile(
+    r"(?P<bound>[<>≤≥]\s*|up to\s+|above\s+|below\s+)?"
+    r"(?:10\s*\^\s*(?P<pow>[-−]?\d+)|10(?P<sup>[⁻⁰¹²³⁴⁵⁶⁷⁸⁹]+)"
+    r"|(?P<num>\d[\d,]*(?:\.\d+)?)(?:\s*[x×*]\s*10\s*(?:\^\s*(?P<mpow>[-−]?\d+)|(?P<msup>[⁻⁰¹²³⁴⁵⁶⁷⁸⁹]+))"
+    r"|[eE](?P<epow>[+-]?\d+))?(?P<scale>(?:\s+hundred)?(?:\s+(?:thousand|million|billion))?)"
+    r"|(?:several|a few)?\s*(?P<wscale>hundred thousand|thousand|million|billion))"
+    r"\s*(?P<unit>(?!(?:to|and|or)\b)[A-Za-zµμ%]+(?:\s*/\s*[A-Za-zµμ]+)?)?",
+    re.IGNORECASE,
+)
+
+
+def _unit(text: str | None) -> str:
+    unit = re.sub(r"\s+", "", (text or "").lower()).replace("μ", "u").replace("µ", "u")
+    return {"ppm": "ng/mg"}.get(unit, unit)
+
+
+def _quantities(text: str) -> list[tuple[float, str, str]]:
+    """(value, normalised unit, bound) for each number in `text`, words like "million" included."""
+    found = []
+    for m in _QUANTITY_RE.finditer(text or ""):
+        if m.group("pow") or m.group("sup"):
+            value = 10 ** float((m.group("pow") or m.group("sup")).translate(_SUPERSCRIPTS).replace("−", "-"))
+        elif m.group("num"):
+            value = float(m.group("num").replace(",", ""))
+            power = m.group("mpow") or m.group("msup") or m.group("epow")
+            if power:
+                value *= 10 ** float(power.translate(_SUPERSCRIPTS).replace("−", "-"))
+            for word in (m.group("scale") or "").lower().split():
+                value *= 100 if word == "hundred" else _SCALE_WORDS[word]
+        elif m.group("wscale"):
+            value = 1.0
+            for word in m.group("wscale").lower().split():
+                value *= 100 if word == "hundred" else _SCALE_WORDS[word]
+        else:
+            continue
+        bound = (m.group("bound") or "").strip().lower()
+        bound = ">" if bound in (">", "≥", "above") else "<" if bound in ("<", "≤", "up to", "below") else ""
+        found.append((value, _unit(m.group("unit")), bound, m.start(), m.end()))
+    # In "100,000 to 1,000,000 ng/mg" or "2-4 ppm" the first number takes the second's unit.
+    for i in range(len(found) - 1):
+        value, unit, bound, start, end = found[i]
+        if not unit and re.fullmatch(r"\s*(?:-|–|‑|—|to)\s*", (text or "")[end : found[i + 1][3]]):
+            found[i] = (value, found[i + 1][1], bound, start, end)
+    return [(value, unit, bound) for value, unit, bound, _, _ in found]
+
+
+def _reported_range(text: str, unit: str) -> tuple[float, float] | None:
+    values = [(v, b) for v, u, b in _quantities(text) if u == unit]
+    if not values:
+        return None
+    if len(values) == 1:
+        value, bound = values[0]
+        return (value, float("inf")) if bound == ">" else (0.0, value) if bound == "<" else (value, value)
+    numbers = [v for v, _ in values]
+    return min(numbers), max(numbers)
+
+
+def compare_reported(review: Review) -> Review:
+    """Mark "contradicted" an assumption whose own numbers put it far outside the reported range.
+
+    The reviewer fills "reported" (in the sources' units) and "converted" (the
+    answer's value in those units) but may still judge wrongly: one wrote
+    14,793 ng/mg against a reported 100,000-1,000,000 ng/mg and called the
+    value realistic. When both are in the same unit and the answer's value is
+    more than OUTSIDE_FACTOR times outside the range, the status becomes
+    "contradicted". "converted" must start from the answer's own value; that
+    value and the result are compared, and either one fitting a reported
+    range in its unit keeps the reviewer's status. Ranges written in words
+    ("several hundred thousand to several million") are read too.
+    """
+    flipped = False
+    for a in review.assumptions:
+        if str(a.get("status", "")).lower() == "contradicted":
+            continue
+        converted = _quantities(str(a.get("converted", "")))
+        used = _quantities(str(a.get("value", "")))
+        # Only a conversion of the answer's own value (its first number, not the conditions after it) counts,
+        # and only that value and the result are compared, not a divisor such as the titer.
+        start = [q for q in converted if used and abs(q[0] - used[0][0]) <= 1e-9 * max(abs(used[0][0]), 1)]
+        if not start:
+            continue
+        outside, inside = [], False
+        for value, unit, _ in (start[0], converted[-1]):
+            span = _reported_range(str(a.get("reported", "")), unit)
+            if not unit or span is None or value <= 0:
+                continue
+            low, high = span
+            if value * OUTSIDE_FACTOR < low or value > high * OUTSIDE_FACTOR:
+                outside.append((value, unit, low, high))
+            else:
+                inside = True
+        # Any of the answer's values that fits a reported range in the same unit settles it.
+        if outside and not inside:
+            value, unit, low, high = outside[-1]
+            shown = f"{low:,.4g}" if low == high else f">{low:,.4g}" if high == float("inf") else f"{low:,.4g}–{high:,.4g}"
+            a["evidence"] = (
+                f"{a.get('evidence', '')} (marked {a.get('status') or 'unclear'} by the reviewer, but its own numbers "
+                f"put {value:,.4g} {unit} more than {OUTSIDE_FACTOR:g}× outside the reported {shown} {unit})"
+            ).strip()
+            a["status"] = "contradicted"
+            flipped = True
+    if flipped and review.verdict == "accept":
+        review.verdict = "accept_with_corrections"
+    return review
+
+
 def build_review_prompt(inputs: dict, assumption_checks: str = "") -> str:
     critiques = "\n\n".join(f"[round {i}]\n{c}" for i, c in enumerate(inputs["critiques"], 1)) or "(none)"
     same = inputs["first_draft"] == inputs["final_answer"]

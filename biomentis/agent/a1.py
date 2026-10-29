@@ -120,6 +120,7 @@ from biomentis.independent_review import (
     build_assumptions_prompt,
     build_review_prompt,
     check_assumptions,
+    compare_reported,
     feedback_for_agent,
     parse_assumptions,
     parse_review,
@@ -2385,7 +2386,7 @@ Each library is listed with its description to help you understand its functiona
                     review = Review(error=f"the review call failed ({type(exc).__name__}: {exc})")
                     break
                 raw_replies.append(reply_text)
-                review = require_sources(parse_review(reply_text), assumption_checks)
+                review = compare_reported(require_sources(parse_review(reply_text), assumption_checks))
                 if not review.error:
                     break
                 print(f"independent review: {review.error}; asking once more")

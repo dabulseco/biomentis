@@ -478,6 +478,72 @@ def test_assumption_checks() -> None:
            prompt[-300:])
 
 
+def test_compare_reported() -> None:
+    print("\n[compare_reported] the reviewer's own numbers overrule its status")
+    from biomentis.independent_review import _quantities, compare_reported, parse_review
+
+    _check("ranges and words read as numbers",
+           [q[0] for q in _quantities("several hundred thousand to several million ng/mg")] == [1e5, 1e6]
+           and [q[1] for q in _quantities("100,000 to 1,000,000 ppm")] == ["ng/mg", "ng/mg"],
+           str(_quantities("several hundred thousand to several million ng/mg")))
+    _check("powers of ten and bounds",
+           _quantities("~10⁶ ppm") == [(1e6, "ng/mg", "")] and _quantities("2.5 x 10^5 ppm") == [(2.5e5, "ng/mg", "")]
+           and _quantities(">50,000 ppm") == [(5e4, "ng/mg", ">")])
+
+    def review(*assumptions, verdict="accept"):
+        return parse_review(json.dumps({"verdict": verdict, "summary": "", "changes": [], "problems": [],
+                                        "rationale": [], "assumptions": list(assumptions)}))
+
+    hcp = {"assumption": "harvest HCP", "value": "100 mg/L", "evidence": "USP: 100,000 to 1,000,000 ng/mg, https://usp.org"}
+    gemma = compare_reported(review(dict(hcp, status="supported", reported="several hundred thousand to several million ng/mg",
+                                         converted="100 mg/L / 6.76 g/L = 14,793 ng/mg")))
+    a = gemma.assumptions[0]
+    _check("14,793 ng/mg against 100,000-1,000,000 becomes contradicted",
+           a["status"] == "contradicted" and "more than 3× outside the reported 1e+05–1e+06 ng/mg" in a["evidence"], str(a))
+    _check("and an accept becomes accept with corrections", gemma.verdict == "accept_with_corrections", gemma.verdict)
+    bound = compare_reported(review(dict(hcp, status="unclear", reported=">50,000 ppm", converted="100 mg/L = 100 ppm")))
+    _check("a lower bound counts", bound.assumptions[0]["status"] == "contradicted", str(bound.assumptions))
+    close = compare_reported(review(dict(hcp, status="supported", reported="100,000-1,000,000 ppm",
+                                         converted="100 mg/L / 0.25 g/L = 400,000 ppm")))
+    _check("a value inside the range is left alone",
+           close.assumptions[0]["status"] == "supported" and close.verdict == "accept", str(close.assumptions))
+    near = compare_reported(review(dict(hcp, status="supported", reported="100,000-1,000,000 ppm",
+                                        converted="100 mg/L / 2 g/L = 50,000 ppm")))
+    _check("within 3x of the range is left alone", near.assumptions[0]["status"] == "supported")
+    other_unit = compare_reported(review(dict(hcp, status="supported", reported="0.5-2 g/L",
+                                              converted="100 mg/L / 6.76 g/L = 14,793 ng/mg")))
+    _check("different units are not compared", other_unit.assumptions[0]["status"] == "supported")
+    words = compare_reported(review(dict(hcp, status="supported", reported="several-fold higher than the answer",
+                                         converted="100 mg/L / 6.76 g/L = 14,793 ng/mg")))
+    _check("a reported value with no number is not compared", words.assumptions[0]["status"] == "supported")
+    side = compare_reported(review({"assumption": "kLa", "value": "30 h^-1 at 0.004 m/s", "status": "unclear",
+                                    "reported": "kLa 20-25/h at 0.02-0.04 vvm", "converted": "vs 0.004 m/s ≈ 0.14 vvm",
+                                    "evidence": "x"}))
+    _check("a side remark that does not convert the answer's value is ignored",
+           side.assumptions[0]["status"] == "unclear", str(side.assumptions))
+    glucose = compare_reported(review({"assumption": "glucose floor", "value": "2.0 g/L", "status": "supported",
+                                       "reported": "2-4 g/L; one control at 0.8 mM", "converted": "2.0 g/L = 11.1 mM",
+                                       "evidence": "x"}))
+    _check("one unit that fits the range keeps the status", glucose.assumptions[0]["status"] == "supported",
+           str(glucose.assumptions))
+    rework = compare_reported(review(dict(hcp, status="supported", reported=">50,000 ppm", converted="100 mg/L = 100 ppm"),
+                                     verdict="needs_rework"))
+    _check("needs rework stays needs rework", rework.verdict == "needs_rework")
+
+    llm = _Scripted(["<solution>HCP 100 mg/L (chosen)</solution>"])
+    accepted = json.dumps({"verdict": "accept", "summary": "Fine.", "changes": [], "problems": [], "rationale": [],
+                           "assumptions": [dict(hcp, status="supported", reported="100,000-1,000,000 ng/mg",
+                                                converted="100 mg/L / 6.76 g/L = 14,793 ng/mg",
+                                                evidence="https://ex.org reports 100,000-1,000,000 ng/mg")]})
+    reviewer = _Reviewer([accepted], assumptions=[{**hcp, "quote": "100 mg/L (chosen)", "query": "HCCF HCP ppm"}])
+    agent = _agent(llm, reviewer, search=lambda q, num_results=3: "URL: https://ex.org\nDescription: HCCF HCP 10^5-10^6 ppm")
+    agent.go("Design a 1000 L process.")
+    last = agent.run_reviews[-1]["review"] if agent.run_reviews else None
+    _check("the agent applies the check to the review it shows",
+           last is not None and last.assumptions[0]["status"] == "contradicted" and last.verdict == "accept_with_corrections",
+           str(last))
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Independent review tests")
@@ -493,6 +559,7 @@ def run_all() -> int:
         test_set_temperatures,
         test_retry_and_saved_replies,
         test_assumption_checks,
+        test_compare_reported,
     ):
         try:
             test()

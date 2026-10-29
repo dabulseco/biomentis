@@ -102,7 +102,12 @@ from biomentis.eval.step_trace import StepTrace
 from biomentis.know_how import KnowHowLoader
 from biomentis.llm import SourceType, get_llm
 from biomentis.model.retriever import ToolRetriever
-from biomentis.tool.support_tools import run_python_repl
+# Imported together, at module level: Streamlit re-imports changed modules
+# between reruns while the agent in session_state keeps this module's
+# references, and a later `from ... import` inside a method would read the
+# plots from the new copy while the code ran in the old one (2026-10-28:
+# five figures drawn, none saved).
+from biomentis.tool.support_tools import clear_captured_plots, get_captured_plots, run_python_repl
 from biomentis.tool.tool_registry import ToolRegistry
 from biomentis.run_journal import RunJournal, journaled
 from biomentis.plots import plot_guidance, save_plot_pngs
@@ -2193,8 +2198,6 @@ Each library is listed with its description to help you understand its functiona
                 # Get any plots that were generated during this execution
                 execution_plots = []
                 try:
-                    from biomentis.tool.support_tools import get_captured_plots
-
                     current_plots = get_captured_plots()
                     execution_plots = current_plots.copy()
                 except Exception as e:
@@ -3449,8 +3452,6 @@ Each library is listed with its description to help you understand its functiona
             any exceptions gracefully to prevent execution failures.
         """
         try:
-            from biomentis.tool.support_tools import clear_captured_plots
-
             clear_captured_plots()
         except Exception as e:
             print(f"Warning: Could not clear execution plots: {e}")

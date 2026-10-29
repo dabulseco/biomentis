@@ -25,6 +25,7 @@ What these tests pin down:
   15. A consumer split mid-run re-attaches with each plot/withheld/structure
       event exactly once, and restore matches
   16. The patched plt.show prints "Plot captured." (neutral under "student")
+  17. A plot is still saved after Streamlit re-imports support_tools mid-session
 
 Run with:
     python -m biomentis.agent.tests.test_step_plots
@@ -448,6 +449,55 @@ def test_show_patch_message_is_neutral():
            .split("def show_with_capture")[1].replace("captured for the record but never displayed", ""), "")
 
 
+def test_plot_saved_after_module_reimport():
+    print("\n[17] A plot is saved after Streamlit re-imports support_tools")
+    # Streamlit drops changed modules from sys.modules between reruns; the
+    # agent in session_state keeps its old references. A 2026-10-28 run drew
+    # five figures and saved none: the code ran in the old support_tools and
+    # the plots were read from the new one.
+    import importlib
+
+    from langchain_core.messages import AIMessage
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+    except ImportError:
+        print("  (matplotlib unavailable; skipping)")
+        return
+    from biomentis.agent.a1 import A1
+
+    class _LLM:
+        def __init__(self):
+            self.replies = [
+                "<execute>import matplotlib.pyplot as plt\nplt.plot([1, 2, 3])\nplt.title('t')\nplt.show()</execute>",
+                "<solution>done</solution>",
+            ]
+
+        def invoke(self, messages):
+            return AIMessage(content=self.replies.pop(0))
+
+    agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
+    agent.llm = _LLM()
+    agent.configure()
+    old = os.environ.get("BIOMENTIS_ARTIFACT_DIR")
+    os.environ["BIOMENTIS_ARTIFACT_DIR"] = tempfile.mkdtemp(prefix="step_plots_reimport_")
+    saved = sys.modules.pop("biomentis.tool.support_tools")
+    try:
+        importlib.import_module("biomentis.tool.support_tools")
+        agent.go("Plot something.")
+    finally:
+        sys.modules["biomentis.tool.support_tools"] = saved
+        if old is None:
+            os.environ.pop("BIOMENTIS_ARTIFACT_DIR", None)
+        else:
+            os.environ["BIOMENTIS_ARTIFACT_DIR"] = old
+    entries = [e for e in getattr(agent, "_execution_results", []) if e.get("image_paths")]
+    _check("the figure was saved as a PNG", len(entries) == 1 and os.path.exists(entries[0]["image_paths"][0]),
+           str(getattr(agent, "_execution_results", [])))
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Step plot tests")
@@ -470,6 +520,7 @@ def run_all() -> int:
         test_failing_step_owns_its_figure,
         test_reattach_mid_run_and_restore,
         test_show_patch_message_is_neutral,
+        test_plot_saved_after_module_reimport,
     ):
         try:
             test()

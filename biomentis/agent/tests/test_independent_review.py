@@ -26,6 +26,9 @@ What these tests pin down:
   9.  An unreadable reply is asked for once more, and the raw replies are saved
       beside the run's plots; the prompt asks whether inputs are realistic,
       not only whether the arithmetic is right
+ 10.  Before the review, the reviewer names the key assumptions, each is
+      web-searched, and the review is given the results; a contradicted
+      assumption goes back to the agent and is shown under the answer
 
 Run with:
     python -m biomentis.agent.tests.test_independent_review
@@ -160,7 +163,27 @@ class _Scripted:
         return AIMessage(content=reply)
 
 
-def _agent(llm, reviewer=None, self_critic=False, rounds=0, critic=None):
+class _Reviewer(_Scripted):
+    """A reviewer: answers the assumptions request from `assumptions`, the review from the script.
+
+    `requests` holds only review requests, so counts mean review calls.
+    """
+
+    def __init__(self, replies: list, assumptions: list | None = None):
+        super().__init__(replies)
+        self.assumptions = assumptions or []
+        self.assumption_requests: list = []
+
+    def invoke(self, messages):
+        from biomentis.independent_review import ASSUMPTIONS_SYSTEM_PROMPT
+
+        if messages and messages[0].content == ASSUMPTIONS_SYSTEM_PROMPT:
+            self.assumption_requests.append(list(messages))
+            return AIMessage(content=json.dumps({"assumptions": self.assumptions}))
+        return super().invoke(messages)
+
+
+def _agent(llm, reviewer=None, self_critic=False, rounds=0, critic=None, search=None):
     from biomentis.agent.a1 import A1
 
     agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
@@ -170,6 +193,7 @@ def _agent(llm, reviewer=None, self_critic=False, rounds=0, critic=None):
     agent.configure(self_critic=self_critic, test_time_scale_round=rounds)
     agent.review_llm = reviewer
     agent.review_model_name = "gpt-oss:120b" if reviewer else ""
+    agent.review_search = search or (lambda query, num_results=3: "(no results)")
     return agent
 
 
@@ -178,7 +202,7 @@ def test_correction_round() -> None:
     from biomentis.run_quality import REVIEW_FEEDBACK_PREFIX
 
     llm = _Scripted(["<solution>Draft: 33 rpm</solution>", "<execute>print(124)</execute>", "<solution>Fixed: 124 rpm</solution>"])
-    reviewer = _Scripted([_review_json("needs_rework"), _review_json("accept", problems=[])])
+    reviewer = _Reviewer([_review_json("needs_rework"), _review_json("accept", problems=[])])
     agent = _agent(llm, reviewer)
     log, final = agent.go("Design a 1000 L process.")
     _check("reviewed twice", len(reviewer.requests) == 2, str(len(reviewer.requests)))
@@ -195,7 +219,7 @@ def test_correction_round() -> None:
 def test_other_outcomes() -> None:
     print("\n[5] accept, no reviewer, a failed call, and a second needs-rework")
     llm = _Scripted(["<solution>Good</solution>"])
-    reviewer = _Scripted([_review_json("accept", problems=[])])
+    reviewer = _Reviewer([_review_json("accept", problems=[])])
     agent = _agent(llm, reviewer)
     _, final = agent.go("Q")
     _check("accept: one review, no correction", len(reviewer.requests) == 1 and len(llm.requests) == 1, "")
@@ -207,7 +231,7 @@ def test_other_outcomes() -> None:
     _check("no reviewer: no review", agent.run_reviews == [] and len(llm.requests) == 1, str(agent.run_reviews))
 
     llm = _Scripted(["<solution>Good</solution>"])
-    reviewer = _Scripted([RuntimeError("model not found")])
+    reviewer = _Reviewer([RuntimeError("model not found")])
     agent = _agent(llm, reviewer)
     _, final = agent.go("Q")
     _check("failed call: answer kept", "<solution>Good</solution>" in final, final)
@@ -215,7 +239,7 @@ def test_other_outcomes() -> None:
            str(agent.run_reviews))
 
     llm = _Scripted(["<solution>A</solution>", "<solution>B</solution>"])
-    reviewer = _Scripted([_review_json("needs_rework"), _review_json("needs_rework")])
+    reviewer = _Reviewer([_review_json("needs_rework"), _review_json("needs_rework")])
     agent = _agent(llm, reviewer)
     _, final = agent.go("Q")
     _check("second needs-rework: no third round", len(llm.requests) == 2 and len(reviewer.requests) == 2,
@@ -230,7 +254,7 @@ def test_with_self_critique() -> None:
 
     llm = _Scripted(["<solution>Draft</solution>", "<solution>Revised</solution>"])
     critic = _Scripted(["Check the units."])
-    reviewer = _Scripted([_review_json("accept", problems=[])])
+    reviewer = _Reviewer([_review_json("accept", problems=[])])
     agent = _agent(llm, reviewer, self_critic=True, rounds=1, critic=critic)
     _, final = agent.go("Q")
     _check("critique, then review", len(critic.requests) == 1 and len(reviewer.requests) == 1,
@@ -241,7 +265,7 @@ def test_with_self_critique() -> None:
     _check("the critique text isn't mistaken for the task", CRITIC_FEEDBACK_PREFIX not in prompt.split("EVIDENCE")[0], "")
 
     llm = _Scripted(["no tags"] * 3)
-    reviewer = _Scripted([])
+    reviewer = _Reviewer([])
     agent = _agent(llm, reviewer)
     _, final = agent.go("Q")
     _check("an aborted run is not reviewed", reviewer.requests == [] and agent.run_reviews == [], final)
@@ -315,7 +339,7 @@ def test_retry_and_saved_replies() -> None:
     from biomentis.independent_review import REVIEW_RETRY_MESSAGE, REVIEW_SYSTEM_PROMPT
 
     llm = _Scripted(["<solution>Answer</solution>"])
-    reviewer = _Scripted(["I think it looks fine overall.", _review_json("accept", problems=[])])
+    reviewer = _Reviewer(["I think it looks fine overall.", _review_json("accept", problems=[])])
     agent = _agent(llm, reviewer)
     agent.current_run_id = "run-retry"
     _, final = agent.go("Q")
@@ -329,7 +353,7 @@ def test_retry_and_saved_replies() -> None:
     _check("both raw replies are saved", "looks fine overall" in saved and '"verdict"' in saved, path)
 
     llm = _Scripted(["<solution>Answer</solution>"])
-    reviewer = _Scripted(["not json", "still not json"])
+    reviewer = _Reviewer(["not json", "still not json"])
     agent = _agent(llm, reviewer)
     _, final = agent.go("Q")
     _check("only one retry", len(reviewer.requests) == 2, str(len(reviewer.requests)))
@@ -339,6 +363,119 @@ def test_retry_and_saved_replies() -> None:
 
     _check("the prompt checks inputs, not just arithmetic", "only as good as its inputs" in REVIEW_SYSTEM_PROMPT)
     _check("an unrealistic input is a problem kind", '"assumption"' in REVIEW_SYSTEM_PROMPT)
+
+
+def test_assumption_checks() -> None:
+    print("\n[10] key assumptions are web-searched before the review")
+    from biomentis.independent_review import (
+        ASSUMPTIONS_SYSTEM_PROMPT,
+        REVIEW_SYSTEM_PROMPT,
+        check_assumptions,
+        feedback_for_agent,
+        format_review,
+        parse_assumptions,
+        parse_review,
+        require_sources,
+    )
+
+    hcp = {"assumption": "harvest HCP concentration", "value": "100 mg/L", "quote": "100 mg/L (chosen)",
+           "query": "CHO harvest cell culture fluid host cell protein concentration ppm"}
+    _check("assumptions parsed; a single query is accepted",
+           parse_assumptions(json.dumps({"assumptions": [hcp]})) == [dict(hcp, queries=[hcp["query"]])])
+    two = {"assumption": "harvest HCP", "value": "100 mg/L", "quote": "",
+           "queries": ["CHO harvest HCP mg/L", "host cell protein ppm harvest", "a third", "CHO harvest HCP mg/L"]}
+    _check("two queries kept, duplicates dropped",
+           parse_assumptions(json.dumps({"assumptions": [two]}))[0]["queries"]
+           == ["CHO harvest HCP mg/L", "host cell protein ppm harvest"], str(parse_assumptions(json.dumps({"assumptions": [two]}))))
+    _check("the prompt asks for a second query as the literature reports it",
+           '"queries"' in ASSUMPTIONS_SYSTEM_PROMPT and "the way the literature usually reports it" in ASSUMPTIONS_SYSTEM_PROMPT)
+    asked = []
+    checks2 = check_assumptions(parse_assumptions(json.dumps({"assumptions": [two]})),
+                                search=lambda q, num_results=3: asked.append(q) or f"Title: t\nURL: https://ex.org/{len(asked)}\nDescription: d\n",
+                                page_text=lambda url: "")
+    _check("both queries searched, both result sets shown",
+           asked == two["queries"][:2] and 'RESULTS for "host cell protein ppm harvest"' in checks2, checks2)
+    _check("at most five", len(parse_assumptions(json.dumps({"assumptions": [hcp] * 9}))) == 5)
+    _check("ones without a query are dropped", parse_assumptions(json.dumps({"assumptions": [{"assumption": "x"}]})) == [])
+    _check("prose gives none", parse_assumptions("I would check HCP.") == [])
+
+    def boom(query, num_results=3):
+        raise RuntimeError("quota")
+
+    checks = check_assumptions([hcp], search=lambda q, num_results=3: "Title: HCP review\nURL: https://ex.org\n"
+                               "Description: HCP to mAb mass ratio is around 1:1 (~10^6 ppm) in HCCF")
+    _check("the section names value, quote and query", "VALUE USED: 100 mg/L" in checks and "SEARCH: CHO harvest" in checks, checks)
+    _check("and carries the results", "~10^6 ppm" in checks, checks)
+    _check("a failed search is recorded, not raised", "search failed: RuntimeError: quota" in check_assumptions([hcp], search=boom))
+
+    from biomentis.independent_review import numeric_sentences
+
+    page = ("CHO cells are widely used. Host cell proteins are a concern in every process. "
+            "The total HCP concentration in the harvest was 993,331 ppm. "
+            "Cells were grown at 36.5 °C and 120 rpm. Viability was 95%.")
+    found = numeric_sentences(page, hcp["query"], "1.48 x 10^4 ng/mg")
+    _check("the sentence with the value comes first", found and found[0] == "The total HCP concentration in the harvest was 993,331 ppm.",
+           str(found))
+    _check("sentences without a number are skipped", "Host cell proteins are a concern in every process." not in found, str(found))
+    _check("unrelated numbers are skipped", not any("36.5" in f for f in found), str(found))
+    checks = check_assumptions(
+        [hcp],
+        search=lambda q, num_results=3: "Title: USP note\nURL: https://usp.org/hccf\nDescription: about HCCF\n",
+        page_text=lambda url: page,
+    )
+    _check("values from the result pages are listed with their URL",
+           "VALUES REPORTED IN THE RESULTS:\n      - The total HCP concentration in the harvest was 993,331 ppm. [https://usp.org/hccf]" in checks,
+           checks)
+
+    searched = []
+    llm = _Scripted(["<solution>HCP 100 mg/L (chosen)</solution>", "<solution>HCP ~1 g/L</solution>"])
+    contradicted = json.dumps({
+        "verdict": "needs_rework", "summary": "HCP input far too low.", "changes": [], "rationale": [],
+        "problems": [{"kind": "assumption", "quote": "100 mg/L (chosen)", "issue": "Published HCCF HCP ~10^6 ppm",
+                      "fix": "about 1:1 with the antibody"}],
+        "assumptions": [dict(hcp, status="contradicted", evidence="HCCF HCP:mAb ~1:1 (~10^6 ppm), https://ex.org")],
+    })
+    reviewer = _Reviewer([contradicted, _review_json("accept", problems=[])], assumptions=[hcp])
+    agent = _agent(llm, reviewer, search=lambda q, num_results=3: searched.append(q) or "URL: https://ex.org\nDescription: HCCF HCP ~10^6 ppm")
+    _, final = agent.go("Design a 1000 L process.")
+    _check("assumptions asked for before each review", len(reviewer.assumption_requests) == 2,
+           str(len(reviewer.assumption_requests)))
+    _check("each one searched", searched == [hcp["query"]] * 2, str(searched))
+    prompt = reviewer.requests[0][-1].content if reviewer.requests else ""
+    _check("the review sees the search results", "ASSUMPTION_CHECKS" in prompt and "HCCF HCP ~10^6 ppm" in prompt,
+           prompt[-600:])
+    _check("the agent was told the assumption is contradicted",
+           len(llm.requests) > 1 and "Assumptions the published sources contradict" in llm.requests[1][-1].content)
+    review = parse_review(contradicted)
+    uncited = parse_review(json.dumps({**json.loads(contradicted), "assumptions": [
+        dict(hcp, status="supported", evidence="Typical for CHO harvest."),
+        dict(hcp, status="contradicted", evidence="~10^6 ppm, https://ex.org."),
+        dict(hcp, status="unclear", evidence="no value found")]}))
+    require_sources(uncited, "URL: https://ex.org\n")
+    _check("a verdict without a searched source becomes unclear",
+           [a["status"] for a in uncited.assumptions] == ["unclear", "contradicted", "unclear"]
+           and "without citing a searched source" in uncited.assumptions[0]["evidence"], str(uncited.assumptions))
+    _check("the reviewer is told to cite and convert units",
+           "must cite a URL from the results" in REVIEW_SYSTEM_PROMPT and "Convert units before comparing" in REVIEW_SYSTEM_PROMPT)
+    _check("and to write both numbers before the status",
+           '"reported"' in REVIEW_SYSTEM_PROMPT and '"converted"' in REVIEW_SYSTEM_PROMPT)
+    side = parse_review(json.dumps({**json.loads(contradicted), "assumptions": [
+        dict(hcp, status="contradicted", reported="~10^6 ppm", converted="100 mg/L / 6.76 g/L = 14,800 ppm",
+             evidence="https://ex.org")]}))
+    _check("both numbers shown under the answer",
+           "reported: ~10^6 ppm; as used: 100 mg/L / 6.76 g/L = 14,800 ppm" in format_review(side, "x", False)[1],
+           format_review(side, "x", False)[1])
+    _, body = format_review(review, "x", after_correction=False)
+    _check("shown under the answer", "Key assumptions checked against the literature" in body and "✗ harvest HCP" in body, body)
+    _check("in the correction request", "harvest HCP concentration = 100 mg/L" in feedback_for_agent(review, "x"))
+
+    llm = _Scripted(["<solution>A</solution>"])
+    reviewer = _Reviewer([_review_json("accept", problems=[])], assumptions=[])
+    agent = _agent(llm, reviewer)
+    _, final = agent.go("Q")
+    prompt = reviewer.requests[0][-1].content if reviewer.requests else ""
+    _check("no assumptions: the review still runs", agent.run_reviews and "(none: no assumptions were checked)" in prompt,
+           prompt[-300:])
 
 
 def run_all() -> int:
@@ -355,6 +492,7 @@ def run_all() -> int:
         test_ui,
         test_set_temperatures,
         test_retry_and_saved_replies,
+        test_assumption_checks,
     ):
         try:
             test()

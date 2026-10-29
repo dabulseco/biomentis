@@ -51,13 +51,14 @@ Check, in this order:
    - contradiction: two parts of the answer that disagree
    - rationale: a design decision whose stated reason is wrong, missing, or does not follow
 3. RATIONALE: the 3 to 8 most important decisions in FINAL_ANSWER (choices of method, order of steps, criteria, limits). Is the reason given for each sound?
+4. ASSUMPTIONS: for each assumption listed under ASSUMPTION_CHECKS, judge the value FINAL_ANSWER uses against the search results shown for it: "supported" (the sources report similar values), "contradicted" (they report clearly different values; give the typical value and the URL), or "unclear" (the results don't settle it). "supported" and "contradicted" must cite a URL from the results; without one, the status is "unclear". Convert units before comparing, using the answer's own numbers where needed: e.g. HCP in ppm is ng HCP per mg product, so at a titer of 5 g/L, 100 mg/L of HCP is 20,000 ppm. Fill "reported" and "converted" first, then decide the status from those two numbers: a value several-fold outside the reported range is "contradicted", however plausible it sounds. Search results are partial: say "unclear" rather than guess, but a value that the sources clearly contradict is a problem of kind "assumption" and, if a decision rests on it, makes the verdict "needs_rework".
 
 Verdict:
 - "needs_rework" if any problem would change a decision, a quantity someone would act on, or a safety/quality limit (including a decision that rests on an unrealistic assumption)
 - "accept_with_corrections" if the problems are minor and local
 - "accept" if you found no problems
 
-Be specific and conservative: every problem must quote the exact text from FINAL_ANSWER it concerns, and say what is wrong and what the correct value or reasoning is. Do not flag style. Do not invent problems to have something to say.
+Review FINAL_ANSWER, not FIRST_DRAFT: FIRST_DRAFT is there only to judge the changes. Be specific and conservative: every problem must quote the exact text from FINAL_ANSWER it concerns, and say what is wrong and what the correct value or reasoning is. Do not flag style. Do not invent problems to have something to say.
 
 Return ONLY a JSON object, no markdown fences, with exactly these keys:
 {
@@ -65,8 +66,27 @@ Return ONLY a JSON object, no markdown fences, with exactly these keys:
   "summary": "<2-3 sentences: overall judgment>",
   "changes": [{"change": "<what changed>", "status": "valid" | "invalid" | "unverified", "reason": "<why, citing EVIDENCE where possible>"}],
   "problems": [{"kind": "number" | "assumption" | "unit" | "unsupported" | "contradiction" | "rationale", "quote": "<exact text from FINAL_ANSWER>", "issue": "<what is wrong>", "fix": "<the correct value or reasoning>"}],
-  "rationale": [{"decision": "<the decision>", "sound": "yes" | "no" | "unverified", "note": "<one sentence>"}]
+  "rationale": [{"decision": "<the decision>", "sound": "yes" | "no" | "unverified", "note": "<one sentence>"}],
+  "assumptions": [{"assumption": "<as listed>", "value": "<value FINAL_ANSWER uses>", "reported": "<the value or range the sources report, in their units, or none>", "converted": "<the answer's value in the sources' units, with the arithmetic, e.g. 100 mg/L / 6.76 g/L = 14,800 ppm>", "status": "supported" | "contradicted" | "unclear", "evidence": "<what the sources report, with the URL>"}]
 }"""
+
+ASSUMPTIONS_SYSTEM_PROMPT = """You are preparing an independent review of a research answer. Before the review, its key assumptions will be checked against a web search.
+
+List the 3 to 5 assumed input values in FINAL_ANSWER that most affect its decisions or numbers: rates, concentrations, yields, efficiencies, removal factors, specification limits. Choose values the answer assumes rather than computes from other values; values tagged [A] (assumption) are good candidates. Prefer the assumptions that a decision rests on.
+
+For each, give two web search queries that would find typical published values for it: plain words, 5 to 12 of them, no quotes, naming the system. The first uses the answer's own units. The second asks the same thing the way the literature usually reports it: another unit (ppm or ng/mg for impurities, g/L, a ratio to the product, a log reduction), or the measured quantity's usual name. Example for an HCP concentration of 100 mg/L: "CHO harvest cell culture fluid host cell protein concentration mg/L" and "host cell protein ppm harvest cell culture fluid antibody".
+
+Return ONLY a JSON object, no markdown fences:
+{"assumptions": [{"assumption": "<what is assumed>", "value": "<the value used, with units>", "quote": "<exact text from FINAL_ANSWER>", "queries": ["<query in the answer's units>", "<query as the literature reports it>"]}]}"""
+
+MAX_ASSUMPTIONS = 5
+# Two queries per assumption: in one CHO review (2026-10-28) the query in the
+# answer's units (mg/L) found no harvest HCP value at all, while one in ppm
+# found "more than 50,000 ppm in the CCF" and "993,331 ppm".
+MAX_QUERIES = 2
+# Results per query, and the most text kept from each search.
+_RESULTS_PER_ASSUMPTION = 3
+_SEARCH_TEXT_CHARS = 2000
 
 
 # Sent once when the reviewer's reply could not be read as the JSON asked for.
@@ -85,6 +105,7 @@ class Review:
     changes: list[dict] = field(default_factory=list)
     problems: list[dict] = field(default_factory=list)
     rationale: list[dict] = field(default_factory=list)
+    assumptions: list[dict] = field(default_factory=list)
     error: str = ""
 
     @property
@@ -143,7 +164,143 @@ def review_inputs(messages: list[BaseMessage]) -> dict:
     }
 
 
-def build_review_prompt(inputs: dict) -> str:
+def build_assumptions_prompt(inputs: dict) -> str:
+    return f"TASK:\n{inputs['task']}\n\nFINAL_ANSWER:\n{inputs['final_answer']}"
+
+
+def parse_assumptions(text: str) -> list[dict]:
+    """The assumptions to check, each with its `queries`; [] when the reply isn't usable.
+
+    A single "query" (the earlier format) is accepted as one query.
+    """
+    data = _extract_json(text)
+    if data is None:
+        return []
+    items = []
+    for a in _dicts(data.get("assumptions")):
+        raw = a.get("queries")
+        queries = [str(q).strip() for q in raw] if isinstance(raw, list) else []
+        if str(a.get("query", "")).strip():
+            queries.insert(0, str(a["query"]).strip())
+        queries = list(dict.fromkeys(q for q in queries if q))[:MAX_QUERIES]
+        if queries:
+            items.append({**a, "queries": queries})
+    return items[:MAX_ASSUMPTIONS]
+
+
+# A number with a unit, for picking the sentences of a page that report values.
+_UNIT_RE = re.compile(
+    r"\d[\d.,]*\s*(?:x\s*10\S*\s*)?"
+    r"(ppm|ng/mg|µg/mL|ug/mL|mg/mL|mg/L|g/L|ng/mL|pg/mL|ng/dose|pg/dose|mM|µM|uM|nM|"
+    r"h-1|h⁻¹|/h|W/m3|W/m³|rpm|m/s|vvm|mmHg|mOsm/kg|log|LRV|cells/mL|pg/cell/day|%)",
+    re.IGNORECASE,
+)
+# ng/mg and ppm are the same quantity for HCP, so either matches the other.
+_UNIT_ALIASES = {"ppm": "ng/mg", "ng/mg": "ppm", "ug/ml": "µg/ml", "µg/ml": "ug/ml"}
+_SENTENCES_PER_PAGE = 4
+_SENTENCE_CHARS = 320
+
+
+def numeric_sentences(text: str, query: str, value: str = "", limit: int = _SENTENCES_PER_PAGE) -> list[str]:
+    """The sentences of a page that report a value for the assumption.
+
+    A sentence qualifies when it holds a number with a unit and shares two
+    words with the query (one, if the unit matches the assumption's own value);
+    units matching the assumption's value rank first. Page
+    previews chosen by word overlap tended to show prose about the topic and
+    not the numbers the reviewer needs to judge the value.
+    """
+    words = {w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 3}
+    wanted = {u.lower() for u in _UNIT_RE.findall(value or "")}
+    wanted |= {_UNIT_ALIASES[u] for u in wanted if u in _UNIT_ALIASES}
+    scored = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\s*\|\s*\n", re.sub(r"[ \t]+", " ", text or "")):
+        sentence = sentence.strip()
+        units = {u.lower() for u in _UNIT_RE.findall(sentence)}
+        if not units:
+            continue
+        overlap = sum(1 for w in words if w in sentence.lower())
+        # Two words in common, or one plus the assumption's own unit: a single
+        # shared word ("cells") lets in every number on the page.
+        if overlap < 2 and not (overlap and units & wanted):
+            continue
+        score = overlap + (3 if units & wanted else 0) + (0 if units == {"%"} else 1)
+        scored.append((score, " ".join(sentence.split())[:_SENTENCE_CHARS]))
+    scored.sort(key=lambda pair: -pair[0])
+    return [sentence for _, sentence in scored[:limit]]
+
+
+def _cached_page(url: str) -> str:
+    """The text of a page the last searches returned (no new request)."""
+    from biomentis.tool.literature import _WEB_PAGE_CACHE
+
+    return _WEB_PAGE_CACHE.get(url, "")
+
+
+def check_assumptions(assumptions: list[dict], search=None, page_text=None) -> str:
+    """Search each assumption's query; the results as the ASSUMPTION_CHECKS section.
+
+    `search(query, num_results)` returns formatted results; it defaults to the
+    agent's own web search (`search_google`: Ollama's web search when
+    OLLAMA_API_KEY is set). For each result URL, `page_text(url)` (default: the
+    page text the search returned) supplies the full page, from which the
+    sentences reporting values are added. A failed search is recorded, not raised.
+    """
+    if search is None:
+        from biomentis.tool.literature import search_google as search
+    if page_text is None:
+        page_text = _cached_page
+    blocks = []
+    for i, a in enumerate(assumptions, 1):
+        queries = a.get("queries") or [str(a.get("query", "")).strip()]
+        values, seen_urls, sections = [], set(), []
+        for query in queries:
+            try:
+                results = str(search(query, num_results=_RESULTS_PER_ASSUMPTION) or "(no results)")
+            except Exception as exc:
+                results = f"(search failed: {type(exc).__name__}: {exc})"
+            for url in re.findall(r"^URL: (\S+)", results, re.MULTILINE):
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                try:
+                    found = numeric_sentences(page_text(url), query, str(a.get("value", "")))
+                except Exception:
+                    found = []
+                values += [f"      - {sentence} [{url}]" for sentence in found]
+            sections.append(f"    RESULTS for \"{query}\":\n{_clip(results, _SEARCH_TEXT_CHARS)}")
+        blocks.append(
+            f"[{i}] ASSUMPTION: {a.get('assumption', '')}\n"
+            f"    VALUE USED: {a.get('value', '')}\n"
+            f"    QUOTE: {a.get('quote', '')}\n"
+            f"    SEARCH: {' | '.join(queries)}\n"
+            f"    VALUES REPORTED IN THE RESULTS:\n"
+            + ("\n".join(values) if values else "      (none found)")
+            + "\n" + "\n".join(sections)
+        )
+    return "\n\n".join(blocks)
+
+
+def require_sources(review: Review, assumption_checks: str) -> Review:
+    """Mark "unclear" any supported/contradicted assumption that cites no searched URL.
+
+    The verdict must rest on what the search found. A reviewer marked a
+    harvest HCP of 100 mg/L "supported" as "typical for CHO harvest", with
+    no source; the search had returned no value for it at all.
+    """
+    urls = set(re.findall(r"https?://[^\s\]\)\"'>]+", assumption_checks or ""))
+    for a in review.assumptions:
+        status = str(a.get("status", "")).lower()
+        if status not in ("supported", "contradicted"):
+            continue
+        evidence = str(a.get("evidence", ""))
+        if not any(url.rstrip(".,;") in evidence for url in urls):
+            a["status"] = "unclear"
+            a["evidence"] = f"{evidence} (marked {status} without citing a searched source)".strip()
+    return review
+
+
+def build_review_prompt(inputs: dict, assumption_checks: str = "") -> str:
     critiques = "\n\n".join(f"[round {i}]\n{c}" for i, c in enumerate(inputs["critiques"], 1)) or "(none)"
     same = inputs["first_draft"] == inputs["final_answer"]
     return "\n\n".join(
@@ -152,6 +309,8 @@ def build_review_prompt(inputs: dict) -> str:
             f"EVIDENCE (code the agent ran and its output):\n{inputs['evidence'] or '(no code was run)'}",
             "FIRST_DRAFT:\n" + ("(same as FINAL_ANSWER: the self-critique did not change it)" if same else inputs["first_draft"]),
             f"SELF_CRITIQUE (the agent's own feedback, which led to the revision):\n{critiques}",
+            "ASSUMPTION_CHECKS (web search results for the answer's key assumptions):\n"
+            + (assumption_checks or "(none: no assumptions were checked)"),
             f"FINAL_ANSWER:\n{inputs['final_answer']}",
         ]
     )
@@ -192,6 +351,7 @@ def parse_review(text: str) -> Review:
         changes=_dicts(data.get("changes")),
         problems=_dicts(data.get("problems")),
         rationale=_dicts(data.get("rationale")),
+        assumptions=_dicts(data.get("assumptions")),
     )
 
 
@@ -203,6 +363,10 @@ def feedback_for_agent(review: Review, reviewer: str) -> str:
         lines.append(f"   Problem: {p.get('issue', '')}")
         if p.get("fix"):
             lines.append(f"   Suggested fix: {p['fix']}")
+    contradicted = [a for a in review.assumptions if a.get("status") == "contradicted"]
+    if contradicted:
+        lines += ["", "Assumptions the published sources contradict (check them, and use a sourced value):"]
+        lines += [f"- {a.get('assumption', '')} = {a.get('value', '')}: {a.get('evidence', '')}" for a in contradicted]
     invalid = [c for c in review.changes if c.get("status") == "invalid"]
     if invalid:
         lines += ["", "Changes from your first draft that the reviewer judged wrong:"]
@@ -244,4 +408,14 @@ def format_review(review: Review, reviewer: str, after_correction: bool) -> tupl
             for r in review.rationale
         ]
         parts.append("**Workflow rationale**\n" + "\n".join(rows))
+    if review.assumptions:
+        marks = {"supported": "✓", "contradicted": "✗", "unclear": "?"}
+        rows = [
+            f"- {marks.get(str(a.get('status', '')).lower(), '?')} {a.get('assumption', '')} "
+            f"({a.get('value', '')}"
+            + (f"; reported: {a['reported']}; as used: {a['converted']}" if a.get("reported") and a.get("converted") else "")
+            + f") — {a.get('evidence', '')}"
+            for a in review.assumptions
+        ]
+        parts.append("**Key assumptions checked against the literature**\n" + "\n".join(rows))
     return title, "\n\n".join(parts)

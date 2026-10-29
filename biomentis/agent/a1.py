@@ -113,12 +113,17 @@ from biomentis.run_journal import RunJournal, journaled
 from biomentis.plots import plot_guidance, save_plot_pngs
 from biomentis.structures import default_artifact_dir, set_current_run_id
 from biomentis.independent_review import (
+    ASSUMPTIONS_SYSTEM_PROMPT,
     REVIEW_RETRY_MESSAGE,
     REVIEW_SYSTEM_PROMPT,
     Review,
+    build_assumptions_prompt,
     build_review_prompt,
+    check_assumptions,
     feedback_for_agent,
+    parse_assumptions,
     parse_review,
+    require_sources,
     review_inputs,
 )
 from biomentis.run_quality import MAX_EVIDENCE_ASKS, evidence_nudge, missing_evidence, run_evidence
@@ -2345,13 +2350,33 @@ Each library is listed with its description to help you understand its functiona
             if not isinstance(last, str) or not re.search(r"<solution>.*?</solution>", last, re.DOTALL | re.IGNORECASE):
                 return state
             reviewer = getattr(self, "review_model_name", "") or get_llm_display_name(reviewer_llm)
-            prompt = build_review_prompt(review_inputs(state["messages"]))
+            inputs = review_inputs(state["messages"])
             print(f"independent review {self.review_count + 1} by {reviewer}...")
+            # Phase 1: the reviewer names the answer's key assumptions, and each is
+            # web-searched. Reviewers judged on consistency alone: on a 2026-10-28
+            # CHO run every model tested accepted a harvest HCP input ~70x below
+            # published values, which one search would have shown.
+            raw_replies: list[str] = []
+            assumption_checks = ""
+            try:
+                reply_text = _reply_text(
+                    _invoke_llm_with_retry(
+                        reviewer_llm,
+                        [SystemMessage(content=ASSUMPTIONS_SYSTEM_PROMPT), HumanMessage(content=build_assumptions_prompt(inputs))],
+                    )
+                )
+                raw_replies.append(reply_text)
+                assumptions = parse_assumptions(reply_text)
+                if assumptions:
+                    print(f"independent review: checking {len(assumptions)} assumptions by web search")
+                    assumption_checks = check_assumptions(assumptions, search=getattr(self, "review_search", None))
+            except Exception as exc:  # the review goes on without the checks
+                print(f"independent review: assumption check failed ({type(exc).__name__}: {exc})")
+            prompt = build_review_prompt(inputs, assumption_checks)
             # One retry when the reply can't be read: in a 2026-10-28 run,
             # gemma4:31b-cloud's reply was "not valid JSON", and the same
             # request answered properly when sent again.
             review_messages = [SystemMessage(content=REVIEW_SYSTEM_PROMPT), HumanMessage(content=prompt)]
-            raw_replies: list[str] = []
             review = Review(error="no reply")
             for _attempt in range(2):
                 try:
@@ -2360,7 +2385,7 @@ Each library is listed with its description to help you understand its functiona
                     review = Review(error=f"the review call failed ({type(exc).__name__}: {exc})")
                     break
                 raw_replies.append(reply_text)
-                review = parse_review(reply_text)
+                review = require_sources(parse_review(reply_text), assumption_checks)
                 if not review.error:
                     break
                 print(f"independent review: {review.error}; asking once more")

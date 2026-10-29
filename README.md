@@ -20,7 +20,13 @@
 
 Biomentis is a general-purpose biomedical AI agent designed to autonomously execute a wide range of research tasks across diverse biomedical subfields. By integrating cutting-edge large language model (LLM) reasoning with retrieval-augmented planning and code-based execution, Biomentis helps scientists dramatically enhance research productivity and generate testable hypotheses.
 
-Biomentis is a fork of [Biomni](https://github.com/snap-stanford/biomni) (Huang et al., 2025) maintained by Dylan Bulseco. It adds an **opt-in instructional layer** (Knowledge-base-grounded tutor + step-pause + Q&A logging) intended for classroom and self-study use. The original agent, tools, and benchmarks are unchanged — research-mode users see no behavioral difference.
+Biomentis is a fork of [Biomni](https://github.com/snap-stanford/biomni) (Huang et al., 2025) maintained by Dylan Bulseco. It keeps Biomni's tools, databases and benchmarks, and adds:
+
+- **Answer quality checks** in the research agent: self-critique, an evidence check (a literature source, a calculation in code, and figures for computed results), and an independent review by a second model that checks the answer's key assumptions against a web search. See [Answer quality checks](#answer-quality-checks).
+- **An opt-in instructional layer** for classroom and self-study use: a Knowledge-base-grounded tutor, per-step instruction cards with a pause between steps, and Q&A logging. See [Instructional Mode](#-instructional-mode-biomentis-only-feature).
+- **Open-weight models by default**: local Ollama models, or Ollama's hosted models with an Ollama API key, with web search through Ollama's API. Anthropic, OpenAI and other providers still work.
+- **Figures and 3D molecular structures** shown in the step that made them, and in the tutor chat.
+- **Runs that survive the page**: each run works on a background thread and is journaled to `runs/`, so a reload or a stray click does not lose it. See [docs/background_runs.md](./docs/background_runs.md).
 
 
 ## Quick Start
@@ -96,7 +102,7 @@ from biomentis.agent import A1
 agent = A1(path=’./data’)
 
 # Or, explicitly request a specific model (Anthropic, OpenAI, custom):
-# agent = A1(path=’./data’, llm=’claude-sonnet-4-5’, source=’Anthropic’)
+# agent = A1(path=’./data’, llm=’claude-sonnet-5-5’, source=’Anthropic’)
 
 # Execute biomedical tasks using natural language
 agent.go("Plan a CRISPR screen to identify genes that regulate T cell exhaustion, generate 32 genes that maximize the perturbation effect.")
@@ -154,6 +160,18 @@ Useful flags:
 - `share=True` — create a public Gradio link
 - `server_name="127.0.0.1"` — local-only
 - `require_verification=True` — gate the UI behind a code (default `Biomni2025`)
+
+### Answer quality checks
+
+Each research run goes through these checks before its answer is final. They are set in the Streamlit sidebar; the defaults and details are in the [configuration guide](docs/configuration.md#answer-quality-and-reproducibility-streamlit-sidebar).
+
+- **Self-critique** — the agent's own model reviews its draft answer (2 rounds by default) and checks that every number was computed in code.
+- **Evidence check** — the answer is sent back (at most twice) until the run has a literature source, a calculation in code and a figure. It is also asked, once each, to plot computed tables that no figure shows and to draw any figure it cites but never drew.
+- **Independent review** — a different model (the Critic model) reviews the final answer against the run's code output and sources. It first web-searches the answer's key assumptions: a verdict that cites none of the searched sources becomes "unclear", and a value that the reviewer's own numbers put more than 3× outside the published range becomes "contradicted".
+- **Correction round** — a "Needs rework" verdict sends the answer back once for correction, then it is reviewed again. Both reviews are shown under the answer.
+- **Run quality summary** — under each answer: how it was made, the settings used, problems along the way, figures lost or computed tables left unplotted, and any evidence still missing.
+
+The agent and self-critique temperatures (0.2 and 0.7 by default) set how repeatable runs are; 0 is the most repeatable.
 
 ### Configuration Management
 
@@ -327,10 +345,10 @@ Unlike the upstream Biomni, Biomentis adds an **opt-in instructional layer** des
 - **Per-session Knowledge base (KB)** — upload PDF, PPTX, DOCX, TXT, or URLs. The KB grounds the tutor’s answers and instruction cards in your course materials (not the agent’s general knowledge).
 - **Per-step instruction cards** — every reasoning/code/observation event is followed by a "What / Why / Prerequisites / Look for" card with KB citations. A "Continue" button pauses the run between steps.
 - **Tutor chat** — a persistent right-column chat panel. In Tutor (Instructional) mode, the tutor answers only from your KB. In Chat mode, the LLM fills any gaps after the KB.
-- **Self-improvement / Critic** — after each session, the agent reviews its own transcript against the rubric, surfaces weaknesses, and writes them into long-term memory so future runs avoid the same mistakes. Bloom’s Taxonomy + Webb’s DOK levels classify every Q&A and step.
+- **Self-improvement / Critic** — after each session, the Critic model reviews the transcript against the rubric, surfaces weaknesses, and writes them into long-term memory so future runs avoid the same mistakes. Bloom’s Taxonomy + Webb’s DOK levels classify every Q&A and step. The same Critic model is also the independent reviewer of each answer during a run (see [Answer quality checks](#answer-quality-checks)).
 - **Exportable session log** — JSON or CSV per session, suitable for learning analytics.
 
-This layer is fully off by default; if you don’t enable it, Biomentis is behaviorally identical to upstream Biomni. See [docs/tutor.md](./docs/tutor.md) for the full guide.
+This layer is fully off by default; with it off, you get the research agent alone, answer quality checks included, with no tutor cards, pauses or chat. See [docs/tutor.md](./docs/tutor.md) for the full guide.
 
 
 ## Tutorials and Examples

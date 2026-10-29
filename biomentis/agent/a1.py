@@ -107,7 +107,7 @@ from biomentis.model.retriever import ToolRetriever
 # references, and a later `from ... import` inside a method would read the
 # plots from the new copy while the code ran in the old one (2026-10-28:
 # five figures drawn, none saved).
-from biomentis.tool.support_tools import clear_captured_plots, get_captured_plots, run_python_repl
+from biomentis.tool.support_tools import clear_captured_plots, get_captured_plots, get_plot_meta, run_python_repl
 from biomentis.tool.tool_registry import ToolRegistry
 from biomentis.run_journal import RunJournal, journaled
 from biomentis.plots import plot_guidance, save_plot_pngs
@@ -135,8 +135,7 @@ from biomentis.ui_core import (
     format_duration,
     get_llm_display_name,
     list_available_providers,
-    render_transcript_html,
-    save_html_export,
+    export_run,
     stream_agent_events,
     transcript_entry_for_event,
     ui_event_to_export_entry,
@@ -2218,6 +2217,9 @@ Each library is listed with its description to help you understand its functiona
                     # The same figures as PNG files under the run's artifact
                     # dir; `stream_agent_events` turns these into plot events.
                     "image_paths": self._save_execution_plots(execution_plots),
+                    # Per figure: its titles and the name plt.savefig gave it,
+                    # so the answer's "Fig 2" can be matched to the image.
+                    "image_meta": [get_plot_meta(uri) for uri in execution_plots],
                     "timestamp": datetime.now().isoformat(),
                 }
                 self._execution_results.append(execution_entry)
@@ -3773,16 +3775,13 @@ Each library is listed with its description to help you understand its functiona
                 print(f"Failed to switch model to {selected}: {e}")
 
         def export_panel_html(panel):
-            entries = self.main_export_entries if panel == "main" else self.inner_export_entries
-            panel_title = (
-                "Biomentis A1 Agent — Main Output" if panel == "main" else "Biomentis Executor — Reasoning Log"
-            )
-            html_doc = render_transcript_html(entries, panel_title, get_llm_display_name(self.llm))
+            # Either panel's button exports the whole run: both pages and
+            # their figures folder, under one date-stamped folder.
             try:
-                path = save_html_export(html_doc, panel)
-                gr.Info(f"Saved {panel} panel to {path}")
+                path = export_run(self.main_export_entries, self.inner_export_entries, get_llm_display_name(self.llm))
+                gr.Info(f"Saved the run to {path}")
             except Exception as e:
-                gr.Warning(f"Failed to export {panel} panel: {e}")
+                gr.Warning(f"Failed to export the run: {e}")
 
         # Create the Gradio interface
         with gr.Blocks() as demo:
@@ -4115,6 +4114,7 @@ Each library is listed with its description to help you understand its functiona
                         file_path=e.get("file_path"),
                         step_id=step_id,
                         run_id=run_id,
+                        caption=e.get("caption"),
                     )
                 )
                 # "paused" is the last transcript entry generated for a
@@ -4151,25 +4151,18 @@ Each library is listed with its description to help you understand its functiona
                         )
             return out
 
-        if main_col.button("📥 Export to HTML", key="export_main_html"):
-            html_doc = render_transcript_html(
-                export_entries("main"), "Biomentis A1 Agent — Main Output", get_llm_display_name(self.llm)
-            )
+        # One export for both panels: the answer page, the step-log page and
+        # a figures folder they link to, under one date-stamped folder.
+        if main_col.button(
+            "📥 Export run to HTML",
+            key="export_run_html",
+            help="Saves the main output and the step log as two pages, with their figures in a folder beside them.",
+        ):
             try:
-                path = save_html_export(html_doc, "main")
+                path = export_run(export_entries("main"), export_entries("inner"), get_llm_display_name(self.llm))
                 main_col.success(f"Saved to {path}")
             except Exception as e:
                 main_col.error(f"Failed to export: {e}")
-
-        if inner_col.button("📥 Export to HTML", key="export_inner_html"):
-            html_doc = render_transcript_html(
-                export_entries("inner"), "Biomentis Executor — Reasoning Log", get_llm_display_name(self.llm)
-            )
-            try:
-                path = save_html_export(html_doc, "inner")
-                inner_col.success(f"Saved to {path}")
-            except Exception as e:
-                inner_col.error(f"Failed to export: {e}")
 
         # Counts structure viewers drawn in this script run, for unique keys.
         _structure_keys = {"n": 0}
@@ -4185,7 +4178,7 @@ Each library is listed with its description to help you understand its functiona
                     # instead of raising and breaking transcript replay.
                     from biomentis.ui_visuals import render_image_file
 
-                    render_image_file(entry["file_path"])
+                    render_image_file(entry["file_path"], caption=entry.get("caption"))
                 elif entry.get("kind") == "structure":
                     # Not governed by the plot setting. The key follows render
                     # order, which is stable across reruns for a transcript.

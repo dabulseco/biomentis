@@ -262,6 +262,10 @@ def test_printed_tables() -> None:
         _check("'--' placeholders don't split it (5 rows x 3 values)", size == 15, str(size))
     _check("three numeric lines are not a table", printed_tables("a 1 2\nb 3 4\nc 5 6") == [], "")
     _check("a rule line is not a row", printed_tables("x 1 2\n" * 2 + "=====\n" + "y 1 2\n" * 2) == [], "")
+    listing = "total 48\n" + "".join(
+        f"-rw-r--r--@ 1 fcs3  staff  1103{i}4 Oct 29 05:4{i} fig{i}_plot.png\n" for i in range(6)
+    )
+    _check("an ls -l listing is not a table", printed_tables(listing) == [], str(printed_tables(listing)))
     ev = RunEvidence()
     _add_table(ev.tables, ("ITEM 2 — DSP CLEARANCE TRAIN", 15))
     _add_table(ev.tables, ("LOT HISTORY [lot ppm]", 40))

@@ -6,11 +6,30 @@ import re
 import sys
 from io import StringIO
 
-# Create a persistent namespace that will be shared across all executions
-_persistent_namespace = {}
 
-# Global list to store captured plots
-_captured_plots = []
+
+def _shared(name: str, factory):
+    """State kept on `sys`, so it outlives a reload of this module.
+
+    Streamlit re-imports every project module when any source file changes,
+    while the agent built before the change keeps calling the old copy and
+    matplotlib stays patched by whichever copy patched it first. With
+    per-module state, the patched `plt.savefig` filled one list and the agent
+    read another: runs 3 and 4 of 2026-10-29 lost 37 of 41 figures that way.
+    """
+    key = f"_biomentis_{name}"
+    if not hasattr(sys, key):
+        setattr(sys, key, factory())
+    return getattr(sys, key)
+
+
+# Create a persistent namespace that will be shared across all executions
+_persistent_namespace = _shared("repl_namespace", dict)
+
+# Captured plots (data URIs), and for each one its titles and the file name it
+# was saved as with plt.savefig, if any.
+_captured_plots = _shared("captured_plots", list)
+_plot_meta = _shared("plot_meta", dict)
 
 
 def _error_report(exc: BaseException, command: str, printed: str) -> str:
@@ -90,13 +109,20 @@ def run_python_repl(command: str) -> str:
     return execute_in_repl(command)
 
 
-def _capture_matplotlib_plots() -> list[str]:
+def _figure_titles(fig) -> list[str]:
+    """The figure's suptitle and its axes titles, in order, without blanks."""
+    titles = [fig._suptitle.get_text()] if getattr(fig, "_suptitle", None) else []
+    titles += [ax.get_title() for ax in fig.get_axes()]
+    return [t.strip() for t in titles if t and t.strip()]
+
+
+def _capture_matplotlib_plots(saved_as: str | None = None) -> list[str]:
     """Capture and close every open matplotlib figure.
 
     Returns a text summary of the figures captured (see `describe_figure`),
     so the observation tells the agent what it drew; it never sees the image.
+    `saved_as` is the file name `plt.savefig` wrote, recorded with the figure.
     """
-    global _captured_plots
     summary: list[str] = []
     try:
         import matplotlib.pyplot as plt
@@ -120,6 +146,13 @@ def _capture_matplotlib_plots() -> list[str]:
                 # Add to captured plots if not already there
                 if plot_data not in _captured_plots:
                     _captured_plots.append(plot_data)
+                meta = _plot_meta.setdefault(plot_data, {})
+                try:
+                    meta["titles"] = _figure_titles(fig)
+                except Exception:
+                    meta.setdefault("titles", [])
+                if saved_as:
+                    meta["saved_as"] = os.path.basename(str(saved_as))
                 try:
                     summary.extend(describe_figure(fig))
                 except Exception as e:
@@ -168,7 +201,7 @@ def _apply_matplotlib_patches():
             # Call the original savefig function
             result = original_savefig(*args, **kwargs)
             # Capture the plot after saving
-            summary = _capture_matplotlib_plots()
+            summary = _capture_matplotlib_plots(saved_as=filename if isinstance(filename, str | os.PathLike) else None)
             # Print a message to indicate plot was saved
             print(f"Plot saved to: {filename}")
             for line in summary:
@@ -191,14 +224,18 @@ def _apply_matplotlib_patches():
 
 def get_captured_plots():
     """Get all captured matplotlib plots."""
-    global _captured_plots
     return _captured_plots.copy()
 
 
+def get_plot_meta(data_uri: str) -> dict:
+    """Titles and saved file name recorded for one captured plot ({} if none)."""
+    return dict(_plot_meta.get(data_uri, {}))
+
+
 def clear_captured_plots():
-    """Clear all captured matplotlib plots."""
-    global _captured_plots
-    _captured_plots = []
+    """Clear all captured matplotlib plots (in place: the list is shared, see `_shared`)."""
+    _captured_plots.clear()
+    _plot_meta.clear()
 
 
 def _structure_summary(path: str) -> str:

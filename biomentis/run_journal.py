@@ -90,6 +90,7 @@ _EVENT_FIELDS = (
     "file_path",
     "file_kind",
     "collapsible",
+    "caption",
     "step_id",
     "run_id",
     "card",

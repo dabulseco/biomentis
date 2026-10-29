@@ -26,6 +26,14 @@ What these tests pin down:
       event exactly once, and restore matches
   16. The patched plt.show prints "Plot captured." (neutral under "student")
   17. A plot is still saved after Streamlit re-imports support_tools mid-session
+  18. plt patched by the old module copy still feeds the new one (runs 3-4,
+      2026-10-29); REPL variables survive the reload too
+  19. A reported image is shown from a copy taken then; an unchanged image
+      is not shown again
+  20. The figures the answer cites appear under it in the main panel, latest
+      version, withheld under "student"; uncited ones are listed as not found
+  21. The export is one folder: two pages, figures/ beside them, nothing embedded
+  22. Matching citations to figures: lists, ranges, code blocks, latest wins
 
 Run with:
     python -m biomentis.agent.tests.test_step_plots
@@ -64,6 +72,8 @@ _PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAC
 URI = f"data:image/png;base64,{_PNG_B64}"
 
 _TMP = tempfile.mkdtemp(prefix="step_plots_")
+# Images a step reports are copied into the run folder; keep them out of runs/.
+os.environ["BIOMENTIS_ARTIFACT_DIR"] = tempfile.mkdtemp(prefix="step_plots_runs_")
 
 
 def _write_png(name: str) -> str:
@@ -160,12 +170,14 @@ def test_savefig_not_duplicated():
     shown = [e for e in ev if e.file_path]
     _check("one figure, not two", len(shown) == 1, f"{[(e.file_kind, e.file_path) for e in shown]}")
     _check("the captured one wins", shown and shown[0].file_path == png, "")
-    # With nothing captured, a savefig path is still the only record of the figure.
+    # With nothing captured, a savefig path is still the only record of the
+    # figure; it is shown from a copy taken when the step reported it.
     ev = _events(mode="show", image_paths=[], observation=f"Plot saved to: {other_png}\n")
+    shown = [e.file_path for e in ev if e.file_path]
     _check(
-        "savefig path still shown when nothing was captured",
-        [e.file_path for e in ev if e.file_path] == [other_png],
-        f"{[e.file_path for e in ev if e.file_path]}",
+        "savefig path still shown when nothing was captured, from a copy",
+        len(shown) == 1 and shown[0].endswith("image-001-saved_by_savefig.png") and open(shown[0], "rb").read() == open(other_png, "rb").read(),
+        f"{shown}",
     )
 
 
@@ -498,6 +510,202 @@ def test_plot_saved_after_module_reimport():
            str(getattr(agent, "_execution_results", [])))
 
 
+def test_patch_from_old_module_copy():
+    print("\n[18] plt patched by an old support_tools copy still feeds the new one")
+    import importlib
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+    except ImportError:
+        print("  (matplotlib unavailable; skipping)")
+        return
+    from biomentis.tool import support_tools as first
+
+    first.run_python_repl("import matplotlib.pyplot as plt\nkept = 41")  # patches plt via the first copy
+    path = os.path.join(_TMP, "fig1_reloaded.png")
+    saved = sys.modules.pop("biomentis.tool.support_tools")
+    try:
+        second = importlib.import_module("biomentis.tool.support_tools")
+        _check("the reload made a new module", second is not first)
+        second.clear_captured_plots()
+        out = second.run_python_repl(
+            f"plt.figure()\nplt.plot([1, 2])\nplt.title('Fig 1 — reloaded')\nplt.savefig({path!r})\nprint(kept + 1)"
+        )
+        plots = second.get_captured_plots()
+        _check("the savefig figure reaches the new copy", len(plots) == 1, f"{len(plots)} / {out}")
+        meta = second.get_plot_meta(plots[0]) if plots else {}
+        _check("with its title and file name", meta == {"titles": ["Fig 1 — reloaded"], "saved_as": "fig1_reloaded.png"}, str(meta))
+        _check("REPL variables survive the reload", "42" in out, out)
+        second.clear_captured_plots()
+        _check("clearing through either copy clears both", first.get_captured_plots() == [])
+    finally:
+        sys.modules["biomentis.tool.support_tools"] = saved
+
+
+def _scripted(steps, answer, mode="show", run_id="run-figures"):
+    """An agent whose steps are (observation, image_paths, image_meta), then a solution."""
+    history: list = []
+    agent = SimpleNamespace(use_tool_retriever=False, path=_TMP, user_task="", plot_mode=mode,
+                            _execution_results=[], current_run_id=run_id)
+
+    def _stream(inputs, stream_mode=None, config=None):
+        history.extend(inputs["messages"])
+        for observation, paths, meta in steps:
+            history.append(AIMessage(content="<execute>x = 1</execute>"))
+            yield {"messages": list(history)}
+            agent._execution_results.append({"images": [URI] * len(paths), "image_paths": paths, "image_meta": meta})
+            history.append(AIMessage(content=f"<observation>{observation}</observation>"))
+            yield {"messages": list(history)}
+        history.append(AIMessage(content=f"<solution>{answer}</solution>"))
+        yield {"messages": list(history)}
+
+    agent.app = SimpleNamespace(stream=_stream)
+    from biomentis.ui_core import stream_agent_events
+
+    return list(stream_agent_events(agent, "Make figures.", [], [], thread_id=1))
+
+
+def _png_bytes(seed: int) -> bytes:
+    import struct
+    import zlib
+
+    raw = b"\x00" + bytes([seed % 256, 0, 0])
+    chunk = lambda kind, data: struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def test_reported_image_is_copied():
+    print("\n[19] A reported image is shown from a copy; an unchanged one is not repeated")
+    from biomentis.structures import default_artifact_dir
+
+    agent_file = os.path.join(_TMP, "fig2_copy.png")
+    with open(agent_file, "wb") as f:
+        f.write(_png_bytes(1))
+    first = f"saved {agent_file}\n"
+
+    def later_delete():
+        # The agent deletes its file after the step: the copy must not care.
+        os.remove(agent_file)
+        return True
+
+    ev = _scripted([(first, [], []), (f"listing: {agent_file}\n", [], [])], "done", run_id="run-copy")
+    shown = [e.file_path for e in ev if e.type == "file" and e.file_path]
+    _check("shown once, not again for the unchanged re-listing", len(shown) == 1, str(shown))
+    _check("from a copy in the run folder",
+           shown and shown[0].startswith(default_artifact_dir("run-copy")) and shown[0].endswith("image-001-fig2_copy.png"), str(shown))
+    later_delete()
+    _check("the copy outlives the agent's file", shown and os.path.isfile(shown[0]))
+
+    lost = _scripted([("Plot saved to: never_written.png\n", [], [])], "done", run_id="run-lost")
+    quality = next((e.content for e in lost if e.title == "📊 Run quality"), "")
+    _check("a savefig figure that was neither captured nor found counts as lost", "Figures lost" in quality, quality)
+
+
+def test_answer_figures_in_main_panel():
+    print("\n[20] The figures the answer cites appear under it, latest version")
+    from biomentis.ui_core import transcript_entry_for_event
+    from biomentis.ui_tutor import _is_instruction_bearing, _is_step_visual
+
+    v1, v2 = _write_png("plot-101.png"), _write_png("plot-102.png")
+    fig2 = os.path.join(_TMP, "fig2_risk.png")
+    with open(fig2, "wb") as f:
+        f.write(_png_bytes(2))
+    steps = [
+        ("Plot saved to: fig1_flow.png\n", [v1], [{"titles": ["Fig 1 — draft"], "saved_as": "fig1_flow.png"}]),
+        ("Plot saved to: fig1_flow.png\n", [v2], [{"titles": ["Fig 1 — Workflow"], "saved_as": "fig1_flow.png"}]),
+        (f"wrote {fig2}\n", [], []),
+    ]
+    answer = "See Fig 1 for the plan and fig2_risk.png for the tiers; Fig 3 shows the budget."
+    ev = _scripted(steps, answer, run_id="run-answer")
+    main_files = [e for e in ev if e.type == "file" and e.channel == "main"]
+    _check("two figures under the answer", [e.title for e in main_files] == ["Fig 1", "fig2_risk.png"],
+           str([(e.title, e.file_path) for e in main_files]))
+    _check("Fig 1 is the latest version", main_files and main_files[0].file_path == v2, str(main_files[:1]))
+    _check("captioned with title and file name",
+           main_files and main_files[0].caption == "Fig 1 — Workflow — fig1_flow.png", str(main_files[:1] and main_files[0].caption))
+    heading = next((e for e in ev if e.title == "🖼️ Figures"), None)
+    _check("a heading names the citation with no figure",
+           heading is not None and heading.channel == "main" and "Fig 3" in heading.content, str(heading))
+    order = [e.title for e in ev if e.channel == "main"]
+    _check("they come after the answer and before the run quality",
+           order.index("🖼️ Figures") > order.index("✅ Answer") and order.index("🖼️ Figures") < order.index("📊 Run quality"), str(order))
+    entry = transcript_entry_for_event(main_files[0]) if main_files else {}
+    _check("its transcript entry is in the main panel with the caption",
+           entry.get("panel") == "main" and entry.get("caption") == "Fig 1 — Workflow — fig1_flow.png", str(entry))
+    _check("the tutor neither pauses on it nor files it under a step",
+           main_files and not _is_instruction_bearing(main_files[0]) and not _is_step_visual(main_files[0]))
+    student = _scripted(steps, answer, mode="student", run_id="run-answer-student")
+    kinds = [e.file_kind for e in student if e.type == "file" and e.channel == "main"]
+    _check("withheld under 'student'", kinds == ["plot_withheld", "plot_withheld"], str(kinds))
+    # The agent redraws Fig 1 under a new name, then lists the folder, which
+    # still holds the old file: the old drawing must not become "latest".
+    old_fig, new_fig = os.path.join(_TMP, "fig1_old.png"), os.path.join(_TMP, "fig1_new.png")
+    for path, seed in ((old_fig, 4), (new_fig, 5)):
+        with open(path, "wb") as f:
+            f.write(_png_bytes(seed))
+    relisted = _scripted([(f"wrote {old_fig}\n", [], []), (f"wrote {new_fig}\n", [], []),
+                          (f"{old_fig}\n{new_fig}\n", [], [])], "See Fig 1.", run_id="run-answer-relist")
+    fig1 = [e.file_path for e in relisted if e.type == "file" and e.channel == "main"]
+    _check("a re-listed old file does not replace the redrawn figure",
+           len(fig1) == 1 and fig1[0].endswith("fig1_new.png"), str(fig1))
+    none = _scripted(steps, "No figures cited here.", run_id="run-answer-none")
+    _check("no section when the answer cites none", not any(e.title == "🖼️ Figures" for e in none))
+
+
+def test_export_run_folder():
+    print("\n[21] The export is one folder: two pages and figures/, nothing embedded")
+    import re
+
+    from biomentis.ui_core import ExportEntry, export_run
+
+    a, b = _write_png("plot-201.png"), os.path.join(_TMP, "sub", "plot-201.png")
+    os.makedirs(os.path.dirname(b), exist_ok=True)
+    with open(b, "wb") as f:
+        f.write(_png_bytes(3))
+    main = [ExportEntry(role="assistant", content="Answer"),
+            ExportEntry(role="assistant", kind="image", title="Fig 1", file_path=a, caption="Fig 1 — Workflow")]
+    inner = [ExportEntry(role="assistant", kind="image", file_path=a),
+             ExportEntry(role="assistant", kind="image", file_path=b),
+             ExportEntry(role="assistant", kind="image", file_path=os.path.join(_TMP, "gone.png"))]
+    out = export_run(main, inner, "m", downloads_dir=tempfile.mkdtemp(prefix="export_"))
+    stamp = os.path.basename(out).removeprefix("biomentis_")
+    files = sorted(os.listdir(out))
+    _check("folder holds both pages and figures/",
+           files == sorted([f"biomentis_inner_{stamp}.html", f"biomentis_main_{stamp}.html", "figures"]), str(files))
+    pages = {name: open(os.path.join(out, name), encoding="utf-8").read() for name in files if name.endswith(".html")}
+    _check("nothing embedded", not any("data:image" in page for page in pages.values()))
+    srcs = sorted({src for page in pages.values() for src in re.findall(r'<img src="([^"]+)"', page)})
+    _check("images linked from figures/, one copy each, names kept distinct",
+           srcs == ["figures/plot-201-2.png", "figures/plot-201.png"] and sorted(os.listdir(os.path.join(out, "figures"))) == ["plot-201-2.png", "plot-201.png"],
+           str(srcs))
+    main_page = pages[f"biomentis_main_{stamp}.html"]
+    _check("caption shown under the figure", "<figcaption" in main_page and "Fig 1 — Workflow" in main_page)
+    _check("each page links the other",
+           f'href="biomentis_inner_{stamp}.html"' in main_page and f'href="biomentis_main_{stamp}.html"' in pages[f"biomentis_inner_{stamp}.html"])
+    _check("a missing image says so", "Image not found" in pages[f"biomentis_inner_{stamp}.html"])
+    again = export_run(main, inner, "m", downloads_dir=os.path.dirname(out))
+    _check("a second export in the same second gets its own folder", again != out and os.path.isdir(again), again)
+
+
+def test_cited_figures_matching():
+    print("\n[22] Matching citations to figures")
+    from biomentis.run_figures import RunFigure, cited_figures, cited_numbers
+
+    _check("lists and ranges", cited_numbers("Figs 2, 3 and 5; Figures 7–9; Fig. 11a") == [2, 3, 5, 7, 8, 9, 11],
+           str(cited_numbers("Figs 2, 3 and 5; Figures 7–9; Fig. 11a")))
+    _check("code blocks ignored", cited_numbers("```\nplt.title('Fig 4')\n```\nSee Fig 1.") == [1])
+    figures = [RunFigure("/a.png", ["Fig 5a — old"]), RunFigure("/b.png", [], "fig5_method.png"),
+               RunFigure("/c.png", ["Fig 5a — new", "Fig 5b — new"]), RunFigure("/d.png", [], "fig6_cov.png")]
+    chosen, missing = cited_figures("Fig 5 and Fig 6, also Fig 6 again.", figures)
+    _check("latest titled figure wins; file name used without a title",
+           [(label, f.path) for label, f in chosen] == [("Fig 5", "/c.png"), ("Fig 6", "/d.png")] and missing == [],
+           str([(label, f.path) for label, f in chosen]))
+    _check("a title beats a file-name number", RunFigure("/e.png", ["Figure 2: x"], "fig9.png").numbers() == {2})
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Step plot tests")
@@ -521,6 +729,11 @@ def run_all() -> int:
         test_reattach_mid_run_and_restore,
         test_show_patch_message_is_neutral,
         test_plot_saved_after_module_reimport,
+        test_patch_from_old_module_copy,
+        test_reported_image_is_copied,
+        test_answer_figures_in_main_panel,
+        test_export_run_folder,
+        test_cited_figures_matching,
     ):
         try:
             test()

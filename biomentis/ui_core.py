@@ -16,6 +16,7 @@ import html
 import mimetypes
 import os
 import re
+import shutil
 from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,6 +26,7 @@ from typing import Any, Literal
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from biomentis.independent_review import format_review
+from biomentis.run_figures import RunFigure, cited_figures, file_digest, is_image, snapshot_image
 from biomentis.run_quality import (
     EVIDENCE_ITEMS,
     EVIDENCE_NUDGE_PREFIX,
@@ -84,6 +86,8 @@ class UIEvent:
     # apply to it.
     file_kind: Literal["image", "pdf", "plot", "plot_withheld", "structure"] | None = None
     collapsible: bool = False
+    # A figure's titles and file name, shown under it.
+    caption: str | None = None
 
 
 PLOT_TITLE = "📈 Plot"
@@ -104,6 +108,34 @@ def _plot_event(file_path: str, mode: str) -> UIEvent:
             file_path=file_path,
         )
     return UIEvent(type="file", file_kind="plot", title=PLOT_TITLE, file_path=file_path)
+
+
+def _answer_figure_events(answer: str, figures: list[RunFigure], mode: str) -> list[UIEvent]:
+    """The figures the answer cites, for the main panel under the answer.
+
+    Each is the latest version the run drew (see `cited_figures`); under the
+    "student" setting each is withheld, as in the steps. Citations that match
+    no figure are listed, so a missing figure is never silently dropped.
+    """
+    chosen, missing = cited_figures(answer, figures)
+    if not chosen and not missing:
+        return []
+    lines = []
+    if chosen:
+        lines.append("The figures the answer cites, as last drawn in this run.")
+    if missing:
+        lines.append(
+            f"**Not found:** {', '.join(missing)}. The answer cites "
+            f"{'it' if len(missing) == 1 else 'them'}, but the run drew no figure with that number or file name."
+        )
+    events = [UIEvent(type="status", channel="main", title="🖼️ Figures", content="\n\n".join(lines))]
+    for label, figure in chosen:
+        event = _plot_event(figure.path, mode)
+        event.channel = "main"
+        event.title = label
+        event.caption = figure.caption() or None
+        events.append(event)
+    return events
 
 
 def _structure_event(file_path: str) -> UIEvent:
@@ -316,6 +348,13 @@ def stream_agent_events(
     # turn, or a step that produced no entry) must not be shown again.
     seen_executions = len(getattr(agent, "_execution_results", None) or [])
     unsaved_figure_steps = 0
+    # Every figure the run drew, in order, for matching the answer's citations;
+    # and each image file already copied into the run folder, by content.
+    figures: list[RunFigure] = []
+    image_copies: dict[str, str] = {}
+    from biomentis.structures import default_artifact_dir
+
+    artifact_dir = default_artifact_dir(getattr(agent, "current_run_id", None))
 
     s = None
     for s in agent.app.stream(inputs, stream_mode="values", config=config):
@@ -412,18 +451,28 @@ def stream_agent_events(
             plot_mode = getattr(agent, "plot_mode", "show")
             results = getattr(agent, "_execution_results", None) or []
             captured: list[str] = []
+            step_figures: list[RunFigure] = []
             if len(results) > seen_executions:
-                captured = [p for p in (results[-1].get("image_paths") or []) if p]
+                paths = results[-1].get("image_paths") or []
+                metas = results[-1].get("image_meta") or []
+                for i, plot_path in enumerate(paths):
+                    if not plot_path:
+                        continue
+                    meta = metas[i] if i < len(metas) and isinstance(metas[i], dict) else {}
+                    captured.append(plot_path)
+                    step_figures.append(RunFigure(plot_path, list(meta.get("titles") or []), meta.get("saved_as") or ""))
             seen_executions = len(results)
-            # A figure drawn but never saved is missing from the transcript
-            # and its export; the run-quality line says so.
-            if "Plot captured." in observation and not captured:
-                unsaved_figure_steps += 1
+            figures += step_figures
+            copied_this_step = 0
 
             # A step's figures and molecules are yielded BEFORE its
             # observation. The tutor pauses on the observation, and a paused
             # student must already see the figure the step drew.
-            visuals: list[UIEvent] = [_plot_event(plot_path, plot_mode) for plot_path in captured]
+            visuals: list[UIEvent] = []
+            for figure in step_figures:
+                event = _plot_event(figure.path, plot_mode)
+                event.caption = figure.caption() or None
+                visuals.append(event)
             # `show_structure` prints a marker line per molecule it saved.
             visuals += [_structure_event(path) for path in _structure_marker_paths(observation)]
             files_after: list[UIEvent] = []
@@ -447,11 +496,36 @@ def stream_agent_events(
                         if m.lower().endswith(".pdf") or m.strip("\"'").strip() not in saved
                     ]
 
+                step_paths: set[str] = set()
                 for raw_path in valid_matches:
                     file_path = raw_path.strip("\"'").strip()
                     abs_path = _resolve_file_path(agent, file_path)
-                    if not abs_path:
+                    if not abs_path or abs_path in step_paths:
                         continue
+                    step_paths.add(abs_path)
+                    if is_image(abs_path):
+                        # Shown from a copy in the run folder, taken now: the
+                        # agent's file may be redrawn, renamed or deleted later
+                        # in the run. An image already shown this run (an `ls`
+                        # of the folder, an unchanged re-save) is not repeated.
+                        try:
+                            digest = file_digest(abs_path)
+                        except OSError:
+                            continue
+                        name = os.path.basename(file_path)
+                        if digest in image_copies:
+                            # Only a new name for it counts (a rename); a
+                            # re-listing must not make an old drawing "latest".
+                            if not any(f.path == image_copies[digest] and f.name == name for f in figures):
+                                figures.append(RunFigure(image_copies[digest], name=name))
+                            continue
+                        try:
+                            abs_path = snapshot_image(abs_path, artifact_dir, len(image_copies) + 1)
+                        except OSError as exc:
+                            print(f"Warning: could not copy {abs_path} into the run folder: {exc}")
+                        image_copies[digest] = abs_path
+                        figures.append(RunFigure(abs_path, name=name))
+                        copied_this_step += 1
                     if file_path.lower().endswith(".pdf"):
                         files_after.append(
                             UIEvent(
@@ -475,6 +549,11 @@ def stream_agent_events(
                                 file_kind="image",
                             )
                         )
+
+            # A figure drawn but never saved is missing from the transcript
+            # and its export; the run-quality line says so.
+            if ("Plot captured." in observation or _SAVEFIG_LINE in observation) and not captured and not copied_this_step:
+                unsaved_figure_steps += 1
 
             yield from visuals
             yield UIEvent(
@@ -519,6 +598,12 @@ def stream_agent_events(
                 content="Task completed. Please check the execution log for details.",
                 title="📝 Summary",
             )
+
+    # The figures the answer cites, under it in the main panel.
+    try:
+        yield from _answer_figure_events(final_solution or last_solution or "", figures, getattr(agent, "plot_mode", "show"))
+    except Exception as exc:  # the figures must never cost the answer
+        print(f"[run_figures] could not match the answer's figures: {exc}")
 
     if _tracer is not None:
         try:
@@ -624,13 +709,14 @@ def transcript_entry_for_event(
             "collapsible": event.collapsible,
         }
     elif kind == "file":
+        panel = "main" if getattr(event, "channel", None) == "main" else "inner"
         if event.file_path is None:
-            entry = {"panel": "inner", "role": "assistant", "content": "", "title": event.title}
+            entry = {"panel": panel, "role": "assistant", "content": "", "title": event.title}
         elif event.file_kind == "pdf":
-            entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
+            entry = {"panel": panel, "role": "assistant", "content": event.content, "title": event.title}
         elif event.file_kind == "plot":
             entry = {
-                "panel": "inner",
+                "panel": panel,
                 "role": "assistant",
                 "kind": "plot",
                 "file_path": event.file_path,
@@ -638,7 +724,7 @@ def transcript_entry_for_event(
             }
         elif event.file_kind == "structure":
             entry = {
-                "panel": "inner",
+                "panel": panel,
                 "role": "assistant",
                 "kind": "structure",
                 "file_path": event.file_path,
@@ -648,7 +734,7 @@ def transcript_entry_for_event(
             # The path is kept for the instructor's HTML export; the live
             # renderer shows only the note.
             entry = {
-                "panel": "inner",
+                "panel": panel,
                 "role": "assistant",
                 "kind": "plot_withheld",
                 "file_path": event.file_path,
@@ -657,12 +743,14 @@ def transcript_entry_for_event(
             }
         else:
             entry = {
-                "panel": "inner",
+                "panel": panel,
                 "role": "assistant",
                 "kind": "image",
                 "file_path": event.file_path,
                 "title": event.title,
             }
+        if getattr(event, "caption", None):
+            entry["caption"] = event.caption
     elif kind == "summary":
         entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "complete":
@@ -842,6 +930,8 @@ class ExportEntry:
     # Gap-analysis items ({"point": str, "why": str}) the tutor flagged
     # beyond the literal question. See `also_consider` on `ChatTurn`.
     also_consider: list[dict] | None = None
+    # A figure's titles and file name, shown under it.
+    caption: str | None = None
 
 
 def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
@@ -858,6 +948,7 @@ def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
             content=event.content,
             file_path=event.file_path,
             step_id=step_id,
+            caption=getattr(event, "caption", None),
         )
     if event.type == "instruction":
         return ExportEntry(
@@ -916,14 +1007,61 @@ def default_downloads_dir() -> str:
     return os.getenv("BIOMNI_DOWNLOADS_DIR") or os.path.join(os.path.expanduser("~"), "Downloads")
 
 
-def _embed_image_html(file_path: str) -> str:
+class ExportAssets:
+    """Copies each image of an export into its figures folder, once.
+
+    The pages link to the copies by relative path, so the export is a folder
+    (pages + figures) rather than pages with images embedded in them. An image
+    shown in several places is copied once; two different images with the
+    same name get distinct names.
+    """
+
+    def __init__(self, export_dir: str, folder: str = "figures"):
+        self.export_dir = export_dir
+        self.folder = folder
+        self._copies: dict[str, str] = {}
+
+    def src(self, file_path: str) -> str | None:
+        """The relative path to link for `file_path`, or None when the file is gone."""
+        real = os.path.realpath(file_path)
+        if real in self._copies:
+            return self._copies[real]
+        if not os.path.isfile(real):
+            return None
+        stem, ext = os.path.splitext(os.path.basename(file_path))
+        used = set(self._copies.values())
+        name, n = f"{stem}{ext}", 2
+        while f"{self.folder}/{name}" in used:
+            name, n = f"{stem}-{n}{ext}", n + 1
+        os.makedirs(os.path.join(self.export_dir, self.folder), exist_ok=True)
+        shutil.copyfile(real, os.path.join(self.export_dir, self.folder, name))
+        self._copies[real] = f"{self.folder}/{name}"
+        return self._copies[real]
+
+
+def _image_html(file_path: str, caption: str | None = None, assets: ExportAssets | None = None) -> str:
+    """An image linked from the export's figures folder, or embedded when there is no folder.
+
+    Only the tutor chat's single-file download embeds: a browser download
+    cannot carry a folder with it.
+    """
+    alt = html.escape(caption or os.path.basename(file_path))
     try:
-        mime = mimetypes.guess_type(file_path)[0] or "image/png"
-        with open(file_path, "rb") as f:
-            data = base64.b64encode(f.read()).decode("ascii")
-        return f'<img src="data:{mime};base64,{data}" class="img-fluid rounded" alt="{html.escape(os.path.basename(file_path))}">'
+        if assets is not None:
+            src = assets.src(file_path)
+            if src is None:
+                raise FileNotFoundError(file_path)
+        else:
+            mime = mimetypes.guess_type(file_path)[0] or "image/png"
+            with open(file_path, "rb") as f:
+                src = f"data:{mime};base64," + base64.b64encode(f.read()).decode("ascii")
     except Exception:
         return f'<div class="text-danger">Image not found: {html.escape(file_path)}</div>'
+    figcaption = f'<figcaption class="figure-caption">{html.escape(caption)}</figcaption>' if caption else ""
+    return (
+        f'<figure class="figure mb-0"><img src="{html.escape(src, quote=True)}" class="figure-img img-fluid rounded" '
+        f'alt="{alt}" loading="lazy">{figcaption}</figure>'
+    )
 
 
 def _structure_metadata_html(file_path: str) -> str:
@@ -1030,14 +1168,14 @@ def _qa_extras_html(entry: ExportEntry) -> str:
     return "".join(parts)
 
 
-def _entry_body_html(entry: ExportEntry) -> str:
+def _entry_body_html(entry: ExportEntry, assets: ExportAssets | None = None) -> str:
     if entry.kind == "code":
         language = entry.language or ""
         return f'<pre class="bg-dark text-light p-3 rounded"><code class="language-{html.escape(language)}">{html.escape(entry.content)}</code></pre>'
     if entry.kind == "observation":
         return f'<pre class="bg-secondary-subtle p-3 rounded small text-wrap">{html.escape(entry.content)}</pre>'
     if entry.kind in ("image", "plot_withheld") and entry.file_path:
-        return _embed_image_html(entry.file_path)
+        return _image_html(entry.file_path, entry.caption, assets)
     if entry.kind == "pdf":
         return _render_markdown(entry.content) if entry.content else ""
     if entry.kind == "structure" and entry.file_path:
@@ -1057,14 +1195,14 @@ def _entry_body_html(entry: ExportEntry) -> str:
     return ""
 
 
-def _render_entry_card(entry: ExportEntry) -> str:
+def _render_entry_card(entry: ExportEntry, assets: ExportAssets | None = None) -> str:
     """Render one entry as a single chat-bubble card."""
     is_user = entry.role == "user"
     bubble_class = "bg-primary text-white" if is_user else "bg-white"
     align_class = "ms-auto" if is_user else "me-auto"
     title = PLOT_WITHHELD_EXPORT_TITLE if entry.kind == "plot_withheld" else entry.title
     title_html = f'<div class="fw-semibold small mb-1">{html.escape(title)}</div>' if title else ""
-    body = _entry_body_html(entry)
+    body = _entry_body_html(entry, assets)
     return f"""
       <div class="d-flex mb-3 {align_class}" style="max-width: 85%;">
         <div class="card {bubble_class} shadow-sm w-100">
@@ -1077,11 +1215,20 @@ def _render_entry_card(entry: ExportEntry) -> str:
       </div>"""
 
 
-def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_name: str) -> str:
-    """Render a self-contained Bootstrap 5 / HTML5 page for a chat transcript.
+def render_transcript_html(
+    entries: list[ExportEntry],
+    panel_title: str,
+    model_name: str,
+    assets: ExportAssets | None = None,
+    companion: tuple[str, str] | None = None,
+) -> str:
+    """Render a Bootstrap 5 / HTML5 page for a chat transcript.
 
-    Images are embedded as base64 data URIs so the exported file is portable;
-    Bootstrap's CSS is pulled from its CDN, so opening the file needs internet access.
+    With `assets`, images are copied into the export's figures folder and
+    linked; without, they are embedded as data URIs (the tutor chat's
+    single-file download). `companion` is (label, file name) of the other
+    page of the same export, linked from the header. Bootstrap's CSS is
+    pulled from its CDN, so opening the file needs internet access.
 
     Entries that share a `(run_id, step_id)` — a tutor step's raw output,
     its teaching card, and its "Ask about this step" Q&A — are boxed
@@ -1094,6 +1241,9 @@ def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_n
     would needlessly split that step's box in two.
     """
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    companion_html = (
+        f' &middot; <a href="{html.escape(companion[1], quote=True)}">{html.escape(companion[0])}</a>' if companion else ""
+    )
 
     if not entries:
         body_html = '<p class="text-muted fst-italic">No messages yet.</p>'
@@ -1105,7 +1255,7 @@ def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_n
         def flush_box() -> None:
             nonlocal box_entries, box_key
             if box_entries:
-                inner = "".join(_render_entry_card(e) for e in box_entries)
+                inner = "".join(_render_entry_card(e, assets) for e in box_entries)
                 blocks.append(f"""
       <div class="border rounded-3 p-3 mb-3">
         <div class="text-muted small fw-semibold mb-2">📍 Step {html.escape(str(box_key[1]))}</div>
@@ -1123,7 +1273,7 @@ def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_n
                     box_key = key
                 box_entries.append(entry)
             else:
-                blocks.append(_render_entry_card(entry))
+                blocks.append(_render_entry_card(entry, assets))
         flush_box()
         body_html = "".join(blocks)
 
@@ -1139,7 +1289,7 @@ def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_n
 <div class="container py-4">
   <h1 class="mb-1">{html.escape(panel_title)}</h1>
   <p class="text-muted">
-    Generated {html.escape(generated_at)} &middot; LLM used for this analysis: <strong>{html.escape(model_name)}</strong>
+    Generated {html.escape(generated_at)} &middot; LLM used for this analysis: <strong>{html.escape(model_name)}</strong>{companion_html}
   </p>
   <hr>
   <div class="d-flex flex-column">
@@ -1151,13 +1301,42 @@ def render_transcript_html(entries: list[ExportEntry], panel_title: str, model_n
 """
 
 
-def save_html_export(html_doc: str, filename_prefix: str, downloads_dir: str | None = None) -> str:
-    """Write an exported HTML transcript to disk, returning the absolute path written."""
+MAIN_EXPORT_TITLE = "Biomentis A1 Agent — Main Output"
+INNER_EXPORT_TITLE = "Biomentis Executor — Reasoning Log"
+
+
+def export_run(
+    main_entries: list[ExportEntry],
+    inner_entries: list[ExportEntry],
+    model_name: str,
+    downloads_dir: str | None = None,
+) -> str:
+    """Write the answer and the step log as one export folder, returning its path.
+
+    One date-stamp ties everything together:
+
+        biomentis_<stamp>/
+            biomentis_main_<stamp>.html     the answer, its figures, the reviews
+            biomentis_inner_<stamp>.html    every step
+            figures/                        each image once, linked from both
+
+    No image is embedded. Move the folder as a whole: the pages link to
+    `figures/` by relative path.
+    """
     target_dir = downloads_dir or default_downloads_dir()
-    os.makedirs(target_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"biomentis_{filename_prefix}_{timestamp}.html"
-    path = os.path.join(target_dir, filename)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(html_doc)
-    return path
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    export_dir = os.path.join(target_dir, f"biomentis_{stamp}")
+    n = 2
+    while os.path.exists(export_dir):
+        export_dir, n = os.path.join(target_dir, f"biomentis_{stamp}_{n}"), n + 1
+    os.makedirs(export_dir)
+    assets = ExportAssets(export_dir)
+    main_name, inner_name = f"biomentis_main_{stamp}.html", f"biomentis_inner_{stamp}.html"
+    pages = (
+        (main_name, main_entries, MAIN_EXPORT_TITLE, ("Step log", inner_name)),
+        (inner_name, inner_entries, INNER_EXPORT_TITLE, ("Main output", main_name)),
+    )
+    for name, entries, title, companion in pages:
+        with open(os.path.join(export_dir, name), "w", encoding="utf-8") as f:
+            f.write(render_transcript_html(entries, title, model_name, assets=assets, companion=companion))
+    return export_dir

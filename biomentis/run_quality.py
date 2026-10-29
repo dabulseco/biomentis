@@ -201,6 +201,9 @@ def _heading(lines: list[str]) -> str:
     return nearest
 
 
+_LISTING_RE = re.compile(r"^\s*(?:total \d+$|[-dlcbps][rwxsStT-]{9}[@+.]?\s)")
+
+
 def printed_tables(body: str) -> list[tuple[str, int]]:
     """Tables in one step's printed output: (heading, size).
 
@@ -208,7 +211,9 @@ def printed_tables(body: str) -> list[tuple[str, int]]:
     numbers each: a series across steps, lots, levels or conditions.
     """
     lines = body.splitlines()
-    counts = [0 if _RULE_RE.match(line) else len(_NUMBER_RE.findall(line)) for line in lines]
+    # A directory listing (`ls -l`: permissions, size, date per file) has
+    # numbers on every line but is not a result.
+    counts = [0 if _RULE_RE.match(line) or _LISTING_RE.match(line) else len(_NUMBER_RE.findall(line)) for line in lines]
     tables, start = [], None
     for i, count in enumerate([*counts, 0]):
         numeric = count >= 2

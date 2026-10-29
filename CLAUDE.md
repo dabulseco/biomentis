@@ -54,7 +54,7 @@ $P -m biomentis.agent.tests.test_ollama_cloud       # Ollama API key → hosted 
 $P -m biomentis.agent.tests.test_chat_visuals       # tutor chat plots + structures
 $P -m biomentis.agent.tests.test_viewer            # 3Dmol viewer page + render_structure smoke
 $P -m biomentis.agent.tests.test_plot_mode         # class plot setting + run_start record
-$P -m biomentis.agent.tests.test_step_plots        # plots shown in their step, or withheld under "student"
+$P -m biomentis.agent.tests.test_step_plots        # plots shown in their step, or withheld under "student"; figures the answer cites; the export folder
 $P -m biomentis.agent.tests.test_plot_feedback     # figure summaries in observations + repeated-step guard + error output kept
 $P -m biomentis.agent.tests.test_show_structure    # plot guidance, show_structure tool, uploaded structures
 $P -m biomentis.agent.tests.test_run_quality       # evidence check before an answer, run-quality summary, critic checks numbers

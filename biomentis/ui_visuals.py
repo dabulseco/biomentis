@@ -217,14 +217,14 @@ def render_structure(path: str, *, key: str, container=None) -> None:
 MISSING_IMAGE_NOTE = "Plot file no longer available."
 
 
-def render_image_file(path: str) -> None:
+def render_image_file(path: str, caption: str | None = None) -> None:
     """`st.image(path)`, or a caption when the file is gone.
 
     Transcript replay draws saved figures from disk; a deleted run directory
     must not raise and break the rest of the transcript.
     """
     if isinstance(path, str) and os.path.isfile(path):
-        st.image(path)
+        st.image(path, caption=caption or None)
     else:
         st.caption(MISSING_IMAGE_NOTE)
 

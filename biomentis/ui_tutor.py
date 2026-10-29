@@ -66,12 +66,21 @@ _INSTRUCTION_BEARING = {"reasoning", "code", "observation", "solution", "file", 
 _STEP_VISUAL_FILE_KINDS = {"plot", "plot_withheld", "structure"}
 
 
+def _is_answer_figure(event) -> bool:
+    """A figure the answer cites, shown under it in the main panel: no step, card or pause."""
+    return event.type == "file" and getattr(event, "channel", None) == "main"
+
+
 def _is_step_visual(event) -> bool:
-    return event.type == "file" and getattr(event, "file_kind", None) in _STEP_VISUAL_FILE_KINDS
+    return (
+        event.type == "file"
+        and getattr(event, "file_kind", None) in _STEP_VISUAL_FILE_KINDS
+        and not _is_answer_figure(event)
+    )
 
 
 def _is_instruction_bearing(event) -> bool:
-    return event.type in _INSTRUCTION_BEARING and not _is_step_visual(event)
+    return event.type in _INSTRUCTION_BEARING and not _is_step_visual(event) and not _is_answer_figure(event)
 
 # Sub-captions for the per-mode expanders. They exist because
 # "prerequisites" means something different under each lens, and a student

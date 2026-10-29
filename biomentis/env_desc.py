@@ -135,7 +135,7 @@ library_content_dict = {
     "tqdm": "[Python Package] A fast, extensible progress bar for loops and CLI applications.",
     "joblib": "[Python Package] A set of tools to provide lightweight pipelining in Python, including transparent disk-caching and parallel computing.",
     "opencv-python": "[Python Package] OpenCV library for computer vision tasks, useful for image analysis in biological contexts.",
-    "PyPDF2": "[Python Package] A library for working with PDF files, useful for extracting text from scientific papers.",
+    "pypdf": "[Python Package] A library for working with PDF files, useful for extracting text from scientific papers.",
     "googlesearch-python": "[Python Package] A library for performing Google searches programmatically.",
     "scikit-image": "[Python Package] A collection of algorithms for image processing in Python.",
     "pymed": "[Python Package] A Python library for accessing PubMed articles.",

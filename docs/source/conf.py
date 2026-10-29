@@ -31,7 +31,7 @@ napoleon_use_param = True
 autodoc_mock_imports = [
     "biomentis.agent.base_agent",
     "biomentis.",
-    "PyPDF2",
+    "pypdf",
     "bioagentos",
     "Bio",
     "gseapy",

@@ -4,7 +4,7 @@ import time
 from io import BytesIO
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
-import PyPDF2
+import pypdf
 import requests
 from bs4 import BeautifulSoup
 
@@ -833,10 +833,10 @@ def extract_pdf_content(url: str) -> str:
 
         pdf_file = BytesIO(response.content)
 
-        # Try with PyPDF2 first
+        # Try with pypdf first
         try:
             text = ""
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            pdf_reader = pypdf.PdfReader(pdf_file)
             for page_num in range(len(pdf_reader.pages)):
                 page = pdf_reader.pages[page_num]
                 text += page.extract_text() + "\n\n"

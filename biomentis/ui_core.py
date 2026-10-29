@@ -315,6 +315,7 @@ def stream_agent_events(
     # previous observation belongs to this one; anything older (an earlier
     # turn, or a step that produced no entry) must not be shown again.
     seen_executions = len(getattr(agent, "_execution_results", None) or [])
+    unsaved_figure_steps = 0
 
     s = None
     for s in agent.app.stream(inputs, stream_mode="values", config=config):
@@ -414,6 +415,10 @@ def stream_agent_events(
             if len(results) > seen_executions:
                 captured = [p for p in (results[-1].get("image_paths") or []) if p]
             seen_executions = len(results)
+            # A figure drawn but never saved is missing from the transcript
+            # and its export; the run-quality line says so.
+            if "Plot captured." in observation and not captured:
+                unsaved_figure_steps += 1
 
             # A step's figures and molecules are yielded BEFORE its
             # observation. The tutor pauses on the observation, and a paused
@@ -534,7 +539,9 @@ def stream_agent_events(
                 type="status",
                 channel="main",
                 title="📊 Run quality",
-                content=format_quality_summary(run_evidence(s["messages"]), run_settings(agent)),
+                content=format_quality_summary(
+                    run_evidence(s["messages"]), run_settings(agent), unsaved_figure_steps=unsaved_figure_steps
+                ),
             )
         except Exception as exc:  # the summary must never cost the answer
             print(f"[run_quality] could not summarize the run: {exc}")

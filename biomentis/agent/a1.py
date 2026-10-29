@@ -2007,12 +2007,13 @@ Each library is listed with its description to help you understand its functiona
             if answer_match and getattr(self, "evidence_gate", False) and not getattr(self, "_context_wrap_ups", 0):
                 evidence = run_evidence(state["messages"])
                 if evidence.evidence_asks < MAX_EVIDENCE_ASKS:
-                    missing = missing_evidence(evidence)
+                    missing = missing_evidence(evidence, answer=answer_match.group(1))
             if missing:
                 print(f"the answer lacks evidence ({', '.join(missing)}); sending it back")
+                nudge = evidence_nudge(missing, evidence, answer_match.group(1))
                 # Tags off, so the draft isn't shown or taken as the answer.
                 state["messages"][-1] = AIMessage(content=re.sub(r"</?solution>", "", msg, flags=re.IGNORECASE).strip())
-                state["messages"].append(HumanMessage(content=evidence_nudge(missing)))
+                state["messages"].append(HumanMessage(content=nudge))
                 answer_match = None
 
             trace_parse_error = False

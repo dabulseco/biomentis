@@ -290,6 +290,17 @@ def describe_figure(fig) -> list[str]:
             lines.append(f"  marked points: {shown}{more}")
         if not series and hlines and not ax.containers and not ax.images:
             lines.append("  reference lines only: " + ", ".join(f"y={_num(v)}" for _, v in hlines))
+        # A diagram (boxes and arrows) has no data series; its labels are
+        # all the agent can check it by.
+        texts = [" ".join(t.get_text().split()) for t in ax.texts if t.get_text().strip()]
+        if texts and not series:
+            shown = "; ".join(texts[:12]) + (f"; … {len(texts) - 12} more" if len(texts) > 12 else "")
+            lines.append(f"  text labels: {shown}"[:400])
+        if not (ax.get_title() or suptitle):
+            lines.append(
+                "  WARNING: no title. Give every figure a title that starts with its number "
+                "(e.g. 'Fig 2 — ...') so the answer can refer to it"
+            )
         if not (series or markers or hlines or vlines or ax.containers or ax.images or ax.patches):
             lines.append("  WARNING: these axes are empty, nothing was drawn")
     if len(lines) > _SUMMARY_MAX_LINES:
@@ -309,6 +320,20 @@ def plot_guidance(plot_mode: str) -> str:
         "(a trend, a curve, a size or dose dependence, a spectrum), make at least one matplotlib "
         "plot before you give your <solution>, even if the user did not ask for one. "
         "Label both axes, with units, give the figure a title, add a legend, and call plt.show().",
+        "- The same holds for a plan, workflow, protocol or control strategy: when you compute its "
+        "numbers (a calibration, clearance across process steps, lot history against a limit, a "
+        "method comparison, a schedule), plot the key ones. In your first plan, list the figures "
+        "the answer needs (usually 2-4) and make each one.",
+        "- Pick the chart from the data's shape: values across ordered steps or stages -> line with "
+        "markers (log y-axis when they span orders of magnitude); values over time or across lots "
+        "-> control chart with the mean and limits as horizontal lines; a distribution -> histogram "
+        "with the limit marked; method A vs method B -> scatter with the identity line and the "
+        "agreement band; parts of a total or a budget -> stacked bar; categories compared -> bar; "
+        "a dose or concentration response -> curve with the fitted model; a schedule -> horizontal "
+        "bars on a time axis (Gantt); a decision flow -> boxes and arrows with every box labelled.",
+        "- Title every figure with its number first (e.g. 'Fig 2 — HCP clearance by step'), and "
+        "refer to figures in the answer by those numbers. An answer may be sent back for computed "
+        "tables that no figure shows, or for figures it cites that were never drawn.",
         "- Mark any target value the task names (e.g. a wavelength) with plt.axhline or "
         "plt.axvline, so you can see which curves reach it.",
         "- You cannot see the figure. After plt.show() the observation prints a text summary of it: "

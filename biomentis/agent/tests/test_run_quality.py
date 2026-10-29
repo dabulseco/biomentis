@@ -19,6 +19,16 @@ What these tests pin down:
   6.  The critic asks for every number to be checked against code
   7.  The UI shows the summary under the answer, in the main panel and its
       export, and shows the evidence request as a status line
+  8.  Printed tables are found, named by title and column header, and a
+      corrected rerun replaces the earlier version
+  9.  A table counts as plotted when a figure's title or axis labels match it
+  10. Figures the answer cites are matched to drawn figures by number
+  11. The check asks once for unplotted tables and cited-but-missing figures,
+      naming them, then accepts the answer
+  12. The summary warns about figures drawn but not saved, and lists tables
+      without a figure
+  13. The figure summary warns about a missing title and lists a diagram's
+      labels; the plot guidance maps data shapes to charts
 
 Run with:
     python -m biomentis.agent.tests.test_run_quality
@@ -228,6 +238,155 @@ def test_ui_shows_summary() -> None:
     _check("other status lines stay in the inner panel", inner["panel"] == "inner" and "title" not in inner, str(inner))
 
 
+_TABLE_STEP = """ITEM 2 — WORKED DSP CLEARANCE TRAIN
+================================================
+                step     HCP ppm  LRV this step   cum LRV
+         Harvest/CCF       1e+05             --        --
+    Protein A eluate         100           3.00      3.00
+         Low-pH pool          30           0.52      3.52
+          AEX eluate           1           1.48      5.00
+     UF/DF retentate         0.3           0.52      5.52
+mass balance OK"""
+
+
+def test_printed_tables() -> None:
+    print("\n[8] finding computed tables")
+    from biomentis.run_quality import RunEvidence, _add_table, printed_tables
+
+    tables = printed_tables(_TABLE_STEP)
+    _check("one table", len(tables) == 1, str(tables))
+    if tables:
+        heading, size = tables[0]
+        _check("named by its title and column header",
+               heading.startswith("ITEM 2 — WORKED DSP CLEARANCE TRAIN [step HCP ppm"), heading)
+        _check("'--' placeholders don't split it (5 rows x 3 values)", size == 15, str(size))
+    _check("three numeric lines are not a table", printed_tables("a 1 2\nb 3 4\nc 5 6") == [], "")
+    _check("a rule line is not a row", printed_tables("x 1 2\n" * 2 + "=====\n" + "y 1 2\n" * 2) == [], "")
+    ev = RunEvidence()
+    _add_table(ev.tables, ("ITEM 2 — DSP CLEARANCE TRAIN", 15))
+    _add_table(ev.tables, ("LOT HISTORY [lot ppm]", 40))
+    _add_table(ev.tables, ("FIX 2 — DSP CLEARANCE TRAIN, MASS BASIS", 18))
+    _check("a corrected rerun replaces the earlier version",
+           [h for h, _ in ev.tables] == ["LOT HISTORY [lot ppm]", "FIX 2 — DSP CLEARANCE TRAIN, MASS BASIS"], str(ev.tables))
+
+
+def _table_run(figure_line: str = "", literature: bool = False) -> list:
+    code = "print(query_pubmed('HCP'))" if literature else "print(table)"
+    msgs = [
+        HumanMessage(content="Plan HCP control."),
+        AIMessage(content=f"<execute>{code}</execute>"),
+        AIMessage(content=f"<observation>{_TABLE_STEP}</observation>"),
+    ]
+    if figure_line:
+        msgs += [
+            AIMessage(content="<execute>import matplotlib.pyplot as plt\nplt.show()</execute>"),
+            AIMessage(content=f"<observation>Plot captured.\n{figure_line}</observation>"),
+        ]
+    return msgs
+
+
+def test_plotted_matching() -> None:
+    print("\n[9] a table is plotted when a figure matches it")
+    from biomentis.run_quality import run_evidence, unplotted_tables
+
+    _check("no figure: unplotted", len(unplotted_tables(run_evidence(_table_run()))) == 1, "")
+    by_title = "Figure 'Fig 1 — DSP clearance train': x = step [0 to 5], y = HCP (ppm) [0.1 to 1e5]"
+    _check("a figure titled for it covers it", unplotted_tables(run_evidence(_table_run(by_title))) == [], "")
+    by_axes = "Figure 'Fig 1 — purification': x = step [0 to 5], y = cum LRV [0 to 6]"
+    _check("its axis labels count too", unplotted_tables(run_evidence(_table_run(by_axes))) == [], "")
+    other = "Figure 'Fig 1 — ELISA calibration': x = concentration (ng/mL) [0 to 100], y = absorbance [0 to 2]"
+    _check("an unrelated figure doesn't", len(unplotted_tables(run_evidence(_table_run(other)))) == 1, "")
+    _check("literature output is not a computed table",
+           unplotted_tables(run_evidence(_table_run(literature=True))) == [], "")
+
+
+def test_figure_refs() -> None:
+    print("\n[10] figures the answer cites")
+    from biomentis.run_quality import RunEvidence, unmatched_figure_refs
+
+    ev = RunEvidence(figure_titles=["Figure 'Fig 1A  calibration': x = c", "Figure 'Fig 1B accuracy': x = c"])
+    _check("drawn figures match", unmatched_figure_refs("See Figure 1A and Fig. 1B.", ev) == [], "")
+    _check("an undrawn one is reported", unmatched_figure_refs("See Figure 1 and Figure 3.", ev) == [3], "")
+    ev.figure_titles.append("Figure 'axes 1': x = x [0 to 100], y = y [0 to 100]")
+    _check("an untitled figure may be it", unmatched_figure_refs("See Figure 1 and Figure 2.", ev) == [], "")
+    _check("references in code are ignored",
+           unmatched_figure_refs("```\nplt.title('Figure 9')\n```\nDone.", RunEvidence()) == [], "")
+
+
+def test_gate_asks_for_named_figures() -> None:
+    print("\n[11] the check names unplotted tables and missing figures, once")
+    from biomentis.run_quality import FIGURE_REFS_MARK, UNPLOTTED_MARK
+
+    table_code = "print(" + repr(_TABLE_STEP) + ")"
+    llm = _ScriptedLLM([
+        "<execute>def query_pubmed(q):\n    return 'Title: HCP paper'\nprint(query_pubmed('HCP'))</execute>",
+        f"<execute>{table_code}</execute>",
+        "<solution>Plan. See Figure 1 and Figure 2.</solution>",
+        "<execute>print('Plot captured.')\nprint(\"Figure 'Fig 1 — clearance': x = step, y = HCP ppm\")</execute>",
+        "<solution>Plan with Figure 1. See Figure 2.</solution>",
+    ])
+    _, final = _agent(llm, evidence_gate=True).go("Plan HCP control.")
+    asked = llm.requests[3][-1].content if len(llm.requests) > 3 else ""
+    _check("the first answer went back", UNPLOTTED_MARK in asked and FIGURE_REFS_MARK in asked, asked[:300])
+    _check("naming the table", "ITEM 2 — WORKED DSP CLEARANCE TRAIN" in asked, asked)
+    _check("and the missing figures", "Figures 1, 2." in asked, asked)
+    _check("each asked once: the second answer is accepted",
+           len(llm.requests) == 5 and "Plan with Figure 1" in final, f"{len(llm.requests)} {final[-200:]}")
+
+    llm = _ScriptedLLM(["<solution>42</solution>"])
+    _, final = _agent(llm, evidence_gate=False).go("Plan HCP control.")
+    _check("check off: nothing asked", len(llm.requests) == 1, str(len(llm.requests)))
+
+
+def test_summary_figure_lines() -> None:
+    print("\n[12] the summary: figures lost, tables not plotted")
+    from biomentis.run_quality import format_quality_summary, run_evidence
+    from biomentis.ui_core import stream_agent_events
+
+    ev = run_evidence(_table_run())
+    text = format_quality_summary(ev, unsaved_figure_steps=5)
+    _check("figures lost", "5 steps drew a figure that was not saved" in text, text)
+    _check("tables not plotted", "**Not plotted:** 1 computed table without a figure: ITEM 2" in text, text)
+    _check("nothing lost, nothing said", "Figures lost" not in format_quality_summary(ev), "")
+
+    events = list(stream_agent_events(_scripted_agent([
+        AIMessage(content="<execute>plt.show()</execute>"),
+        AIMessage(content="<observation>Plot captured.\nFigure 'Fig 1 — x': x = a, y = b</observation>"),
+        AIMessage(content="<solution>Done</solution>"),
+    ]), "Plot it.", [], [], thread_id=1))
+    summary = [e.content for e in events if e.type == "status" and e.channel == "main"]
+    _check("a figure with no saved file is reported",
+           bool(summary) and "1 step drew a figure that was not saved" in summary[0], str(summary))
+
+
+def test_figure_summary_and_guidance() -> None:
+    print("\n[13] the figure summary and the plot guidance")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from biomentis.plots import describe_figure, plot_guidance
+
+    fig, ax = plt.subplots()
+    ax.text(0.2, 0.8, "Inventory")
+    ax.text(0.2, 0.5, "G1 risk\nscoring")
+    lines = describe_figure(fig)
+    plt.close(fig)
+    _check("an untitled figure is flagged", any("WARNING: no title" in ln for ln in lines), str(lines))
+    _check("a diagram's labels are listed", any("text labels: Inventory; G1 risk scoring" in ln for ln in lines), str(lines))
+    fig, ax = plt.subplots()
+    ax.plot([1, 2, 3])
+    ax.set_title("Fig 1 — trend")
+    lines = describe_figure(fig)
+    plt.close(fig)
+    _check("a titled figure isn't", not any("no title" in ln for ln in lines), str(lines))
+    g = plot_guidance("show")
+    _check("plans and workflows get figures too", "plan, workflow, protocol or control strategy" in g, g)
+    _check("chart picked from the data's shape", "control chart" in g and "log y-axis" in g and "Gantt" in g, g)
+    _check("figures numbered in their titles", "'Fig 2 — HCP clearance by step'" in g, g)
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Run quality tests")
@@ -240,6 +399,12 @@ def run_all() -> int:
         test_gate_accepts_a_run_with_evidence,
         test_critic_checks_numbers,
         test_ui_shows_summary,
+        test_printed_tables,
+        test_plotted_matching,
+        test_figure_refs,
+        test_gate_asks_for_named_figures,
+        test_summary_figure_lines,
+        test_figure_summary_and_guidance,
     ):
         try:
             test()

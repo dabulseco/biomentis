@@ -48,8 +48,14 @@ __all__ = [
 
 
 def default_run_dir() -> str:
-    """Where run journals are written. Override with `BIOMENTIS_RUN_DIR`."""
-    return os.getenv("BIOMENTIS_RUN_DIR", "runs")
+    """Where run journals are written. Override with `BIOMENTIS_RUN_DIR`.
+
+    Absolute, against the folder the app started in: a code step runs in the
+    conversation's output folder (see `biomentis.workspace`).
+    """
+    from biomentis.workspace import app_path
+
+    return app_path(os.getenv("BIOMENTIS_RUN_DIR", "runs"))
 
 
 def _sha(text: str) -> str:

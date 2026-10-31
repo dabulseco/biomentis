@@ -35,6 +35,7 @@ from biomentis.run_quality import (
     run_evidence,
 )
 from biomentis.utils import NOT_DONE_NUDGE, PARSE_ERROR_NUDGE
+from biomentis.workspace import default_downloads_dir, files_dir, new_output_dir, output_stamp
 
 SUPPORTED_FILE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".pdf")
 
@@ -221,6 +222,12 @@ def _savefig_paths(observation: str) -> set[str]:
 def _resolve_file_path(agent: Any, file_path: str) -> str | None:
     if os.path.isabs(file_path) and os.path.exists(file_path):
         return file_path
+    # The step ran in the output folder's files/, and is back out of it by now.
+    output_dir = getattr(agent, "output_dir", None)
+    if output_dir:
+        candidate = os.path.join(files_dir(output_dir), file_path)
+        if os.path.exists(candidate):
+            return candidate
     cwd_path = os.path.join(os.getcwd(), file_path)
     if os.path.exists(cwd_path):
         return cwd_path
@@ -1002,11 +1009,6 @@ def get_llm_display_name(llm: Any) -> str:
     return provider
 
 
-def default_downloads_dir() -> str:
-    """The directory HTML exports are saved to by default: ~/Downloads, overridable via BIOMNI_DOWNLOADS_DIR."""
-    return os.getenv("BIOMNI_DOWNLOADS_DIR") or os.path.join(os.path.expanduser("~"), "Downloads")
-
-
 class ExportAssets:
     """Copies each image of an export into its figures folder, once.
 
@@ -1310,6 +1312,7 @@ def export_run(
     inner_entries: list[ExportEntry],
     model_name: str,
     downloads_dir: str | None = None,
+    output_dir: str | None = None,
 ) -> str:
     """Write the answer and the step log as one export folder, returning its path.
 
@@ -1319,17 +1322,19 @@ def export_run(
             biomentis_main_<stamp>.html     the answer, its figures, the reviews
             biomentis_inner_<stamp>.html    every step
             figures/                        each image once, linked from both
+            files/                          what the agent's code saved
+
+    `output_dir` is the conversation's folder (see `biomentis.workspace`), which
+    already holds `files/`; exporting again replaces the pages and figures.
+    Without one, a new folder is made under `downloads_dir`.
 
     No image is embedded. Move the folder as a whole: the pages link to
     `figures/` by relative path.
     """
-    target_dir = downloads_dir or default_downloads_dir()
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    export_dir = os.path.join(target_dir, f"biomentis_{stamp}")
-    n = 2
-    while os.path.exists(export_dir):
-        export_dir, n = os.path.join(target_dir, f"biomentis_{stamp}_{n}"), n + 1
-    os.makedirs(export_dir)
+    export_dir = output_dir or new_output_dir(downloads_dir or default_downloads_dir())
+    stamp = output_stamp(export_dir)
+    os.makedirs(export_dir, exist_ok=True)
+    shutil.rmtree(os.path.join(export_dir, "figures"), ignore_errors=True)
     assets = ExportAssets(export_dir)
     main_name, inner_name = f"biomentis_main_{stamp}.html", f"biomentis_inner_{stamp}.html"
     pages = (

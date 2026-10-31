@@ -139,16 +139,17 @@ The launcher is a tiny script that caches an `A1` agent and calls `agent.launch_
 
 **Note:** Streamlit is included in the default `requirements.txt`. No extra install step is required.
 
-**Exporting a run:** "📥 Export run to HTML" (above the main output) saves one folder to `~/Downloads` (or `BIOMNI_DOWNLOADS_DIR`), named by its date-stamp:
+**Output folder and export:** each browser session gets one output folder in `~/Downloads` (or `BIOMNI_DOWNLOADS_DIR`), named by the date-stamp of its first run. The agent's code runs inside its `files/`, so whatever it saves with a relative path (tables, scripts, a project tree) lands there rather than in the Biomentis folder. "📥 Export run to HTML" (above the main output) writes the pages into the same folder:
 
 ```
-biomentis_20261029_063716/
-    biomentis_main_20261029_063716.html    the answer, the figures it cites, the reviews
-    biomentis_inner_20261029_063716.html   every step
+biomentis_20261031_063702/
+    files/                                 what the agent's code saved
+    biomentis_main_20261031_063702.html    the answer, the figures it cites, the reviews
+    biomentis_inner_20261031_063702.html   every step
     figures/                               each image once, linked from both pages
 ```
 
-Images are linked, not embedded, so move or share the folder as a whole. Every figure a step draws or saves is copied into the run's folder under `runs/` when the step reports it, so a figure the agent later redraws or deletes still shows as it was at that step.
+Exporting again replaces the pages and figures. A folder is only created once something is saved in it. A run restored from the sidebar exports into the folder it used. Images are linked, not embedded, so move or share the folder as a whole. Every figure a step draws or saves is copied into the run's folder under `runs/` when the step reports it, so a figure the agent later redraws or deletes still shows as it was at that step.
 
 #### Optional: Gradio Interface
 

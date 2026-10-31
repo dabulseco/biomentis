@@ -124,6 +124,7 @@ BIOMNI_COMMERCIAL_MODE=false                # default: false
 BIOMNI_CUSTOM_BASE_URL=http://localhost:8000/v1
 BIOMNI_CUSTOM_API_KEY=custom_key
 OLLAMA_HOST=http://localhost:11434          # default; only set if Ollama is elsewhere
+BIOMNI_DOWNLOADS_DIR=/path/to/folder        # default: ~/Downloads — where each session's output folder goes
 ```
 
 ### Python Configuration

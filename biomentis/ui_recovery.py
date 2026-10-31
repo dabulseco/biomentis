@@ -96,6 +96,9 @@ def render_run_recovery(container: Any, *, run_dir: str | None = None, limit: in
                 run = load_run(summary["path"])
                 st.session_state.biomni_transcript = entries_for_run(run)
                 st.session_state[_RESTORED_KEY] = run_id
+                # Export into the folder that holds the run's files; an older
+                # journal without one gets a new folder at export.
+                st.session_state.biomni_output_dir = run["meta"].get("output_dir")
                 # A restored run is a record, not a live one: make sure the
                 # run banner and the background-run cursor agree with that.
                 st.session_state.biomni_run_active = False

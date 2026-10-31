@@ -112,6 +112,7 @@ from biomentis.tool.tool_registry import ToolRegistry
 from biomentis.run_journal import RunJournal, journaled
 from biomentis.plots import plot_guidance, save_plot_pngs
 from biomentis.structures import default_artifact_dir, set_current_run_id
+from biomentis.workspace import app_path, files_dir, new_output_dir, prune_empty, working_in
 from biomentis.independent_review import (
     ASSUMPTIONS_SYSTEM_PROMPT,
     REVIEW_RETRY_MESSAGE,
@@ -495,6 +496,9 @@ class A1:
 
         print("=" * 50 + "\n")
 
+        # Absolute: code steps run in the conversation's output folder, and
+        # the data lake path the agent is given must still resolve there.
+        path = app_path(path)
         self.path = path
 
         if not os.path.exists(path):
@@ -585,6 +589,9 @@ class A1:
         # Set per run by launch_streamlit_demo; defaults serve non-UI callers.
         self.plot_mode = "show"
         self.current_run_id = None
+        # The conversation's output folder (see `biomentis.workspace`); code
+        # steps run in its files/. None (scripts, tests) runs them in place.
+        self.output_dir = None
 
         # Step-level tracing. Cheap (a few JSON lines per step, no extra LLM
         # calls), so it defaults on -- the failures worth studying are the
@@ -592,7 +599,7 @@ class A1:
         if trace is None:
             trace = os.getenv("BIOMENTIS_TRACE", "1").strip().lower() not in ("0", "false", "no")
         self.tracer = StepTrace(
-            trace_dir=trace_dir or os.getenv("BIOMENTIS_TRACE_DIR", "traces"),
+            trace_dir=app_path(trace_dir or os.getenv("BIOMENTIS_TRACE_DIR", "traces")),
             enabled=trace,
         )
 
@@ -1885,6 +1892,12 @@ Each library is listed with its description to help you understand its functiona
             # Per call, not baked into self.system_prompt, so the next run
             # follows a changed plot setting without re-running configure().
             system_prompt += "\n\n" + plot_guidance(getattr(self, "plot_mode", "show"))
+            if getattr(self, "output_dir", None):
+                system_prompt += (
+                    "\n\nFILES: your code runs in this conversation's output folder. Save files with "
+                    "relative paths (e.g. 'results/asv_table.csv', 'my_project/README.md'); they are "
+                    "kept together with the exported answer. Do not write into the Biomentis package folder."
+                )
 
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
             if _is_claude(self.llm):
@@ -2147,6 +2160,11 @@ Each library is listed with its description to help you understand its functiona
                 # Clear before every language, not just Python, so an R or
                 # Bash step never inherits the previous Python step's figures.
                 self._clear_execution_plots()
+                # Files the code saves with a relative path land in the
+                # conversation's output folder, not among the app's source.
+                output_dir = getattr(self, "output_dir", None)
+                step_folder = working_in(files_dir(output_dir) if output_dir else None)
+                step_folder.__enter__()
 
                 try:
                     # Check if the code is R code
@@ -2190,6 +2208,9 @@ Each library is listed with its description to help you understand its functiona
                     # not save into this run, so the id lives only as long
                     # as this execution.
                     set_current_run_id(None)
+                    step_folder.__exit__(None, None, None)
+                    if output_dir:
+                        prune_empty(output_dir)
 
                 if len(result) > 10000:
                     result = (
@@ -4156,10 +4177,18 @@ Each library is listed with its description to help you understand its functiona
         if main_col.button(
             "📥 Export run to HTML",
             key="export_run_html",
-            help="Saves the main output and the step log as two pages, with their figures in a folder beside them.",
+            help="Saves the main output and the step log as two pages in this session's output folder, "
+            "with their figures beside them and the files the agent saved in files/.",
         ):
             try:
-                path = export_run(export_entries("main"), export_entries("inner"), get_llm_display_name(self.llm))
+                if not st.session_state.get("biomni_output_dir"):
+                    st.session_state.biomni_output_dir = new_output_dir()
+                path = export_run(
+                    export_entries("main"),
+                    export_entries("inner"),
+                    get_llm_display_name(self.llm),
+                    output_dir=st.session_state.biomni_output_dir,
+                )
                 main_col.success(f"Saved to {path}")
             except Exception as e:
                 main_col.error(f"Failed to export: {e}")
@@ -4453,6 +4482,11 @@ Each library is listed with its description to help you understand its functiona
                 from biomentis.ui_visuals import current_plot_mode
 
                 self.plot_mode = current_plot_mode()
+                # One output folder per session, named when its first run
+                # starts: later runs and the export add to the same folder.
+                if not st.session_state.get("biomni_output_dir"):
+                    st.session_state.biomni_output_dir = new_output_dir()
+                self.output_dir = st.session_state.biomni_output_dir
                 _journal = RunJournal(
                     effective_prompt,
                     mode="tutor" if stream_fn is not None else "research",
@@ -4460,6 +4494,7 @@ Each library is listed with its description to help you understand its functiona
                     files=list(files),
                     thread_id=thread_id,
                     plot_mode=self.plot_mode,
+                    output_dir=self.output_dir,
                 )
                 self.current_run_id = _journal.run_id
                 st.session_state.biomni_run_journal = _journal.path

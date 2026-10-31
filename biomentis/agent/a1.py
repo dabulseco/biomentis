@@ -139,6 +139,7 @@ NO_FINAL_ANSWER_STATUS = "⚠️ No final answer"
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
     ExportEntry,
+    add_transcript_entry,
     export_kind,
     format_duration,
     get_llm_display_name,
@@ -1823,6 +1824,7 @@ Each library is listed with its description to help you understand its functiona
         self.completion_gate = bool(completion_gate)
         # Planned revision rounds for the gate: the "Self-critique rounds".
         planned_rounds = test_time_scale_round if self_critic else 0
+        self.planned_rounds = planned_rounds
         # `go`/`go_stream` reset this per call, but callers that drive the
         # graph directly (e.g. the Streamlit UI's stream_agent_events,
         # which invokes `self.app.stream` without going through either
@@ -4212,11 +4214,18 @@ Each library is listed with its description to help you understand its functiona
                 # kills it. Say so: the old behavior trained users to sit on
                 # their hands for twenty minutes, and the whole point of the
                 # worker is that they no longer have to.
-                st.caption(
-                    f"⏳ Running · {format_duration(_elapsed)} · "
-                    f"output landing in **{_TAB_INNER_LABEL}** · "
-                    "runs in the background — clicking around won't stop it"
-                )
+                _control = getattr(_runner, "round_control", None)
+                if _control is not None and _control.pending is not None:
+                    st.caption(
+                        f"⏸ Paused · {format_duration(_elapsed)} · "
+                        f"waiting for your decision in **{_TAB_MAIN_LABEL}**"
+                    )
+                else:
+                    st.caption(
+                        f"⏳ Running · {format_duration(_elapsed)} · "
+                        f"output landing in **{_TAB_INNER_LABEL}** · "
+                        "runs in the background — clicking around won't stop it"
+                    )
                 if st.button(
                     "⏹ Stop run",
                     key="biomni_stop_run",
@@ -4448,6 +4457,14 @@ Each library is listed with its description to help you understand its functiona
                     if entry.get("content"):
                         with st.expander("💬 Tutor Q&A", expanded=False):
                             st.markdown(entry["content"])
+                elif entry.get("kind") == "final_status":
+                    status = entry.get("content", "")
+                    if status.startswith("✅"):
+                        st.success(status)
+                    elif status.startswith("⛔"):
+                        st.error(status)
+                    else:
+                        st.warning(status)
                 elif entry.get("content"):
                     st.markdown(entry["content"])
 
@@ -4687,11 +4704,14 @@ Each library is listed with its description to help you understand its functiona
                     # tutor's `_create_run` parks the live generator in session
                     # state, and creating it on the thread that will drive it
                     # keeps creation and consumption together.
+                    # The agent's pause control goes on the runner, so the
+                    # Stop run button also ends a run paused for a decision.
                     _runner = start_run(
                         _session_key,
                         effective_prompt,
                         lambda: _stream(self, effective_prompt, files, history_messages, thread_id),
                         journal=_journal,
+                        round_control=getattr(self, "round_control", None),
                     )
                 else:
                     # Opt-out path (`BIOMENTIS_BACKGROUND_RUNS=0`): drive the
@@ -4702,7 +4722,19 @@ Each library is listed with its description to help you understand its functiona
                     )
 
             _cursor = st.session_state.biomni_run_cursor
-            _events = _runner.events_from(_cursor) if _runner is not None else _inline_stream
+            # A run paused for the user's decision produces no events until
+            # they answer, so stop draining once caught up and show the pause
+            # panel below instead: the script then ends, and the click on
+            # Continue or Stop is what reruns it. No timeout ends the wait.
+            _control = getattr(_runner, "round_control", None) if _runner is not None else None
+
+            def _paused() -> bool:
+                return _control is not None and _control.pending is not None
+
+            _events = (
+                _runner.events_from(_cursor, idle=_paused) if _runner is not None else _inline_stream
+            )
+            _redraw = False
             # A run that raises must not leave `biomni_run_active` set:
             # the flag drives the run banner, and a stuck True claims a
             # run is in flight forever. Deliberately an `except` and not
@@ -4770,8 +4802,13 @@ Each library is listed with its description to help you understand its functiona
                         st.session_state.biomni_run_started_at = None
 
                     if entry is not None:
-                        st.session_state.biomni_transcript.append(entry)
-                        _live_step_tracker.render(entry, render_entry, main_col)
+                        # A final status goes above the answer already on
+                        # screen; with a worker, redraw the page to show it
+                        # there (inline, a rerun would lose the run).
+                        if add_transcript_entry(st.session_state.biomni_transcript, entry) and _runner is not None:
+                            _redraw = True
+                        else:
+                            _live_step_tracker.render(entry, render_entry, main_col)
 
                     # Advance the cursor per event, not per rendered entry:
                     # some events produce none, and the cursor indexes the
@@ -4781,6 +4818,8 @@ Each library is listed with its description to help you understand its functiona
                     # is still in the journal.
                     _cursor += 1
                     st.session_state.biomni_run_cursor = _cursor
+                    if _redraw:
+                        st.rerun()
             except Exception:
                 st.session_state.biomni_run_active = False
                 st.session_state.biomni_run_started_at = None
@@ -4794,6 +4833,16 @@ Each library is listed with its description to help you understand its functiona
                 st.session_state.biomni_run_active = False
                 st.session_state.biomni_run_started_at = None
                 st.error(f"Run failed: {type(_runner.error).__name__}: {_runner.error}")
+
+            if _runner is not None and _runner.is_alive() and _paused():
+                if _starting:
+                    # The banner above was drawn before this run existed;
+                    # redraw once so it says "Paused" and offers Stop run.
+                    st.rerun()
+                from biomentis.ui_gate import render_round_pause
+
+                with main_col:
+                    render_round_pause(_control)
 
             if _runner is not None and _runner.done:
                 if _runner.cancelled:

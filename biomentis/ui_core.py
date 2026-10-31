@@ -60,6 +60,13 @@ UIEventType = Literal[
     "paused",
     "qa",
     "rubric_update",
+    # --- Completion gate (biomentis.gate) ---
+    # "gate_result": the checks after one round, in the step log.
+    # "round_pause": the run is waiting for Continue or Stop.
+    # "final_status": the run's status label, shown above the final answer.
+    "gate_result",
+    "round_pause",
+    "final_status",
 ]
 
 
@@ -317,6 +324,10 @@ def stream_agent_events(
     reset_review = getattr(agent, "reset_review", None)
     if callable(reset_review):
         reset_review()
+    # And the completion gate: no rounds, no pause, no status yet.
+    reset_gate = getattr(agent, "reset_gate", None)
+    if callable(reset_gate) and getattr(agent, "completion_gate", False):
+        reset_gate()
 
     # Same reasoning for the step tracer, and it had been missed. `start_run`
     # is what gives the tracer a file to write to; every `record_generate` /
@@ -393,10 +404,27 @@ def stream_agent_events(
 
     artifact_dir = default_artifact_dir(getattr(agent, "current_run_id", None))
 
+    # Completion gate progress: results already shown, and the context pause.
+    gates_seen = len(getattr(agent, "run_gate_results", None) or [])
+    context_pause_shown = bool(getattr(agent, "_context_pause_asked", False))
+    # The last message processed. Nodes that leave the history unchanged (the
+    # gate, the rubric step, finalize) emit the same state again; showing its
+    # reasoning a second time helps nobody.
+    last_seen: tuple[int, Any] | None = None
+
     s = None
     for s in agent.app.stream(inputs, stream_mode="values", config=config):
         t_step = time() - t
         message = s["messages"][-1]
+
+        yield from _gate_events(agent, s, gates_seen, context_pause_shown)
+        gates_seen = len(getattr(agent, "run_gate_results", None) or [])
+        context_pause_shown = bool(getattr(agent, "_context_pause_asked", False))
+
+        seen = (len(s["messages"]), message.content)
+        if seen == last_seen:
+            continue
+        last_seen = seen
 
         if message.content == full_text_input:
             t = time()
@@ -645,6 +673,11 @@ def stream_agent_events(
     except Exception as exc:  # the figures must never cost the answer
         print(f"[run_figures] could not match the answer's figures: {exc}")
 
+    # The status label; the UI puts it above the final answer.
+    final_status = getattr(agent, "final_status", "") if getattr(agent, "completion_gate", False) else ""
+    if final_status:
+        yield UIEvent(type="final_status", channel="main", content=final_status)
+
     if _tracer is not None:
         try:
             agent._trace_finish(s)
@@ -665,13 +698,86 @@ def stream_agent_events(
                 channel="main",
                 title="📊 Run quality",
                 content=format_quality_summary(
-                    run_evidence(s["messages"]), run_settings(agent), unsaved_figure_steps=unsaved_figure_steps
+                    run_evidence(s["messages"]),
+                    run_settings(agent),
+                    unsaved_figure_steps=unsaved_figure_steps,
+                    gate=gate_summary(agent),
                 ),
             )
         except Exception as exc:  # the summary must never cost the answer
             print(f"[run_quality] could not summarize the run: {exc}")
 
     yield UIEvent(type="complete", content="👈 Returning the result to the main interface...", title="🔄 Complete")
+
+
+def format_findings(findings: list[Any], accepted: set[str] | frozenset = frozenset()) -> str:
+    """A markdown list of gate findings, blocking first."""
+    if not findings:
+        return "- No findings."
+    ordered = sorted(findings, key=lambda f: f.severity != "blocking")
+    lines = []
+    for f in ordered:
+        mark = "accepted as is" if f.key in accepted else f.severity
+        line = f"- **{f.check}** ({mark}): {f.issue}"
+        if f.quote:
+            line += f" — “{f.quote}”"
+        if f.fix:
+            line += f" Fix: {f.fix}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _gate_events(agent: Any, state: dict, gates_seen: int, context_pause_shown: bool) -> Generator[UIEvent, None, None]:
+    """Events for the gate's progress since the last state emission.
+
+    New gate results become "🧪 Checks after round N" in the step log. A
+    round pause is announced from the gate's own emission (its `next_step` is
+    `await_decision`), because once the run blocks it emits nothing until the
+    user answers. The context pause blocks inside `generate`, so it can only
+    be recorded once the run moves on.
+    """
+    if not getattr(agent, "completion_gate", False):
+        return
+    results = getattr(agent, "run_gate_results", None) or []
+    for result in results[gates_seen:]:
+        blocking = len(result.blocking)
+        head = "Passed." if result.passed else f"{blocking} blocking finding{'s' if blocking != 1 else ''}."
+        yield UIEvent(
+            type="gate_result",
+            channel="inner",
+            title=f"🧪 Checks after round {result.round}",
+            content=head + "\n\n" + format_findings(result.findings, result.accepted),
+        )
+    if results[gates_seen:] and state.get("next_step") == "await_decision":
+        last = results[-1]
+        yield UIEvent(
+            type="round_pause",
+            channel="main",
+            title="⏸ Paused for your decision",
+            content=f"Round {last.round + 1} needs your decision\n\n" + format_findings(last.blocking),
+        )
+    if not context_pause_shown and getattr(agent, "_context_pause_asked", False):
+        yield UIEvent(
+            type="round_pause",
+            channel="main",
+            title="⏸ Paused for your decision",
+            content="The context window is nearly full",
+        )
+
+
+def gate_summary(agent: Any) -> dict | None:
+    """The completion gate's lines for the run-quality summary, or None when it is off."""
+    if not getattr(agent, "completion_gate", False) or not getattr(agent, "final_status", ""):
+        return None
+    results = getattr(agent, "run_gate_results", None) or []
+    control = getattr(agent, "round_control", None)
+    return {
+        "status": agent.final_status,
+        "rounds_used": results[-1].round if results else 0,
+        "rounds_planned": getattr(agent, "planned_rounds", 0),
+        "accepted": len(getattr(control, "accepted", None) or ()),
+        "rubric": getattr(agent, "rubric_source", "") or "none",
+    }
 
 
 def run_settings(agent: Any) -> str:
@@ -726,7 +832,7 @@ def transcript_entry_for_event(
     elif kind == "reasoning":
         entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "solution":
-        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
+        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title, "answer": True}
     elif kind == "code":
         entry = {
             "panel": "inner",
@@ -792,7 +898,13 @@ def transcript_entry_for_event(
         if getattr(event, "caption", None):
             entry["caption"] = event.caption
     elif kind == "summary":
+        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title, "answer": True}
+    elif kind == "gate_result":
+        entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
+    elif kind == "round_pause":
         entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
+    elif kind == "final_status":
+        entry = {"panel": "main", "role": "assistant", "kind": "final_status", "content": event.content}
     elif kind == "complete":
         entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "instruction":
@@ -848,6 +960,23 @@ def transcript_entry_for_event(
         entry.setdefault("step_id", getattr(event, "step_id", None))
         entry.setdefault("run_id", getattr(event, "run_id", None))
     return entry
+
+
+def add_transcript_entry(transcript: list[dict[str, Any]], entry: dict[str, Any]) -> bool:
+    """Append `entry`, except a final status, which goes above this turn's final answer.
+
+    The status is only known once the run ends, after the answer is already
+    in the transcript. Returns True when the entry was inserted rather than
+    appended, so a live renderer knows to redraw.
+    """
+    if entry.get("kind") == "final_status":
+        last_user = max((i for i, e in enumerate(transcript) if e.get("role") == "user"), default=-1)
+        answers = [i for i in range(last_user + 1, len(transcript)) if transcript[i].get("answer")]
+        if answers:
+            transcript.insert(answers[-1], entry)
+            return True
+    transcript.append(entry)
+    return False
 
 
 def format_duration(seconds: float) -> str:
@@ -922,7 +1051,7 @@ def list_available_providers() -> dict[str, list[str]]:
 # --- HTML export -------------------------------------------------------
 
 ExportEntryKind = Literal[
-    "text", "code", "observation", "image", "pdf", "plot_withheld", "structure", "instruction", "qa"
+    "text", "code", "observation", "image", "pdf", "plot_withheld", "structure", "instruction", "qa", "final_status"
 ]
 
 
@@ -1017,6 +1146,8 @@ def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
             content="(agent paused for instructional card)",
             step_id=step_id,
         )
+    if event.type == "final_status":
+        return ExportEntry(role="assistant", kind="final_status", title="Status", content=event.content)
     if event.type == "rubric_update":
         return ExportEntry(
             role="assistant",
@@ -1369,6 +1500,11 @@ def export_run(
     os.makedirs(export_dir, exist_ok=True)
     shutil.rmtree(os.path.join(export_dir, "figures"), ignore_errors=True)
     assets = ExportAssets(export_dir)
+    # The main page begins with the run's status: the latest one, if any.
+    statuses = [i for i, e in enumerate(main_entries) if e.kind == "final_status"]
+    if statuses:
+        main_entries = list(main_entries)
+        main_entries.insert(0, main_entries.pop(statuses[-1]))
     main_name, inner_name = f"biomentis_main_{stamp}.html", f"biomentis_inner_{stamp}.html"
     pages = (
         (main_name, main_entries, MAIN_EXPORT_TITLE, ("Step log", inner_name)),

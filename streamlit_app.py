@@ -111,12 +111,14 @@ with st.sidebar:
 
     # How hard the agent works before an answer is accepted. Read below when
     # the agent is configured, so a change applies from the next run.
+    # With it off, the run keeps the older evidence nudge (see below).
     st.toggle(
-        "Require evidence before answering",
-        value=True,
-        key="biomentis_evidence_gate",
-        help="Sends the first answer back (at most twice) until the run has consulted a "
-        "literature source, computed its numbers in code and made a figure.",
+        "Completion checks",
+        value=default_config.completion_gate,
+        key="biomentis_completion_gate",
+        help="Checks every answer (arithmetic, figures, sources, labels, consistency and, "
+        "if a reviewer is set, rubric coverage). Up to 3 revision rounds run automatically; "
+        "from round 4 the run pauses for you to continue or stop.",
     )
     # Temperatures, for reproducibility. 0 is the most repeatable (the model
     # always takes its most likely next token); higher values vary more from
@@ -259,7 +261,10 @@ if not st.session_state.get("biomni_run_active"):
         self_critic=_critique_rounds > 0,
         test_time_scale_round=_critique_rounds,
         critic_priorities=list(tutor.active_priorities),
-        evidence_gate=st.session_state.get("biomentis_evidence_gate", True),
+        # One switch for both: with the completion checks off, the old
+        # evidence nudge still sends an unsupported answer back.
+        completion_gate=st.session_state.get("biomentis_completion_gate", default_config.completion_gate),
+        evidence_gate=st.session_state.get("biomentis_completion_gate", default_config.completion_gate),
     )
 
 # Sidebar order: Model picker (above) → REPL (existing) → Tutor (new).

@@ -387,13 +387,17 @@ def evidence_nudge(missing: list[str], ev: RunEvidence | None = None, answer: st
     )
 
 
-def format_quality_summary(ev: RunEvidence, settings: str = "", unsaved_figure_steps: int = 0) -> str:
+def format_quality_summary(
+    ev: RunEvidence, settings: str = "", unsaved_figure_steps: int = 0, gate: dict | None = None
+) -> str:
     """One line on how the answer was made, plus lines on what was missing.
 
     `settings` (model, temperatures, reviewer) is shown as its own line, so
     runs can be compared for reproducibility. `unsaved_figure_steps` counts
     steps whose figure was drawn but never saved, so it is in neither the
     transcript nor its export (the app's own fault, not the model's).
+    `gate` (see `ui_core.gate_summary`) adds the completion gate's status,
+    rounds, accepted findings and rubric source.
     """
 
     def n(count: int, word: str) -> str:
@@ -425,6 +429,11 @@ def format_quality_summary(ev: RunEvidence, settings: str = "", unsaved_figure_s
     lines = ["**How this answer was made:** " + " · ".join(parts)]
     if settings:
         lines.append(f"**Settings:** {settings}")
+    if gate:
+        lines.append(f"**Status:** {gate['status']}")
+        lines.append(f"**Rounds:** used {gate['rounds_used']} of planned {gate['rounds_planned']}")
+        lines.append(f"**Accepted as is:** {n(gate['accepted'], 'finding')}")
+        lines.append(f"**Rubric:** {gate['rubric']}")
     if issues:
         lines.append("**Along the way:** " + "; ".join(issues))
     if unsaved_figure_steps:

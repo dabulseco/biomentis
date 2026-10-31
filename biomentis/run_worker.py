@@ -84,6 +84,10 @@ class BackgroundRun:
         self._cancel = threading.Event()
         # Set by the gate loop; cancel() must wake it if it is paused.
         self.round_control: RoundControl | None = None
+        # Cancelled while paused: the stop routes the graph to its quick
+        # finalize step, so the worker drains the rest of the stream (the
+        # final status, the run-quality summary) instead of cutting it off.
+        self._drain_after_cancel = False
         self._thread: threading.Thread | None = None
 
     # ----- state ---------------------------------------------------------
@@ -131,7 +135,8 @@ class BackgroundRun:
                 self._append(event)
                 if self._cancel.is_set():
                     status = "cancelled"
-                    break
+                    if not self._drain_after_cancel:
+                        break
         except BaseException as exc:  # noqa: BLE001 - a worker must not die silently
             # Deliberately BaseException: Streamlit's RerunException and
             # StopException both derive from it, and one can reach here if
@@ -170,6 +175,8 @@ class BackgroundRun:
         mid-flight, so this is cooperative: the run ends at the next event
         boundary. Everything produced up to that point is kept.
         """
+        if self.round_control is not None:
+            self._drain_after_cancel = self.round_control.pending is not None
         self._cancel.set()
         if self.round_control is not None:
             self.round_control.stop()
@@ -178,8 +185,14 @@ class BackgroundRun:
 
     # ----- consuming -----------------------------------------------------
 
-    def events_from(self, index: int, poll_seconds: float = 0.25) -> Iterator[Any]:
+    def events_from(
+        self, index: int, poll_seconds: float = 0.25, idle: Callable[[], bool] | None = None
+    ) -> Iterator[Any]:
         """Yield events from `index` onward, blocking until the run ends.
+
+        With `idle`, also return once every event is consumed and `idle()` is
+        true: a run paused for the user produces nothing until they answer,
+        so a consumer must stop waiting and show the question instead.
 
         The caller is expected to be torn down mid-iteration — that is the
         whole point — so it must persist its cursor after handling each
@@ -188,6 +201,8 @@ class BackgroundRun:
         while True:
             with self._condition:
                 while index >= len(self.events) and not self._done.is_set():
+                    if idle is not None and idle():
+                        return
                     self._condition.wait(poll_seconds)
                 if index >= len(self.events):
                     return  # finished, and the caller has seen everything
@@ -209,9 +224,15 @@ def start_run(
     stream_factory: Callable[[], Iterator[Any]],
     *,
     journal: RunJournal | None = None,
+    round_control: RoundControl | None = None,
 ) -> BackgroundRun:
-    """Register and start a run for `session_key`, replacing any previous one."""
+    """Register and start a run for `session_key`, replacing any previous one.
+
+    `round_control` is the agent's pause control. It is set before the worker
+    starts, so `cancel()` can always end a paused run.
+    """
     run = BackgroundRun(prompt, journal=journal)
+    run.round_control = round_control
     with _REGISTRY_LOCK:
         previous = _RUNS.get(session_key)
         if previous is not None and previous.is_alive():

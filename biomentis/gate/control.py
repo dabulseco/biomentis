@@ -30,8 +30,11 @@ class RoundControl:
 
     @property
     def pending(self) -> dict | None:
+        """The pause awaiting the user, or None. A decided pause is no longer
+        pending, even before the run thread wakes up and takes the decision,
+        so a UI does not show it again on the rerun after the click."""
         with self._cond:
-            if self._pending is None:
+            if self._pending is None or self._decision is not None:
                 return None
             return {**self._pending, "findings": list(self._pending["findings"])}
 

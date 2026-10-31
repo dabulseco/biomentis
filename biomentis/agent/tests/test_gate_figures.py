@@ -66,6 +66,13 @@ def test_stale() -> None:
     _check("no earlier candidate: nothing stale", check_figures("Outlay is $414.", _ev(single)) == [], "")
     kept = _fig(STALE_TITLE) + [AIMessage(content="<solution>x</solution>"), AIMessage(content="<solution>y</solution>")]
     _check("numbers still in the answer are not stale", check_figures("Outlay $158.00, reagents $77", _ev(kept)) == [], "")
+    pair = [AIMessage(content="<solution>x</solution>"), AIMessage(content="<solution>y</solution>")]
+    r = check_figures("Outlay is $414.", _ev(_fig("Fig 5 — outlay $414.37") + pair))
+    _check("rounding to the answer's precision is not stale", r == [], str(r))
+    r = check_figures("Nothing numeric.", _ev(_fig("Fig 2 — 2024 field season, 1,000 reads") + pair))
+    _check("years and sample sizes are not stale", r == [], str(r))
+    r = check_figures("Outlay is $414.", _ev(_fig(STALE_TITLE) + pair))
+    _check("$158 vs $414 still blocks", len(r) == 1 and r[0].severity == "blocking", str(r))
 
 
 def test_garbled() -> None:

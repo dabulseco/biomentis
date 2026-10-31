@@ -22,6 +22,24 @@ def _value(token: str) -> float:
     return float(re.sub(r"[^\d.]", "", token).rstrip(".") or "nan")
 
 
+def _decimals(token: str) -> int:
+    digits = re.sub(r"[^\d.]", "", token)
+    return len(digits.split(".", 1)[1]) if "." in digits else 0
+
+
+def _matches(title_tok: str, answer_tok: str) -> bool:
+    """Equal to the coarser stated precision, or within 0.5% relative."""
+    a, b = _value(title_tok), _value(answer_tok)
+    if a != a or b != b:
+        return False
+    half_step = 0.5 * 10 ** -min(_decimals(title_tok), _decimals(answer_tok))
+    return abs(a - b) <= max(half_step, 0.005 * max(abs(a), abs(b)))
+
+
+def _is_year(token: str) -> bool:
+    return token.isdigit() and len(token) == 4 and 1900 <= int(token) <= 2100
+
+
 def _sig_figs(token: str) -> int:
     digits = re.sub(r"[^\d.]", "", token)
     if "." in digits:
@@ -35,14 +53,13 @@ def _claimed_numbers(title: str) -> list[str]:
     out = []
     for tok in _AMOUNT_RE.findall(title):
         tok = tok.strip()
-        if tok[0] == "$" or tok[-1] == "%" or _sig_figs(tok) >= 3:
+        if tok[0] == "$" or tok[-1] == "%" or (_sig_figs(tok) >= 3 and not _is_year(tok)):
             out.append(tok)
     return out
 
 
-def _answer_values(answer: str) -> list[float]:
-    answer = _FIGURE_NUMBER_RE.sub("", answer)
-    return [v for v in (_value(t) for t in _AMOUNT_RE.findall(answer)) if v == v]
+def _answer_numbers(answer: str) -> list[str]:
+    return _AMOUNT_RE.findall(_FIGURE_NUMBER_RE.sub("", answer))
 
 
 def _identity(rec: FigureRecord) -> str:
@@ -73,7 +90,7 @@ def check_figures(answer: str, ev: RunEvidence) -> list[Finding]:
         ))
 
     if ev.last_solution_index >= 0:
-        values = _answer_values(answer)
+        values = _answer_numbers(answer)
         for rec in ev.figure_records:
             if rec.step >= ev.last_solution_index:
                 continue
@@ -83,7 +100,7 @@ def check_figures(answer: str, ev: RunEvidence) -> list[Finding]:
             title = _title(rec.title_line)
             absent = [
                 t for t in _claimed_numbers(title)
-                if not any(abs(v - _value(t)) <= 1e-9 * max(1.0, abs(v)) for v in values)
+                if not any(_matches(t, v) for v in values)
             ]
             if absent:
                 findings.append(Finding(

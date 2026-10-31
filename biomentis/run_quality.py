@@ -80,6 +80,15 @@ _ERROR_RE = re.compile(r"^\s*(Error\b|Traceback|.*\bError querying\b)", re.IGNOR
 
 
 @dataclass
+class FigureRecord:
+    """One drawn figure: the step that drew it, its summary line and that step's code."""
+
+    step: int          # message index (within the current run) of the observation
+    title_line: str    # "Figure '<title>': x = ..."
+    code: str          # the step's code
+
+
+@dataclass
 class RunEvidence:
     """Counts for one run, from its message history."""
 
@@ -99,6 +108,11 @@ class RunEvidence:
     figure_ref_asks: int = 0
     # Each drawn figure's summary line: "Figure '<title>': x = <label> [...], y = ..."
     figure_titles: list[str] = field(default_factory=list)
+    # The same figures with the step and code that drew them.
+    figure_records: list[FigureRecord] = field(default_factory=list)
+    # Message index (within the current run) of the candidate <solution> before
+    # the final one, or -1 when there is no earlier candidate.
+    last_solution_index: int = -1
     # Printed tables from calculation steps that drew no figure, each as
     # (heading, size), latest version of each, in run order. Size is rows
     # times numbers per row, so a wide series outranks a list of conversions.
@@ -134,7 +148,8 @@ def run_evidence(messages: list[BaseMessage]) -> RunEvidence:
     """Count what the latest run in `messages` did."""
     ev = RunEvidence()
     pending_code: str | None = None
-    for m in current_run(messages):
+    solutions: list[int] = []
+    for idx, m in enumerate(current_run(messages)):
         content = m.content if isinstance(m.content, str) else ""
         if isinstance(m, HumanMessage):
             if content == PARSE_ERROR_NUDGE:
@@ -159,7 +174,9 @@ def run_evidence(messages: list[BaseMessage]) -> RunEvidence:
             ev.failed_steps += failed
             ev.truncated_outputs += body.lstrip().startswith("The output is too long")
             ev.figures += body.count("Plot captured.")
-            ev.figure_titles += _FIGURE_LINE_RE.findall(body)
+            lines = _FIGURE_LINE_RE.findall(body)
+            ev.figure_titles += lines
+            ev.figure_records += [FigureRecord(idx, ln, pending_code or "") for ln in lines]
             if pending_code is not None and not failed:
                 used = {t for t in LITERATURE_TOOLS if f"{t}(" in pending_code}
                 ev.literature_tools |= used
@@ -176,6 +193,10 @@ def run_evidence(messages: list[BaseMessage]) -> RunEvidence:
         if match:
             ev.code_steps += 1
             pending_code = match.group(1)
+        elif "<solution>" in content.lower():
+            solutions.append(idx)
+    if len(solutions) >= 2:
+        ev.last_solution_index = solutions[-2]
     return ev
 
 

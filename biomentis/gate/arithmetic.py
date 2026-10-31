@@ -4,8 +4,10 @@ A claim is an expression of numbers and ``+ - × x * / ( ) ·`` followed by
 ``=`` (or ``≈``) and a number. Anything else is skipped, never flagged:
 expressions glued to words or symbols (``√(…)``, ``ln(…)``, ``x²``),
 implicit multiplication (``0.0375(760-749.82)``), a bare number on the left
-(``n = 3``), a layout such as ``2×250`` (no spaces), and results written in
-scientific notation, as a percentage or with a magnitude (``2.47 M``).
+(``n = 3``), a layout such as ``2×250`` or a range such as ``1-3`` (no
+spaces), an expression that continues earlier text (``24 field + 3 + 4``,
+``x² + 2``), and results written in scientific notation, as a percentage or
+with a magnitude (``2.47 M``).
 
 ``evaluate`` is the parser, shared with the derivation check; it never uses
 ``eval``.
@@ -34,6 +36,8 @@ _RESULT_SCALED = re.compile(r"\s*(?:[kKMGTB]|million|billion|thousand|bn|mn)\b")
 # "2×250" with no spaces is a notation (read layout, plate, dimensions),
 # as in "overlap at 2×250 = 127 bp", not a product.
 _LAYOUT = re.compile(r"\d+[×x]\d+")
+# "1-3" with no spaces is a range ("Samples 1-3 = 3 replicates").
+_RANGE = re.compile(r"\d+-\d+")
 _EQUALS = re.compile(r"(?<![=!<>])[=≈](?![=>])")
 
 
@@ -183,12 +187,18 @@ def _claims_in_line(line: str):
         # ("45,000 raw x 0.95 = …", "0.0375(760-749.8) = …"): skip it.
         if not expr or expr[0] in "*/×x·)":
             continue
+        # A signed start is a continuation too unless nothing, or only a
+        # delimiter, comes before it ("24 field + 3 + 4", "x² + 2", "5 g + 3").
+        if expr[0] in "+-−":
+            before = line[:start + lead].rstrip()
+            if before and before[-1] not in _BOUNDARY | {"(", "=", "≈"}:
+                continue
         result = _RESULT.match(line, eq + 1)
         if not result:
             continue
         if _RESULT_CONTINUES.match(line, result.end()) or _RESULT_SCALED.match(line, result.end()):
             continue
-        if _LAYOUT.fullmatch(expr):
+        if _LAYOUT.fullmatch(expr) or _RANGE.fullmatch(expr):
             continue
         # Exact text from the start of the expression to the end of the result.
         quote = line[start + lead:result.end()]

@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 import sys
 
-# --- Tiny test harness (matches test_smoke_e2e.py) -----------------------
+# --- Tiny test harness (matches test_run_quality.py) -----------------------
 
 _PASSED: list[str] = []
 _FAILED: list[tuple[str, str]] = []
@@ -98,7 +98,9 @@ def test_not_claims():
                  'expected = 393 if p["x"] else 432', "if a == 2+2:",
                  # Verbatim from metagenomics Run 3: a read layout and a scaled result.
                  "- Overlap at 2×250 = 127 bp (insert) vs 247 bp for V4; both merge",
-                 "- n=3 sediment: 41 × 60,231 = 2.47 M raw reads"):
+                 "- n=3 sediment: 41 × 60,231 = 2.47 M raw reads",
+                 # Hyphenated ranges are not subtraction.
+                 "Samples 1-3 = 3 replicates", "days 1-7 = 7 days"):
         found = check_arithmetic(text)
         _check(f"no finding: {text!r}", found == [], repr(found))
 
@@ -115,6 +117,8 @@ def test_rounding():
     _check("fix keeps the value's digits", len(found) == 1 and found[0].fix.endswith("= 0.16"), repr(found))
     _check("bold and sentence text around a claim", len(check_arithmetic("**24+3 = 28**")) == 1
            and len(check_arithmetic("Total. 4+5 = 10.")) == 1)
+    _check("signed expressions still checked", len(check_arithmetic("total: -3 + 5 = 4")) == 1
+           and check_arithmetic("(-3 + 5) = 2") == [] and len(check_arithmetic("10 - 3 = 6")) == 1)
     _check("spaced product still checked", check_arithmetic("2 × 250 = 500") == []
            and len(check_arithmetic("2 × 250 = 400")) == 1)
     _check("thousands separators and $", check_arithmetic("$1,015 × 24 = $24,360") == [])
@@ -127,7 +131,10 @@ def test_unsupported_skipped():
 
     for text in ("√(0.0593² + 0.0296²) = 0.0663", "√(0.0593² + 0.0296²) = 0.9",
                  "100.577 + 0.0375(760-749.8) = 200", "ln(2)/0.5 = 9", "log(100)/2 = 1",
-                 "2×3 = 6×10¹⁷", "45,000 raw x 0.95 x 0.80 = 20,007"):
+                 "2×3 = 6×10¹⁷", "45,000 raw x 0.95 x 0.80 = 20,007",
+                 # Only the tail after a word, square or unit parses: skip, not flag.
+                 "24 field + 3 + 4 = 31 libraries", "x² + 2 + 3 = 14",
+                 "10² - 50 + 1 = 51", "5 g + 3 + 2 = 10 g"):
         found = check_arithmetic(text)
         _check(f"skipped: {text!r}", found == [], repr(found))
 

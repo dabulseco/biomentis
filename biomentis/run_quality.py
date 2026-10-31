@@ -51,6 +51,8 @@ CRITIC_FEEDBACK_PREFIX = "Wait... this is not enough to solve the task."
 # The independent reviewer's findings, sent back to the agent, start with this
 # (see biomentis.independent_review).
 REVIEW_FEEDBACK_PREFIX = "An independent reviewer checked your final answer"
+# The completion gate's findings, sent back to the agent, start with this.
+GATE_FEEDBACK_PREFIX = "The completion checks found problems"
 
 MAX_EVIDENCE_ASKS = 2
 EVIDENCE_NUDGE_PREFIX = "Before this can be the final answer, the run still needs:"

@@ -239,6 +239,36 @@ def _resolve_file_path(agent: Any, file_path: str) -> str | None:
     return None
 
 
+_REVISION_LABELS = {
+    "self_critique": "self-critique",
+    "checks": "failed checks",
+    "reviewer": "independent review",
+}
+
+
+def revision_title(round_number: int, source: str) -> str:
+    """Title for the answer of a given round, by what sent the previous one back."""
+    if source == "first":
+        return "✅ Answer"
+    return f"✅ Answer (round {round_number}: revised after {_REVISION_LABELS[source]})"
+
+
+def revision_source(messages_before_solution: list[BaseMessage]) -> str:
+    """What triggered a revision: the nearest loop message before the solution."""
+    from biomentis.run_quality import CRITIC_FEEDBACK_PREFIX, GATE_FEEDBACK_PREFIX
+
+    for message in reversed(messages_before_solution):
+        if not isinstance(message, HumanMessage) or not isinstance(message.content, str):
+            continue
+        if message.content.startswith(CRITIC_FEEDBACK_PREFIX):
+            return "self_critique"
+        if message.content.startswith(REVIEW_FEEDBACK_PREFIX):
+            return "reviewer"
+        if message.content.startswith(GATE_FEEDBACK_PREFIX):
+            return "checks"
+    return "first"
+
+
 def stream_agent_events(
     agent: Any,
     text_input: str,
@@ -419,16 +449,19 @@ def stream_agent_events(
             # Dedupe: the same message can surface across consecutive state
             # emissions, and re-posting an identical answer helps nobody.
             if solution and solution != last_solution:
+                round_number = solution_round
                 solution_round += 1
+                source = "first"
+                if round_number:
+                    # A later answer with no marked trigger is the loop's
+                    # default revision: the self-critique.
+                    found = revision_source(s["messages"][:-1])
+                    source = "self_critique" if found == "first" else found
                 yield UIEvent(
                     type="solution",
                     channel="main",
                     content=solution,
-                    title=(
-                        "✅ Answer"
-                        if solution_round == 1
-                        else f"✅ Answer (revised after self-critique #{solution_round - 1})"
-                    ),
+                    title=revision_title(round_number, source),
                 )
                 last_solution = solution
                 solution_found = True

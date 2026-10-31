@@ -135,9 +135,12 @@ def run_bash_script(script: str) -> str:
 
         # Return the output
         if result.returncode != 0:
-            traceback.print_stack()
-            print(result)
-            return f"Error running Bash script (exit code {result.returncode}):\n{result.stderr}"
+            # What the script printed before failing, as for a Python step: a
+            # script that fails a check often says why on stdout, not stderr.
+            report = f"Error running Bash script (exit code {result.returncode}):\n{result.stderr}"
+            if result.stdout.strip():
+                report = report.rstrip("\n") + "\n\nOutput printed before the error:\n" + result.stdout.rstrip("\n")
+            return report
         else:
             return result.stdout
     except Exception as e:

@@ -26,6 +26,8 @@ What these tests pin down:
  10.  A step that raises keeps what it printed, and says which error and which
       line ("Error: GUARD FAILED" alone hid an agent's own self-check
       results, 2026-10-28); a figure still open when it raises is captured
+ 11.  A failing Bash step keeps its stdout too (2026-10-31: stderr was empty,
+      so the agent saw only "exit code 1")
 
 Run with:
     python -m biomentis.agent.tests.test_plot_feedback
@@ -288,6 +290,18 @@ def test_each_run_starts_fresh() -> None:
     _check("stream_agent_events: no stale repeat", obs and not any("NOTE" in o for o in obs), str(obs))
 
 
+def test_bash_error_keeps_output() -> None:
+    print("\n[11] a failing Bash step keeps what it printed")
+    from biomentis.utils import run_bash_script
+
+    out = run_bash_script("echo '=== OS / CPU ==='\necho arm64\nfalse")
+    _check("says it failed, with the exit code", out.startswith("Error running Bash script (exit code 1)"), out)
+    _check("keeps stdout", "=== OS / CPU ===" in out and "arm64" in out, out)
+    out = run_bash_script("echo bad >&2\nexit 2")
+    _check("stderr alone: no empty stdout section", "bad" in out and "Output printed" not in out, out)
+    _check("success is just stdout", run_bash_script("echo ok") == "ok\n")
+
+
 def test_error_keeps_output_and_line() -> None:
     print("\n[10] a step that raises keeps its output, the error type and the line")
     import matplotlib
@@ -335,6 +349,7 @@ def run_all() -> int:
         test_self_critic_does_not_restart,
         test_each_run_starts_fresh,
         test_error_keeps_output_and_line,
+        test_bash_error_keeps_output,
     ):
         try:
             test()

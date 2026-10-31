@@ -66,6 +66,7 @@ $P -m biomentis.agent.tests.test_revision_labels    # each revised answer titled
 $P -m biomentis.agent.tests.test_gate_arithmetic     # completion gate types + arithmetic check (expr = number recomputed; non-claims and unsupported operators skipped)
 $P -m biomentis.agent.tests.test_gate_claims        # gate: unsourced "verified" versions, unlabelled simulated data, missing evidence
 $P -m biomentis.agent.tests.test_gate_quantities    # gate: chunked quantity extraction, consistency, derivations, regressions, code-output cross-check
+$P -m biomentis.agent.tests.test_gate_rounds        # gate: round policy (planned rounds always run, 3 automatic rounds then ask, reviewer off/failed relaxes rubric/review, final labels)
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

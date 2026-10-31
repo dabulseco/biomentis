@@ -280,9 +280,64 @@ def test_feedback_message() -> None:
     _check("blocking before warnings", text.index("24+3 = 28") < text.index("Fig 2"), text)
     result.accepted.add(result.findings[1].key)
     _check("an accepted finding is not sent back", "24+3 = 28" not in gate_feedback(result), gate_feedback(result))
+    passed = gate_feedback(GateResult(0, [], "off"))
+    _check("a passed planned round says none blocking",
+           passed.startswith(GATE_FEEDBACK_PREFIX + ": none blocking. This is a planned review round"), passed)
     msgs = [HumanMessage(content="Q"), AIMessage(content="<solution>A</solution>"), HumanMessage(content=text)]
     _check("it does not start a new run", current_run(msgs) == msgs, str(len(current_run(msgs))))
     _check("it counts as a critique round", run_evidence(msgs).critique_rounds == 1, "")
+
+
+def test_checker_crash() -> None:
+    print("\n(h) a checker that crashes is a warning, not a lost run")
+    import biomentis.gate.runner as runner
+
+    def boom(answer, ev):
+        raise ValueError("bad figure title")
+
+    original = runner.check_figures
+    runner.check_figures = boom
+    try:
+        llm = _Scripted(_EVIDENCE_STEPS + [_RIGHT])
+        agent = _agent(llm, planned=0)
+        _, final = agent.go("What is 24+3?")
+    finally:
+        runner.check_figures = original
+    results = agent.run_gate_results
+    warning = [f for f in (results[0].findings if results else [])
+               if f.severity == "warning" and "check_figures failed: ValueError: bad figure title" in f.issue]
+    _check("the answer is kept", "24+3 = 27" in final, final)
+    _check("the crash is a warning on the figure check", len(warning) == 1 and warning[0].check == "figure",
+           repr(results[0].findings) if results else "no gate")
+    _check("the run reached finalize", agent.final_status == "⚠️ Not fully checked (reviewer off)", agent.final_status)
+
+    def broken_record(**kwargs):
+        raise OSError("disk full")
+
+    llm = _Scripted(_EVIDENCE_STEPS + [_RIGHT])
+    agent = _agent(llm, planned=0)
+    agent.tracer.record_gate = broken_record
+    _, final = agent.go("What is 24+3?")
+    _check("a failing trace write does not end the run",
+           agent.final_status == "⚠️ Not fully checked (reviewer off)" and "24+3 = 27" in final, agent.final_status)
+
+
+def test_runs_without_answer_get_a_status() -> None:
+    print("\n(i) runs that end without an answer still get a status")
+    from biomentis.agent.a1 import REPEAT_STOP_AT
+
+    llm = _Scripted(["no tags here"] * 3)
+    agent = _agent(llm, planned=0)
+    agent.go("What is 24+3?")
+    _check("repeated parse errors: no final answer", agent.final_status == "⚠️ No final answer", agent.final_status)
+    _check("no gate ran", agent.run_gate_results == [], str(agent.run_gate_results))
+
+    same = "<execute>print('same output')</execute>"
+    llm = _Scripted([same] * (REPEAT_STOP_AT + 1))
+    agent = _agent(llm, planned=0)
+    _, final = agent.go("loop please")
+    _check("the step guard ended the run", "same code with the same result" in final, final)
+    _check("step guard: no final answer", agent.final_status == "⚠️ No final answer", agent.final_status)
 
 
 def main() -> int:
@@ -294,6 +349,8 @@ def main() -> int:
     test_context_pause()
     test_keys()
     test_feedback_message()
+    test_checker_crash()
+    test_runs_without_answer_get_a_status()
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     return 1 if _FAILED else 0
 

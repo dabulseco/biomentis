@@ -133,6 +133,9 @@ from biomentis.gate import GateResult
 from biomentis.gate.control import RoundControl
 from biomentis.gate.rounds import final_label, next_action
 from biomentis.gate.runner import gate_feedback, run_gate
+
+# The status of a gate-on run that ended without an answer to check.
+NO_FINAL_ANSWER_STATUS = "⚠️ No final answer"
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
     ExportEntry,
@@ -2500,29 +2503,32 @@ Each library is listed with its description to help you understand its functiona
             """Draft (or convert) the run's rubric. A pass-through until the rubric task lands."""
             return state
 
-        def routing_function_gate(state: AgentState) -> Literal["execute", "generate", "gate", "finalize", "end"]:
+        def routing_function_gate(state: AgentState) -> Literal["execute", "generate", "gate", "finalize"]:
             next_step = state.get("next_step")
             if next_step == "finalize":
                 return "finalize"
             if next_step == "end":
-                # Only a real answer is checked; an aborted run just ends.
+                # Only a real answer is checked; an aborted run is labelled and ends.
                 last = state["messages"][-1].content if state["messages"] else ""
                 if isinstance(last, str) and re.search(r"<solution>.*?</solution>", last, re.DOTALL | re.IGNORECASE):
                     return "gate"
-                return "end"
+                return "finalize"
             return routing_function(state)
 
         def gate(state: AgentState) -> AgentState:
             round_done = len(self.run_gate_results)
             result = run_gate(self, state["messages"], round_done)
             self.run_gate_results.append(result)
-            self.tracer.record_gate(
-                round=result.round,
-                passed=result.passed,
-                reviewer_state=result.reviewer_state,
-                blocking=[f.check for f in result.blocking],
-                warnings=sum(1 for f in result.findings if f.severity == "warning"),
-            )
+            try:
+                self.tracer.record_gate(
+                    round=result.round,
+                    passed=result.passed,
+                    reviewer_state=result.reviewer_state,
+                    blocking=[f.check for f in result.blocking],
+                    warnings=sum(1 for f in result.findings if f.severity == "warning"),
+                )
+            except Exception as exc:  # telemetry must never break a run
+                print(f"[step_trace] could not record gate: {exc}")
             action = next_action(round_done, planned_rounds, result)
             print(
                 f"completion gate, round {round_done}: {len(result.blocking)} blocking, "
@@ -2558,8 +2564,12 @@ Each library is listed with its description to help you understand its functiona
             return state
 
         def finalize(state: AgentState) -> AgentState:
-            result = self.run_gate_results[-1] if self.run_gate_results else GateResult(0, [], "off")
-            self.final_status = final_label(result, self._gate_stopped, result.round)
+            """Every gate-on run ends here, so every one ends with a status label."""
+            if not self.run_gate_results and not self._gate_stopped:
+                self.final_status = NO_FINAL_ANSWER_STATUS
+            else:
+                result = self.run_gate_results[-1] if self.run_gate_results else GateResult(0, [], "off")
+                self.final_status = final_label(result, self._gate_stopped, result.round)
             print(f"completion gate: {self.final_status}")
             state["next_step"] = "end"
             return state
@@ -2590,7 +2600,6 @@ Each library is listed with its description to help you understand its functiona
                     "generate": "generate",
                     "gate": "gate",
                     "finalize": "finalize",
-                    "end": END,
                 },
             )
             workflow.add_conditional_edges(
@@ -2640,11 +2649,12 @@ Each library is listed with its description to help you understand its functiona
                 path_map={"generate": "generate", "end": END},
             )
         # Back to generate, unless the repeated-step guard ended the run. Not
-        # via self_critic: its feedback would only restart the loop.
+        # via self_critic: its feedback would only restart the loop. With the
+        # gate, an ended run still gets its status label in finalize.
         workflow.add_conditional_edges(
             "execute",
             lambda state: "end" if state.get("next_step") == "end" else "generate",
-            path_map={"generate": "generate", "end": END},
+            path_map={"generate": "generate", "end": "finalize" if self.completion_gate else END},
         )
         if not self.completion_gate:
             workflow.add_edge(START, "generate")

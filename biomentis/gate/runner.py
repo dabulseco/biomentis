@@ -42,6 +42,16 @@ def _review_findings(agent, messages: list[BaseMessage], result: GateResult) -> 
     return [], "ok"
 
 
+def _safe(check: str, name: str, fn, *args) -> list[Finding]:
+    """Run one checker; a crash becomes a warning, so it never costs the run its answer."""
+    try:
+        return list(fn(*args))
+    except Exception as exc:
+        print(f"[gate] {name} failed ({type(exc).__name__}: {exc}); continuing without it")
+        return [Finding(check=check, severity="warning", quote="",
+                        issue=f"{name} failed: {type(exc).__name__}: {exc}")]
+
+
 def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None) -> GateResult:
     run = current_run(messages)
     solutions = _solution_indices(run)
@@ -51,11 +61,11 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
     code = [match.group(1) for m in run if (match := _EXECUTE_RE.search(_text(m)))]
 
     findings: list[Finding] = []
-    findings += check_arithmetic(answer)
-    findings += check_figures(answer, ev)
-    findings += check_verified_claims(answer, "\n".join(observations))
-    findings += check_simulated_labels(answer, code)
-    findings += check_evidence(ev)
+    findings += _safe("arithmetic", "check_arithmetic", check_arithmetic, answer)
+    findings += _safe("figure", "check_figures", check_figures, answer, ev)
+    findings += _safe("claim", "check_verified_claims", check_verified_claims, answer, "\n".join(observations))
+    findings += _safe("claim", "check_simulated_labels", check_simulated_labels, answer, code)
+    findings += _safe("evidence", "check_evidence", check_evidence, ev)
 
     llm = getattr(agent, "gate_llm", None) or agent.llm
     try:
@@ -64,13 +74,15 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
         print(f"[gate] quantity extraction failed ({type(exc).__name__}: {exc}); no quantity checks this round")
         claims = None
     if claims is not None:
-        findings += check_consistency(claims)
-        findings += check_derivations(claims)
+        findings += _safe("quantity", "check_consistency", check_consistency, claims)
+        findings += _safe("quantity", "check_derivations", check_derivations, claims)
         prev = getattr(agent, "_gate_prev_claims", None)
         if prev is not None and len(solutions) >= 2:
             # Numbers printed since the previous candidate justify a change.
-            findings += check_regressions(prev, claims, output_numbers(run[solutions[-2] + 1:]))
-        findings += check_against_outputs(claims, output_numbers(messages))
+            findings += _safe("regression", "check_regressions",
+                              lambda: check_regressions(prev, claims, output_numbers(run[solutions[-2] + 1:])))
+        findings += _safe("quantity", "check_against_outputs",
+                          lambda: check_against_outputs(claims, output_numbers(messages)))
         agent._gate_prev_claims = claims
 
     control = getattr(agent, "round_control", None)
@@ -81,7 +93,13 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
         accepted=set(control.accepted) if control is not None else set(),
     )
     if getattr(agent, "review_llm", None) is not None:
-        review, result.reviewer_state = _review_findings(agent, messages, result)
+        try:
+            review, result.reviewer_state = _review_findings(agent, messages, result)
+        except Exception as exc:  # a reviewer outage is reported, not fatal
+            print(f"[gate] review failed ({type(exc).__name__}: {exc})")
+            review = [Finding(check="review", severity="warning", quote="",
+                              issue=f"review failed: {type(exc).__name__}: {exc}")]
+            result.reviewer_state = "failed"
         result.findings += review
     return result
 
@@ -100,7 +118,8 @@ def gate_feedback(result: GateResult) -> str:
         lines = [f"{GATE_FEEDBACK_PREFIX} in your final answer. Fix each of these:"]
         lines += [_describe(f) for f in blocking]
     else:
-        lines = [f"{GATE_FEEDBACK_PREFIX} in your final answer: none that block it."]
+        lines = [f"{GATE_FEEDBACK_PREFIX}: none blocking. This is a planned review round; "
+                 "improve the answer where the feedback below shows a real gap."]
     if warnings:
         lines += ["", "Warnings (fix them if they are real problems):"]
         lines += [_describe(f) for f in warnings]

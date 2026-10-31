@@ -64,6 +64,7 @@ $P -m biomentis.agent.tests.test_web_search         # web search through Ollama'
 $P -m biomentis.agent.tests.test_output_folder      # agent's files saved in the session's output folder (Downloads), export into it
 $P -m biomentis.agent.tests.test_revision_labels    # each revised answer titled by what sent it back (self-critique, review, checks)
 $P -m biomentis.agent.tests.test_gate_arithmetic     # completion gate types + arithmetic check (expr = number recomputed; non-claims and unsupported operators skipped)
+$P -m biomentis.agent.tests.test_gate_claims        # gate: unsourced "verified" versions, unlabelled simulated data, missing evidence
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

@@ -23,6 +23,8 @@ class RoundControl:
     def request(self, round_number: int, findings: list[Finding], reason: str) -> None:
         """Record that the run is about to pause. `reason` is "round" or "context"."""
         with self._cond:
+            if self._decision != "stop":
+                self._decision = None  # a stale Continue must not skip this pause
             self._pending = {"round": round_number, "findings": list(findings), "reason": reason}
             self._cond.notify_all()
 
@@ -47,9 +49,22 @@ class RoundControl:
         if choice not in _CHOICES:
             raise ValueError(f"choice must be one of {_CHOICES}, got {choice!r}")
         with self._cond:
-            self.accepted |= set(accepted_keys)
+            if self._decision == "stop":
+                return  # stop is sticky: nothing replaces it
+            if choice == "continue":
+                if self._pending is None:
+                    return  # stale or duplicate submit, nothing to continue
+                self.accepted |= set(accepted_keys)
             self._decision = choice
             self._cond.notify_all()
 
     def stop(self) -> None:
         self.decide("stop")
+
+    def reset(self) -> None:
+        """Clear everything, including a sticky stop. Called at the start of a run."""
+        with self._cond:
+            self._decision = None
+            self._pending = None
+            self.accepted = set()
+            self._cond.notify_all()

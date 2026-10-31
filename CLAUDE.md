@@ -63,6 +63,7 @@ $P -m biomentis.agent.tests.test_independent_review # second-model review, one c
 $P -m biomentis.agent.tests.test_web_search         # web search through Ollama's API, page text reuse, scraper fallback
 $P -m biomentis.agent.tests.test_output_folder      # agent's files saved in the session's output folder (Downloads), export into it
 $P -m biomentis.agent.tests.test_revision_labels    # each revised answer titled by what sent it back (self-critique, review, checks)
+$P -m biomentis.agent.tests.test_round_control      # gate pause control: Continue/Stop, no timeout, Stop run wakes it
 $P -m biomentis.agent.tests.test_gate_arithmetic     # completion gate types + arithmetic check (expr = number recomputed; non-claims and unsupported operators skipped)
 $P -m biomentis.agent.tests.test_gate_claims        # gate: unsourced "verified" versions, unlabelled simulated data, missing evidence
 $P -m biomentis.agent.tests.test_gate_quantities    # gate: chunked quantity extraction, consistency, derivations, regressions, code-output cross-check

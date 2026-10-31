@@ -42,6 +42,7 @@ import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
+from biomentis.gate.control import RoundControl
 from biomentis.run_journal import RunJournal
 
 __all__ = [
@@ -81,6 +82,8 @@ class BackgroundRun:
         self._condition = threading.Condition()
         self._done = threading.Event()
         self._cancel = threading.Event()
+        # Set by the gate loop; cancel() must wake it if it is paused.
+        self.round_control: RoundControl | None = None
         self._thread: threading.Thread | None = None
 
     # ----- state ---------------------------------------------------------
@@ -168,6 +171,8 @@ class BackgroundRun:
         boundary. Everything produced up to that point is kept.
         """
         self._cancel.set()
+        if self.round_control is not None:
+            self.round_control.stop()
         with self._condition:
             self._condition.notify_all()
 

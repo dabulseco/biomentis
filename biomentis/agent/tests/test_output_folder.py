@@ -57,7 +57,7 @@ def _agent(replies: list[str], output_dir: str | None):
 
     agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
     agent.llm = _LLM()
-    agent.configure()
+    agent.configure(completion_gate=False)
     agent.output_dir = output_dir
     return agent, seen
 

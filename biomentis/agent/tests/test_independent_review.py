@@ -190,7 +190,7 @@ def _agent(llm, reviewer=None, self_critic=False, rounds=0, critic=None, search=
     agent.llm = llm
     if critic is not None:
         agent._creative_llm = critic
-    agent.configure(self_critic=self_critic, test_time_scale_round=rounds)
+    agent.configure(self_critic=self_critic, test_time_scale_round=rounds, completion_gate=False)
     agent.review_llm = reviewer
     agent.review_model_name = "gpt-oss:120b" if reviewer else ""
     agent.review_search = search or (lambda query, num_results=3: "(no results)")

@@ -215,7 +215,7 @@ def test_end_to_end_the_code_runs_and_the_fiction_does_not_win() -> None:
             "<solution>REAL_ANSWER</solution>",
         ]
     )
-    agent.configure()
+    agent.configure(completion_gate=False)
 
     log, final = agent.go("compute it")
     history = "\n".join(log)

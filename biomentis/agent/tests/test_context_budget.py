@@ -411,7 +411,7 @@ def test_end_to_end_a_run_that_would_have_died() -> None:
     try:
         agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
         agent.llm = _Stubborn()
-        agent.configure()
+        agent.configure(completion_gate=False)
         log, final = agent.go("a very long research task")
     finally:
         if previous is None:

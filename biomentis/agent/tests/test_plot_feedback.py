@@ -227,7 +227,7 @@ def _agent(llm, self_critic: bool = False):
     agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
     agent.llm = llm
     agent._creative_llm = llm  # the self-critic's client
-    agent.configure(self_critic=self_critic)
+    agent.configure(self_critic=self_critic, completion_gate=False)
     return agent
 
 
@@ -284,7 +284,7 @@ def test_each_run_starts_fresh() -> None:
     agent._seen_steps = {("print('same')", "same\n"): 1}
     llm2 = _ScriptLLM([_SAME, "<solution>ui</solution>"])
     agent.llm = llm2
-    agent.configure()
+    agent.configure(completion_gate=False)
     events = list(stream_agent_events(agent, "ui run", [], [], thread_id=99))
     obs = [e.content for e in events if e.type == "observation"]
     _check("stream_agent_events: no stale repeat", obs and not any("NOTE" in o for o in obs), str(obs))

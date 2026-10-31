@@ -129,6 +129,10 @@ from biomentis.independent_review import (
     review_inputs,
 )
 from biomentis.run_quality import MAX_EVIDENCE_ASKS, evidence_nudge, missing_evidence, run_evidence
+from biomentis.gate import GateResult
+from biomentis.gate.control import RoundControl
+from biomentis.gate.rounds import final_label, next_action
+from biomentis.gate.runner import gate_feedback, run_gate
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
     ExportEntry,
@@ -688,6 +692,21 @@ class A1:
         """Start a run with no independent reviews done."""
         self.review_count = 0
         self.run_reviews: list[dict] = []
+
+    def reset_gate(self) -> None:
+        """Start a run with no completion gate run, no pause asked and no status.
+
+        `round_control` is created once and kept: the UI holds a reference to
+        it, so a run's pause is answered on the same object.
+        """
+        if getattr(self, "round_control", None) is None:
+            self.round_control = RoundControl()
+        self.round_control.reset()
+        self.run_gate_results: list[GateResult] = []
+        self._gate_prev_claims = None
+        self._gate_stopped = False
+        self._context_pause_asked = False
+        self.final_status = ""
 
     def add_tool(self, api):
         """Add a new tool to the agent's tool registry and make it available for retrieval.
@@ -1761,7 +1780,14 @@ Each library is listed with its description to help you understand its functiona
 
         return formatted_prompt
 
-    def configure(self, self_critic=False, test_time_scale_round=0, critic_priorities=None, evidence_gate=False):
+    def configure(
+        self,
+        self_critic=False,
+        test_time_scale_round=0,
+        critic_priorities=None,
+        evidence_gate=False,
+        completion_gate: bool | None = None,
+    ):
         """Configure the agent with the initial system prompt and workflow.
 
         Args:
@@ -1776,10 +1802,24 @@ Each library is listed with its description to help you understand its functiona
             evidence_gate: Send a final answer back, at most MAX_EVIDENCE_ASKS
                 times, until the run has consulted a literature source, made a
                 calculation in code and drawn a figure (see run_quality).
+                Ignored when the completion gate is on: its evidence check
+                replaces this one.
+            completion_gate: Check each final answer (biomentis.gate) and send
+                it back for rounds of revision: the planned rounds
+                (`test_time_scale_round` with self_critic on, else none)
+                always run, failed checks get up to AUTO_ROUND_LIMIT rounds,
+                then the run pauses before each round for the user's
+                Continue or Stop. Default: `default_config.completion_gate`.
+                False builds the old graph (self-critic, independent review).
         """
         # Store self_critic for later use
         self.self_critic = self_critic
         self.evidence_gate = evidence_gate
+        if completion_gate is None:
+            completion_gate = default_config.completion_gate
+        self.completion_gate = bool(completion_gate)
+        # Planned revision rounds for the gate: the "Self-critique rounds".
+        planned_rounds = test_time_scale_round if self_critic else 0
         # `go`/`go_stream` reset this per call, but callers that drive the
         # graph directly (e.g. the Streamlit UI's stream_agent_events,
         # which invokes `self.app.stream` without going through either
@@ -1790,6 +1830,7 @@ Each library is listed with its description to help you understand its functiona
         # same "one self-critic pass per task" semantics as `go`/`go_stream`.
         self.critic_count = 0
         self.reset_review()
+        self.reset_gate()
 
         # Get data lake content
         data_lake_path = self.path + "/data_lake"
@@ -1903,6 +1944,18 @@ Each library is listed with its description to help you understand its functiona
             if _is_claude(self.llm):
                 messages = _observations_as_user_turns(messages)
             messages, context_fit = self._fit_request(messages)
+            # With the completion gate, a nearly full context is the user's
+            # call, once per run: Continue wraps up as below (the request
+            # already ends with WRAP_UP_INSTRUCTION), Stop ends the run here.
+            if self.completion_gate and context_fit.must_wrap_up and not self._context_pause_asked:
+                self._context_pause_asked = True
+                print("context budget: the context window is nearly full; waiting for Continue or Stop")
+                self.round_control.request(round_number=len(self.run_gate_results), findings=[], reason="context")
+                if self.round_control.wait() == "stop":
+                    print("stopped by the user at the context limit")
+                    self._gate_stopped = True
+                    state["next_step"] = "finalize"
+                    return state
             trace_t0 = time.time()
             response = _invoke_llm_with_retry(self.llm, messages, stop_at_first_tag=True)
             trace_latency = time.time() - trace_t0
@@ -2020,9 +2073,15 @@ Each library is listed with its description to help you understand its functiona
             # With the evidence check on, a final answer from a run that never
             # consulted a source, calculated or plotted goes back for those
             # first. Not when the context is nearly full: then the wrap-up
-            # instruction has already asked for the answer now.
+            # instruction has already asked for the answer now. Not with the
+            # completion gate either: its evidence check replaces this one.
             missing = []
-            if answer_match and getattr(self, "evidence_gate", False) and not getattr(self, "_context_wrap_ups", 0):
+            if (
+                answer_match
+                and not self.completion_gate
+                and getattr(self, "evidence_gate", False)
+                and not getattr(self, "_context_wrap_ups", 0)
+            ):
                 evidence = run_evidence(state["messages"])
                 if evidence.evidence_asks < MAX_EVIDENCE_ASKS:
                     missing = missing_evidence(evidence, answer=answer_match.group(1))
@@ -2317,11 +2376,9 @@ Each library is listed with its description to help you understand its functiona
             else:
                 raise ValueError(f"Unexpected next_step: {next_step}")
 
-        def execute_self_critic(state: AgentState) -> AgentState:
-            if self.critic_count < test_time_scale_round:
-                # Generate feedback based on message history
-                messages = state["messages"]
-                feedback_prompt = f"""
+        def self_critique_feedback(messages: list[BaseMessage]) -> str:
+            """The self-critic's feedback on the run so far (one LLM call)."""
+            feedback_prompt = f"""
                 Here is a reminder of what is the user requested: {getattr(self, "user_task", "")}
                 Examine the previous executions, reasoning, and solutions.
                 Critic harshly on what could be improved?
@@ -2334,20 +2391,25 @@ Each library is listed with its description to help you understand its functiona
                 Name design choices or limits that no source consulted in this run supports.
                 No question asked, just feedbacks.
                 """
-                # Divergent by design ("think hard what are missing"), so this is
-                # the one call in the loop that runs on the hot client. The
-                # generate/execute nodes above stay cold.
-                # Same guard as `generate`: this call re-sends the entire
-                # run history, so it is the largest request the graph makes.
-                critic_messages, _ = self._fit_request(
-                    messages + [HumanMessage(content=feedback_prompt)]
-                )
-                feedback = _invoke_llm_with_retry(self.creative_llm, critic_messages)
+            # Divergent by design ("think hard what are missing"), so this is
+            # the one call in the loop that runs on the hot client. The
+            # generate/execute nodes above stay cold.
+            # Same guard as `generate`: this call re-sends the entire
+            # run history, so it is the largest request the graph makes.
+            critic_messages, _ = self._fit_request(
+                messages + [HumanMessage(content=feedback_prompt)]
+            )
+            return _invoke_llm_with_retry(self.creative_llm, critic_messages).content
+
+        def execute_self_critic(state: AgentState) -> AgentState:
+            if self.critic_count < test_time_scale_round:
+                # Generate feedback based on message history
+                feedback = self_critique_feedback(state["messages"])
 
                 # Add feedback as a new message
                 state["messages"].append(
                     HumanMessage(
-                        content=f"Wait... this is not enough to solve the task. Here are some feedbacks for improvement:\n{feedback.content}"
+                        content=f"Wait... this is not enough to solve the task. Here are some feedbacks for improvement:\n{feedback}"
                     )
                 )
                 self.critic_count += 1
@@ -2429,6 +2491,79 @@ Each library is listed with its description to help you understand its functiona
                 state["next_step"] = "generate"
             return state
 
+        # --- The completion gate (biomentis.gate) ----------------------------
+        # generate (on a <solution>) → gate → critique | await_decision | finalize.
+        # Round 0 is the first answer's gate; `round_done` is the round of the
+        # latest result, so the gate count minus one.
+
+        def draft_rubric(state: AgentState) -> AgentState:
+            """Draft (or convert) the run's rubric. A pass-through until the rubric task lands."""
+            return state
+
+        def routing_function_gate(state: AgentState) -> Literal["execute", "generate", "gate", "finalize", "end"]:
+            next_step = state.get("next_step")
+            if next_step == "finalize":
+                return "finalize"
+            if next_step == "end":
+                # Only a real answer is checked; an aborted run just ends.
+                last = state["messages"][-1].content if state["messages"] else ""
+                if isinstance(last, str) and re.search(r"<solution>.*?</solution>", last, re.DOTALL | re.IGNORECASE):
+                    return "gate"
+                return "end"
+            return routing_function(state)
+
+        def gate(state: AgentState) -> AgentState:
+            round_done = len(self.run_gate_results)
+            result = run_gate(self, state["messages"], round_done)
+            self.run_gate_results.append(result)
+            self.tracer.record_gate(
+                round=result.round,
+                passed=result.passed,
+                reviewer_state=result.reviewer_state,
+                blocking=[f.check for f in result.blocking],
+                warnings=sum(1 for f in result.findings if f.severity == "warning"),
+            )
+            action = next_action(round_done, planned_rounds, result)
+            print(
+                f"completion gate, round {round_done}: {len(result.blocking)} blocking, "
+                f"reviewer {result.reviewer_state} → {action}"
+            )
+            state["next_step"] = "finalize" if action == "end" else action
+            return state
+
+        def critique(state: AgentState) -> AgentState:
+            """Send the gate's findings back, with the self-critique in a planned round."""
+            result = self.run_gate_results[-1]
+            text = gate_feedback(result)
+            if result.round < planned_rounds:
+                text += "\n\nMore feedback for improvement:\n" + self_critique_feedback(state["messages"])
+            state["messages"].append(HumanMessage(content=text))
+            self.critic_count += 1
+            state["next_step"] = "generate"
+            return state
+
+        def await_decision(state: AgentState) -> AgentState:
+            """Past the automatic rounds: wait, with no timeout, for Continue or Stop."""
+            result = self.run_gate_results[-1]
+            print(f"completion gate: round {result.round + 1} needs the user's decision")
+            self.round_control.request(round_number=result.round + 1, findings=result.blocking, reason="round")
+            if self.round_control.wait() == "stop":
+                self._gate_stopped = True
+                state["next_step"] = "finalize"
+                return state
+            # Findings accepted as is no longer block; if none are left, the run is done.
+            result.accepted = set(self.round_control.accepted)
+            done = next_action(result.round, planned_rounds, result) == "end"
+            state["next_step"] = "finalize" if done else "critique"
+            return state
+
+        def finalize(state: AgentState) -> AgentState:
+            result = self.run_gate_results[-1] if self.run_gate_results else GateResult(0, [], "off")
+            self.final_status = final_label(result, self._gate_stopped, result.round)
+            print(f"completion gate: {self.final_status}")
+            state["next_step"] = "end"
+            return state
+
         # Create the workflow
         workflow = StateGraph(AgentState)
 
@@ -2436,7 +2571,41 @@ Each library is listed with its description to help you understand its functiona
         workflow.add_node("generate", generate)
         workflow.add_node("execute", execute)
 
-        if self_critic:
+        if self.completion_gate:
+            for name, node in (
+                ("draft_rubric", draft_rubric),
+                ("gate", gate),
+                ("critique", critique),
+                ("await_decision", await_decision),
+                ("finalize", finalize),
+            ):
+                workflow.add_node(name, node)
+            workflow.add_edge(START, "draft_rubric")
+            workflow.add_edge("draft_rubric", "generate")
+            workflow.add_conditional_edges(
+                "generate",
+                routing_function_gate,
+                path_map={
+                    "execute": "execute",
+                    "generate": "generate",
+                    "gate": "gate",
+                    "finalize": "finalize",
+                    "end": END,
+                },
+            )
+            workflow.add_conditional_edges(
+                "gate",
+                lambda state: state["next_step"],
+                path_map={"critique": "critique", "await_decision": "await_decision", "finalize": "finalize"},
+            )
+            workflow.add_edge("critique", "generate")
+            workflow.add_conditional_edges(
+                "await_decision",
+                lambda state: state["next_step"],
+                path_map={"critique": "critique", "finalize": "finalize"},
+            )
+            workflow.add_edge("finalize", END)
+        elif self_critic:
             workflow.add_node("self_critic", execute_self_critic)
             # Add conditional edges
             workflow.add_conditional_edges(
@@ -2461,13 +2630,15 @@ Each library is listed with its description to help you understand its functiona
                 path_map={"execute": "execute", "generate": "generate", "end": "independent_review"},
             )
         # Every run that ends passes the reviewer, which only acts on a real
-        # answer and only when a review model is set.
-        workflow.add_node("independent_review", independent_review)
-        workflow.add_conditional_edges(
-            "independent_review",
-            lambda state: "generate" if state.get("next_step") == "generate" else "end",
-            path_map={"generate": "generate", "end": END},
-        )
+        # answer and only when a review model is set. (With the completion
+        # gate, the reviewer runs inside the gate instead.)
+        if not self.completion_gate:
+            workflow.add_node("independent_review", independent_review)
+            workflow.add_conditional_edges(
+                "independent_review",
+                lambda state: "generate" if state.get("next_step") == "generate" else "end",
+                path_map={"generate": "generate", "end": END},
+            )
         # Back to generate, unless the repeated-step guard ended the run. Not
         # via self_critic: its feedback would only restart the loop.
         workflow.add_conditional_edges(
@@ -2475,7 +2646,8 @@ Each library is listed with its description to help you understand its functiona
             lambda state: "end" if state.get("next_step") == "end" else "generate",
             path_map={"generate": "generate", "end": END},
         )
-        workflow.add_edge(START, "generate")
+        if not self.completion_gate:
+            workflow.add_edge(START, "generate")
 
         # Compile the workflow
         self.app = workflow.compile()
@@ -2677,6 +2849,7 @@ Each library is listed with its description to help you understand its functiona
         self._context_wrap_ups = 0
         self._reset_step_guard()
         self.reset_review()
+        self.reset_gate()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
@@ -2734,6 +2907,7 @@ Each library is listed with its description to help you understand its functiona
         self._context_wrap_ups = 0
         self._reset_step_guard()
         self.reset_review()
+        self.reset_gate()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)

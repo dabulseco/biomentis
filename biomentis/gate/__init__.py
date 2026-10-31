@@ -17,11 +17,13 @@ class Finding:
     quote: str          # exact text from the answer
     issue: str
     fix: str = ""
-    key: str = ""       # stable id for "accept as is"
+    key: str = ""       # stable id for "accept as is" (default: hash of check + quote + issue)
 
     def __post_init__(self) -> None:
         if not self.key:
-            self.key = hashlib.sha1((self.check + self.quote).encode()).hexdigest()[:10]
+            # The issue is part of it: two findings on one quote (say a blocking
+            # derivation and a code-output warning) must not share an "accept as is".
+            self.key = hashlib.sha1((self.check + self.quote + self.issue).encode()).hexdigest()[:10]
 
 
 @dataclass

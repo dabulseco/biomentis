@@ -51,7 +51,8 @@ CRITIC_FEEDBACK_PREFIX = "Wait... this is not enough to solve the task."
 # The independent reviewer's findings, sent back to the agent, start with this
 # (see biomentis.independent_review).
 REVIEW_FEEDBACK_PREFIX = "An independent reviewer checked your final answer"
-# The completion gate's findings, sent back to the agent, start with this.
+# The completion gate's findings, sent back to the agent, start with this
+# (see biomentis.gate.runner.gate_feedback). Each counts as a critique round.
 GATE_FEEDBACK_PREFIX = "The completion checks found problems"
 
 MAX_EVIDENCE_ASKS = 2
@@ -128,6 +129,7 @@ def _is_loop_message(content: str) -> bool:
         or content.startswith(EVIDENCE_NUDGE_PREFIX)
         or content.startswith(CRITIC_FEEDBACK_PREFIX)
         or content.startswith(REVIEW_FEEDBACK_PREFIX)
+        or content.startswith(GATE_FEEDBACK_PREFIX)
         or content.lstrip().startswith("<observation>")
     )
 
@@ -160,7 +162,7 @@ def run_evidence(messages: list[BaseMessage]) -> RunEvidence:
                 ev.evidence_asks += 1
                 ev.unplotted_asks += UNPLOTTED_MARK in content
                 ev.figure_ref_asks += FIGURE_REFS_MARK in content
-            elif content.startswith(CRITIC_FEEDBACK_PREFIX):
+            elif content.startswith(CRITIC_FEEDBACK_PREFIX) or content.startswith(GATE_FEEDBACK_PREFIX):
                 ev.critique_rounds += 1
             elif content.startswith(REVIEW_FEEDBACK_PREFIX):
                 ev.review_corrections += 1

@@ -494,7 +494,7 @@ def test_plot_saved_after_module_reimport():
 
     agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
     agent.llm = _LLM()
-    agent.configure()
+    agent.configure(completion_gate=False)
     old = os.environ.get("BIOMENTIS_ARTIFACT_DIR")
     os.environ["BIOMENTIS_ARTIFACT_DIR"] = tempfile.mkdtemp(prefix="step_plots_reimport_")
     saved = sys.modules.pop("biomentis.tool.support_tools")

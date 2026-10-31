@@ -94,7 +94,7 @@ def _agent(llm):
 
     agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
     agent.llm = llm
-    agent.configure()
+    agent.configure(completion_gate=False)
     return agent
 
 

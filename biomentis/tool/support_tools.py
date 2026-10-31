@@ -169,18 +169,47 @@ def _capture_matplotlib_plots(saved_as: str | None = None) -> list[str]:
     return summary
 
 
+# Raise when the patch changes. A process patched by an older version (an app
+# left running across an update: Streamlit reloads modules, but plt keeps the
+# wrapper the first copy installed) is then re-patched, instead of capturing
+# into a list nothing reads, which lost every figure of the 2026-10-31 run.
+_PATCH_VERSION = 2
+
+
+def _unwrapped(fn, name: str):
+    """matplotlib's own `name` function under any capture wrappers around `fn`."""
+    for _ in range(10):
+        inner = getattr(fn, "_biomentis_original", None)
+        if inner is None:
+            # Wrappers from before this marker keep the original in a closure.
+            inner = next(
+                (
+                    cell.cell_contents
+                    for cell in getattr(fn, "__closure__", None) or ()
+                    if callable(cell.cell_contents)
+                    and getattr(cell.cell_contents, "__name__", "") == name
+                    and getattr(cell.cell_contents, "__module__", "") == "matplotlib.pyplot"
+                ),
+                None,
+            )
+        if inner is None:
+            return fn
+        fn = inner
+    return fn
+
+
 def _apply_matplotlib_patches():
     """Apply simple monkey patches to matplotlib functions to automatically capture plots."""
     try:
         import matplotlib.pyplot as plt
 
         # Only patch if matplotlib is available and not already patched
-        if hasattr(plt, "_biomni_patched"):
+        if getattr(plt, "_biomni_patched", None) == _PATCH_VERSION:
             return
 
-        # Store original functions
-        original_show = plt.show
-        original_savefig = plt.savefig
+        # matplotlib's own functions, not an older version's wrappers
+        original_show = _unwrapped(plt.show, "show")
+        original_savefig = _unwrapped(plt.savefig, "savefig")
 
         def show_with_capture(*args, **kwargs):
             """Enhanced show function that captures plots before displaying them."""
@@ -209,11 +238,13 @@ def _apply_matplotlib_patches():
             return result
 
         # Replace functions with enhanced versions
+        show_with_capture._biomentis_original = original_show
+        savefig_with_capture._biomentis_original = original_savefig
         plt.show = show_with_capture
         plt.savefig = savefig_with_capture
 
         # Mark as patched to avoid double-patching
-        plt._biomni_patched = True
+        plt._biomni_patched = _PATCH_VERSION
 
     except ImportError:
         # matplotlib not available

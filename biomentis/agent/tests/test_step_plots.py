@@ -28,6 +28,8 @@ What these tests pin down:
   17. A plot is still saved after Streamlit re-imports support_tools mid-session
   18. plt patched by the old module copy still feeds the new one (runs 3-4,
       2026-10-29); REPL variables survive the reload too
+  18b. plt patched by an older version of the patch is re-patched around
+      matplotlib's own functions (2026-10-31: app up across an update)
   19. A reported image is shown from a copy taken then; an unchanged image
       is not shown again
   20. The figures the answer cites appear under it in the main panel, latest
@@ -544,6 +546,56 @@ def test_patch_from_old_module_copy():
         sys.modules["biomentis.tool.support_tools"] = saved
 
 
+def test_patch_from_older_code_is_replaced():
+    print("\n[18b] plt patched by an older version of the patch is re-patched")
+    # The 2026-10-31 metagenomics run: the app had been up since before the
+    # shared-state fix, so plt.show was still the wrapper an older copy
+    # installed, filling that copy's own list. All 11 figures were lost.
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("  (matplotlib unavailable; skipping)")
+        return
+    from biomentis.tool import support_tools
+
+    support_tools.run_python_repl("import matplotlib.pyplot as plt")
+    pristine_show = support_tools._unwrapped(plt.show, "show")
+    pristine_savefig = support_tools._unwrapped(plt.savefig, "savefig")
+    stale: list = []
+
+    def _old_patch(original_show, original_savefig):
+        # The shape of the pre-fix patch: closures over the originals, and a
+        # capture into a list only that module copy can read.
+        def show_with_capture(*args, **kwargs):
+            stale.extend(plt.get_fignums())
+            plt.close("all")
+            print("Plot captured.")
+            return original_show(*args, **kwargs)
+
+        def savefig_with_capture(*args, **kwargs):
+            result = original_savefig(*args, **kwargs)
+            stale.extend(plt.get_fignums())
+            plt.close("all")
+            return result
+
+        return show_with_capture, savefig_with_capture
+
+    plt.show, plt.savefig = _old_patch(pristine_show, pristine_savefig)
+    plt._biomni_patched = True
+    support_tools.clear_captured_plots()
+    out = support_tools.run_python_repl("plt.figure()\nplt.plot([1, 2])\nplt.suptitle('Fig 1 — old patch')\nplt.show()")
+    plots = support_tools.get_captured_plots()
+    _check("the plt.show figure is captured", len(plots) == 1, f"{len(plots)} / {out}")
+    _check("the old wrapper is not called", stale == [], str(stale))
+    _check("plt.show wraps matplotlib's own show", support_tools._unwrapped(plt.show, "show") is pristine_show)
+    _check("plt.savefig wraps matplotlib's own savefig",
+           support_tools._unwrapped(plt.savefig, "savefig") is pristine_savefig)
+    support_tools.clear_captured_plots()
+
+
 def _scripted(steps, answer, mode="show", run_id="run-figures"):
     """An agent whose steps are (observation, image_paths, image_meta), then a solution."""
     history: list = []
@@ -730,6 +782,7 @@ def run_all() -> int:
         test_show_patch_message_is_neutral,
         test_plot_saved_after_module_reimport,
         test_patch_from_old_module_copy,
+        test_patch_from_older_code_is_replaced,
         test_reported_image_is_copied,
         test_answer_figures_in_main_panel,
         test_export_run_folder,

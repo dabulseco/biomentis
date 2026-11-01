@@ -606,6 +606,12 @@ def test_app_renders_with_code_review_model_setting() -> None:
     _check("app smoke: no exception", not at.exception, str([e.value for e in at.exception]))
     labels = [sb.label for sb in at.selectbox]
     _check("app smoke: shows Code review model setting", "Code review model" in labels, str(labels))
+    headers = [h.value for h in at.sidebar.header]
+    _check(
+        "app smoke: picker under its own Code review header, after Ollama Cloud",
+        "Code review" in headers and headers.index("Code review") == headers.index("Ollama Cloud") + 1,
+        str(headers),
+    )
     picker = [sb for sb in at.selectbox if sb.label == "Code review model"]
     _check(
         "app smoke: picker lists the faked Ollama models",

@@ -511,6 +511,9 @@ _PROVIDERS_WITH_DEFAULT = {
     "Anthropic": ["claude-sonnet-5-5"],
 }
 _PROVIDERS_NO_DEFAULT = {"Ollama": ["llama3:8b"], "Anthropic": ["claude-sonnet-5-5"]}
+# Only the owner's Ollama API key: hosted names carry no "-cloud" suffix.
+_PROVIDERS_HOSTED_ONLY = {"OllamaCloud": ["deepseek-v4:flash", "gpt-oss:120b", "qwen3-coder:480b"]}
+_PROVIDERS_BOTH_NAMES = {"Ollama": ["gpt-oss:120b"], "OllamaCloud": ["gpt-oss:120b-cloud"]}
 
 
 def _model_app(providers):
@@ -548,6 +551,14 @@ def test_setting_default():
     at.run()
     _check("first ollama model when default absent", at.sidebar.selectbox[0].value == "llama3:8b",
            at.sidebar.selectbox[0].value)
+    at = _model_app(_PROVIDERS_HOSTED_ONLY)
+    at.run()
+    _check("hosted name without -cloud is the default", at.sidebar.selectbox[0].value == "gpt-oss:120b",
+           at.sidebar.selectbox[0].value)
+    at = _model_app(_PROVIDERS_BOTH_NAMES)
+    at.run()
+    _check("exact default name preferred over the bare one", at.sidebar.selectbox[0].value == "gpt-oss:120b-cloud",
+           at.sidebar.selectbox[0].value)
 
 
 def test_review_client_carries_300s_timeout():
@@ -567,6 +578,7 @@ def test_review_client_carries_300s_timeout():
         llm = us.code_review_llm("gpt-oss:120b-cloud")
     _check("local client type", type(llm).__name__ == "ChatOllama", type(llm).__name__)
     _check("local timeout 300", timeout_of(llm) == 300, str(llm._client._client.timeout))
+    _check("review temperature 0.2", us.CODE_REVIEW_TEMPERATURE == 0.2 and llm.temperature == 0.2, str(llm.temperature))
     _check("thinking decided by _ollama_reasoning", reasoning.called and llm.reasoning is True, str(llm.reasoning))
 
     # Ollama Cloud (not listed locally, key set): timeout and auth header both kept.
@@ -581,6 +593,7 @@ def test_review_client_carries_300s_timeout():
     finally:
         default_config.ollama_key = old
     _check("cloud timeout 300", timeout_of(llm) == 300, str(llm._client._client.timeout))
+    _check("cloud review temperature 0.2", llm.temperature == 0.2, str(llm.temperature))
     _check("cloud auth header kept",
            llm._client._client.headers.get("authorization") == "Bearer test-key", "header missing")
 

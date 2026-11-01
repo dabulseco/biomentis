@@ -188,6 +188,8 @@ with st.sidebar:
     st.header("Ollama Cloud")
     render_ollama_key_field()
 
+    st.divider()
+    st.header("Code review")
     # Model that the Code review button sends code to (Ollama models only).
     render_code_review_model_field()
 

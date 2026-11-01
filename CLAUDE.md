@@ -65,8 +65,8 @@ $P -m biomentis.agent.tests.test_output_folder      # agent's files saved in the
 $P -m biomentis.agent.tests.test_revision_labels    # each revised answer titled by what sent it back (self-critique, review, checks)
 $P -m biomentis.agent.tests.test_round_control      # gate pause control: Continue/Stop, no timeout, Stop run wakes it
 $P -m biomentis.agent.tests.test_gate_arithmetic     # completion gate types + arithmetic check (expr = number recomputed; non-claims and unsupported operators skipped)
-$P -m biomentis.agent.tests.test_gate_claims        # gate: unsourced "verified" versions, unlabelled simulated data, missing evidence
-$P -m biomentis.agent.tests.test_gate_quantities    # gate: chunked quantity extraction, consistency, derivations, regressions, code-output cross-check
+$P -m biomentis.agent.tests.test_gate_claims        # gate: unsourced "verified" versions (decimals are not versions), unlabelled simulated data, missing evidence (no figure blocks only with an unplotted table)
+$P -m biomentis.agent.tests.test_gate_quantities    # gate: chunked quantity extraction, consistency, derivations, regressions (flagged values may change), code-output cross-check
 $P -m biomentis.agent.tests.test_gate_rounds        # gate: round policy (planned rounds always run, 3 automatic rounds then ask, reviewer off/failed relaxes rubric/review, final labels)
 $P -m biomentis.agent.tests.test_rubric             # gate: rubric model, markdown format round trip, duplicate IDs, save
 $P -m biomentis.agent.tests.test_rubric_draft       # gate: per-run rubric drafted / converted / uploaded, frozen across rounds, saved, failure-safe, UI event + summary

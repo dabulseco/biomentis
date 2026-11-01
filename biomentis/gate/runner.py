@@ -115,6 +115,11 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
         findings += _safe("quantity", "check_derivations", check_derivations, claims)
         prev = getattr(agent, "_gate_prev_claims", None)
         if prev is not None and len(solutions) >= 2:
+            # Only values that passed before can regress: a value the last
+            # gate flagged is expected to change (the same set the critique
+            # lists as PASSED QUANTITIES).
+            prev_results = getattr(agent, "run_gate_results", None) or []
+            prev = passed_claims(prev, prev_results[-1].findings if prev_results else [])
             # Numbers printed since the previous candidate justify a change.
             findings += _safe("regression", "check_regressions",
                               lambda: check_regressions(prev, claims, output_numbers(run[solutions[-2] + 1:])))
@@ -212,6 +217,11 @@ def _has_finding(claim, findings: list[Finding]) -> bool:
     return False
 
 
+def passed_claims(claims, findings: list[Finding]) -> list:
+    """The claims no finding concerns: the values the gate verified."""
+    return [c for c in (claims or []) if not _has_finding(c, findings)]
+
+
 def critique_prompt(task: str, rubric, result: GateResult, claims) -> str:
     """The critic's prompt: findings first, then the rubric, with the verified values pinned."""
     from biomentis.gate.rubric import format_rubric_markdown
@@ -222,7 +232,7 @@ def critique_prompt(task: str, rubric, result: GateResult, claims) -> str:
     if warnings:
         lines += ["Warnings:"] + [_describe(f) for f in warnings]
     passed = [f"- {c.name} = {_num(c.value)} {c.unit}".rstrip() + (f" ({c.condition})" if c.condition else "")
-              for c in (claims or []) if not _has_finding(c, result.findings)]
+              for c in passed_claims(claims, result.findings)]
     return CRITIQUE_PROMPT_TEMPLATE.format(
         task=task,
         rubric=format_rubric_markdown(rubric).strip() if rubric is not None else "(no rubric for this run)",

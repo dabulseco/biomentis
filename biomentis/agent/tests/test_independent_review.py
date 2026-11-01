@@ -102,6 +102,17 @@ def test_review_inputs() -> None:
     _check("the critique", inputs["critiques"] and "Check rpm." in inputs["critiques"][0], str(inputs["critiques"]))
     _check("the evidence has code and output", "0.258**5" in inputs["evidence"] and "0.87" in inputs["evidence"],
            inputs["evidence"])
+    from biomentis.run_quality import GATE_FEEDBACK_PREFIX
+
+    gated = msgs[:-1] + [
+        HumanMessage(content=GATE_FEEDBACK_PREFIX + " in your final answer. Fix each of these:\n- [arithmetic] fix 32"),
+        AIMessage(content="<solution>Final: 33 rpm</solution>"),
+    ]
+    gated_critiques = review_inputs(gated)["critiques"]
+    _check("the gate's feedback is a critique too",
+           len(gated_critiques) == 2 and "Check rpm." in gated_critiques[0]
+           and gated_critiques[1].startswith(GATE_FEEDBACK_PREFIX) and "fix 32" in gated_critiques[1],
+           str(gated_critiques))
     prompt = build_review_prompt(inputs)
     for section in ("TASK:", "EVIDENCE", "FIRST_DRAFT:", "SELF_CRITIQUE", "FINAL_ANSWER:"):
         _check(f"prompt has {section}", section in prompt)

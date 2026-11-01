@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from biomentis.gate import Finding
-from biomentis.run_quality import CRITIC_FEEDBACK_PREFIX, REVIEW_FEEDBACK_PREFIX, current_run
+from biomentis.run_quality import CRITIC_FEEDBACK_PREFIX, GATE_FEEDBACK_PREFIX, REVIEW_FEEDBACK_PREFIX, current_run
 
 VERDICTS = ("accept", "accept_with_corrections", "needs_rework")
 VERDICT_LABELS = {
@@ -180,10 +180,16 @@ def review_inputs(messages: list[BaseMessage], focus_numbers: set[str] = frozens
     task = run[0].content if run and isinstance(run[0].content, str) else ""
     answers = [_solution_body(m.content) for m in run if isinstance(m, AIMessage) and isinstance(m.content, str)]
     answers = [a for a in answers if a]
+    # The self-critic's feedback, and with the completion gate the gate's
+    # (findings plus the critic's text): either led to a revision.
     critiques = [
         m.content[len(CRITIC_FEEDBACK_PREFIX) :].strip()
+        if m.content.startswith(CRITIC_FEEDBACK_PREFIX)
+        else m.content.strip()
         for m in run
-        if isinstance(m, HumanMessage) and isinstance(m.content, str) and m.content.startswith(CRITIC_FEEDBACK_PREFIX)
+        if isinstance(m, HumanMessage)
+        and isinstance(m.content, str)
+        and m.content.startswith((CRITIC_FEEDBACK_PREFIX, GATE_FEEDBACK_PREFIX))
     ]
     steps: list[tuple[str, str]] = []
     code = None

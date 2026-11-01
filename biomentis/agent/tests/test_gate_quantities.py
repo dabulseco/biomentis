@@ -166,8 +166,45 @@ def main() -> int:
            "".join(m[1].content for m in llm.calls) == big
            and all(len(m[1].content) <= 5000 for m in llm.calls), str([len(m[1].content) for m in llm.calls]))
 
+    test_regression_skips_flagged_values()
+
     print(f"\n{len(_FAILED)} failed")
     return 1 if _FAILED else 0
+
+
+def _gate_agent(replies):
+    return SimpleNamespace(llm=None, gate_llm=_fake(replies), round_control=None, review_llm=None,
+                           run_gate_results=[], _gate_prev_claims=None)
+
+
+def _quantities(*items):
+    return json.dumps({"quantities": [dict(name=n, value=v, unit="items", quote=q) for n, v, q in items]})
+
+
+def test_regression_skips_flagged_values() -> None:
+    print("\n[regression in the gate] a flagged value that is corrected is not a regression")
+    from biomentis.gate.runner import run_gate
+
+    msgs = [HumanMessage(content="What is 24+3, and how many boxes?"),
+            AIMessage(content="<execute>print(24 + 3)</execute>"),
+            AIMessage(content="<observation>27</observation>"),
+            AIMessage(content="<solution>The total is 24+3 = 28 items, in 5 boxes.</solution>")]
+    agent = _gate_agent([
+        _quantities(("items_total", 28, "24+3 = 28 items"), ("box_count", 5, "5 boxes")),
+        _quantities(("items_total", 26, "26 items"), ("box_count", 6, "6 boxes")),
+    ])
+    first = run_gate(agent, msgs, 0)
+    agent.run_gate_results.append(first)
+    _check("round 0: the wrong sum blocks", any(f.check == "arithmetic" for f in first.blocking), repr(first.findings))
+    # Round 1 rewrites both values in prose; no code step printed either.
+    msgs2 = msgs + [HumanMessage(content="The completion checks found problems ..."),
+                    AIMessage(content="<solution>The total is 26 items, in 6 boxes.</solution>")]
+    second = run_gate(agent, msgs2, 1)
+    regressions = [f for f in second.findings if f.check == "regression"]
+    _check("the corrected (flagged) value is not a regression",
+           not [f for f in regressions if "items_total" in f.issue], repr(regressions))
+    _check("a value that passed and changed is still a regression",
+           [f for f in regressions if "box_count" in f.issue], repr(regressions))
 
 
 if __name__ == "__main__":

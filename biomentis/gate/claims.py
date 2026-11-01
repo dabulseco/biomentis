@@ -8,7 +8,10 @@ from biomentis.gate import Finding
 from biomentis.run_quality import EVIDENCE_ITEMS, RunEvidence, missing_evidence, unplotted_tables
 
 _VERIFIED_RE = re.compile(r"(?i)\b(verified|confirmed)\b")
-_VERSION_RE = re.compile(r"\b\d+\.\d+(?:\.\d+)?\b")
+# A dotted number; whether it is a version is decided in `_versions`.
+_DOTTED_RE = re.compile(r"(?<![\w.])(v)?(\d+(?:\.\d+)+)(?!\d)", re.IGNORECASE)
+# Words that make a one-dot number a version when they come at most 3 words before it.
+_VERSION_WORDS = {"v", "version", "release"}
 _URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 
@@ -19,16 +22,37 @@ _LABEL_WINDOW = 300
 _MAX_CAPTION_CHARS = 200
 
 
+def _versions(sentence: str) -> list[str]:
+    """The version numbers in `sentence`, without a leading "v".
+
+    A decimal is not a version: "pH 7.4" and "21.25 g" are not. A number is
+    one when it has two or more dots (1.2.12), is written v1.2, or has
+    "v", "version" or "release" at most 3 words before it.
+    """
+    found = []
+    for m in _DOTTED_RE.finditer(sentence):
+        number = m.group(2)
+        before = [w.strip("()[],:;\"'").lower() for w in sentence[:m.start()].split()[-3:]]
+        if m.group(1) or number.count(".") >= 2 or _VERSION_WORDS & set(before):
+            found.append(number)
+    return found
+
+
+def _shown(version: str, run_text: str) -> bool:
+    """Whether `version` appears in the run's output as a whole number: 1.2 is not in 21.25 or 1.2.12."""
+    return re.search(r"(?<![\d.])" + re.escape(version) + r"(?!\.?\d)", run_text) is not None
+
+
 def check_verified_claims(answer: str, run_text: str) -> list[Finding]:
     findings: list[Finding] = []
     for sentence in _SENTENCE_SPLIT_RE.split(answer):
         sentence = sentence.strip()
         if not sentence or not _VERIFIED_RE.search(sentence):
             continue
-        versions = _VERSION_RE.findall(sentence)
+        versions = _versions(sentence)
         if not versions or _URL_RE.search(sentence):
             continue
-        if any(v in run_text for v in versions):
+        if any(_shown(v, run_text) for v in versions):
             continue
         findings.append(Finding(
             check="claim",
@@ -66,10 +90,16 @@ def check_simulated_labels(answer: str, run_code: list[str]) -> list[Finding]:
 
 
 def check_evidence(ev: RunEvidence) -> list[Finding]:
+    """A missing literature source or calculation blocks; a missing figure only when a computed table needs one.
+
+    Figures are asked for "where they help": with no computed table left
+    unplotted, a run without a figure gets a warning, not a block.
+    """
+    unplotted = unplotted_tables(ev)
     findings = [
         Finding(
             check="evidence",
-            severity="blocking",
+            severity="warning" if key == "figure" and not unplotted else "blocking",
             quote="",
             issue=f"The run has {EVIDENCE_ITEMS[key][0]}.",
             fix=f"Add {EVIDENCE_ITEMS[key][1]}.",
@@ -77,7 +107,7 @@ def check_evidence(ev: RunEvidence) -> list[Finding]:
         )
         for key in missing_evidence(ev)
     ]
-    for heading, _ in unplotted_tables(ev):
+    for heading, _ in unplotted:
         findings.append(Finding(
             check="evidence",
             severity="warning",

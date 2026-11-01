@@ -678,8 +678,9 @@ def stream_agent_events(
     except Exception as exc:  # the figures must never cost the answer
         print(f"[run_figures] could not match the answer's figures: {exc}")
 
-    # The status label; the UI puts it above the final answer.
-    final_status = getattr(agent, "final_status", "") if getattr(agent, "completion_gate", False) else ""
+    # The status label, with what still blocks when it did not pass; the UI
+    # puts it above the final answer, and the export begins with it.
+    final_status = final_status_text(agent) if getattr(agent, "completion_gate", False) else ""
     if final_status:
         yield UIEvent(type="final_status", channel="main", content=final_status)
 
@@ -795,17 +796,65 @@ def _gate_events(agent: Any, state: dict, gates_seen: int, context_pause_shown: 
         )
 
 
+def _failures(agent: Any) -> str:
+    """The last gate's blocking findings, as a list, when the run did not pass; else ""."""
+    status = getattr(agent, "final_status", "") or ""
+    results = getattr(agent, "run_gate_results", None) or []
+    if status.startswith("✅") or not results or not results[-1].blocking:
+        return ""
+    return format_findings(results[-1].blocking)
+
+
+def final_status_text(agent: Any) -> str:
+    """The run's status label and, when it did not pass, the findings that still block it."""
+    status = getattr(agent, "final_status", "") or ""
+    failures = _failures(agent) if status else ""
+    return f"{status}\n\n{failures}" if failures else status
+
+
+def stopped_events(agent: Any) -> list[UIEvent]:
+    """The events for a run the user stopped mid-step: with the gate on, its "Stopped by user" status.
+
+    A stop while paused goes through the graph's finalize step instead; a
+    stop mid-step cuts the stream off, so the status is added here.
+    """
+    if not getattr(agent, "completion_gate", False):
+        return []
+    from biomentis.gate.rounds import STOPPED_LABEL
+
+    agent._gate_stopped = True
+    agent.final_status = STOPPED_LABEL
+    return [UIEvent(type="final_status", channel="main", content=final_status_text(agent))]
+
+
+def _accepted_findings(agent: Any) -> list[Any]:
+    """Every finding the user accepted as is in this run, once per key, in the order found."""
+    control = getattr(agent, "round_control", None)
+    keys = set(getattr(control, "accepted", None) or ())
+    seen: dict[str, Any] = {}
+    for result in getattr(agent, "run_gate_results", None) or []:
+        for f in result.findings:
+            if f.key in keys:
+                seen.setdefault(f.key, f)
+    return list(seen.values())
+
+
 def gate_summary(agent: Any) -> dict | None:
     """The completion gate's lines for the run-quality summary, or None when it is off."""
     if not getattr(agent, "completion_gate", False) or not getattr(agent, "final_status", ""):
         return None
     results = getattr(agent, "run_gate_results", None) or []
     control = getattr(agent, "round_control", None)
+    accepted = _accepted_findings(agent)
     return {
         "status": agent.final_status,
+        "failures": _failures(agent),
         "rounds_used": results[-1].round if results else 0,
         "rounds_planned": getattr(agent, "planned_rounds", 0),
         "accepted": len(getattr(control, "accepted", None) or ()),
+        "accepted_findings": "\n".join(
+            f"- **{f.check}**: {f.issue}" + (f" — “{f.quote}”" if f.quote else "") for f in accepted
+        ),
         "rubric": getattr(getattr(agent, "run_rubric", None), "source", "") or "none",
     }
 

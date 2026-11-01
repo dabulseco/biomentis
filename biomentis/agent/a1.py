@@ -146,6 +146,7 @@ from biomentis.ui_core import (
     get_llm_display_name,
     list_available_providers,
     export_run,
+    stopped_events,
     stream_agent_events,
     transcript_entry_for_event,
     ui_event_to_export_entry,
@@ -4818,6 +4819,8 @@ Each library is listed with its description to help you understand its functiona
                         lambda: _stream(self, effective_prompt, files, history_messages, thread_id),
                         journal=_journal,
                         round_control=getattr(self, "round_control", None),
+                        # Stop run mid-step: the gate's "Stopped by user" status.
+                        on_cancel=lambda: stopped_events(self),
                     )
                 else:
                     # Opt-out path (`BIOMENTIS_BACKGROUND_RUNS=0`): drive the

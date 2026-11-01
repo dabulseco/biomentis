@@ -78,12 +78,31 @@ def _review_findings(agent, messages: list[BaseMessage], result: GateResult,
     return findings + review_findings(review), "ok"
 
 
-def _safe(check: str, name: str, fn, *args) -> list[Finding]:
-    """Run one checker; a crash becomes a warning, so it never costs the run its answer."""
+# How each checker is named in a "Not fully checked (... did not run)" label.
+CHECK_NAMES = {
+    "check_arithmetic": "arithmetic check",
+    "check_figures": "figure check",
+    "check_verified_claims": "verified-claim check",
+    "check_simulated_labels": "simulated-data check",
+    "check_evidence": "evidence check",
+    "check_consistency": "consistency check",
+    "check_derivations": "derivation check",
+    "check_regressions": "regression check",
+    "check_against_outputs": "code-output check",
+}
+
+
+def _safe(check: str, name: str, fn, *args, skipped: list[str] | None = None) -> list[Finding]:
+    """Run one checker; a crash becomes a warning, so it never costs the run its answer.
+
+    The crashed check is added to `skipped`, so the run is not labelled passed.
+    """
     try:
         return list(fn(*args))
     except Exception as exc:
         print(f"[gate] {name} failed ({type(exc).__name__}: {exc}); continuing without it")
+        if skipped is not None:
+            skipped.append(CHECK_NAMES.get(name, name))
         return [Finding(check=check, severity="warning", quote="",
                         issue=f"{name} failed: {type(exc).__name__}: {exc}")]
 
@@ -97,22 +116,29 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
     code = [match.group(1) for m in run if (match := _EXECUTE_RE.search(_text(m)))]
 
     findings: list[Finding] = []
-    findings += _safe("arithmetic", "check_arithmetic", check_arithmetic, answer)
-    findings += _safe("figure", "check_figures", check_figures, answer, ev)
-    findings += _safe("claim", "check_verified_claims", check_verified_claims, answer, "\n".join(observations))
-    findings += _safe("claim", "check_simulated_labels", check_simulated_labels, answer, code)
-    findings += _safe("evidence", "check_evidence", check_evidence, ev)
+    skipped: list[str] = []
+    findings += _safe("arithmetic", "check_arithmetic", check_arithmetic, answer, skipped=skipped)
+    findings += _safe("figure", "check_figures", check_figures, answer, ev, skipped=skipped)
+    findings += _safe("claim", "check_verified_claims", check_verified_claims, answer, "\n".join(observations),
+                      skipped=skipped)
+    findings += _safe("claim", "check_simulated_labels", check_simulated_labels, answer, code, skipped=skipped)
+    findings += _safe("evidence", "check_evidence", check_evidence, ev, skipped=skipped)
 
     llm = getattr(agent, "gate_llm", None) or agent.llm
+    skipped_chunks: list[int] = []
     try:
-        claims = extract_quantities(answer, llm)
+        claims = extract_quantities(answer, llm, skipped=skipped_chunks)
     except Exception as exc:  # the other checks still count
         print(f"[gate] quantity extraction failed ({type(exc).__name__}: {exc}); no quantity checks this round")
         claims = None
+        skipped.append("quantity checks")
         agent._gate_prev_claims = None  # nothing was checked this round: nothing may be listed as passed
+    if skipped_chunks:
+        n = len(skipped_chunks)
+        skipped.append(f"quantity extraction for {n} section{'s' if n != 1 else ''}")
     if claims is not None:
-        findings += _safe("quantity", "check_consistency", check_consistency, claims)
-        findings += _safe("quantity", "check_derivations", check_derivations, claims)
+        findings += _safe("quantity", "check_consistency", check_consistency, claims, skipped=skipped)
+        findings += _safe("quantity", "check_derivations", check_derivations, claims, skipped=skipped)
         prev = getattr(agent, "_gate_prev_claims", None)
         if prev is not None and len(solutions) >= 2:
             # Only values that passed before can regress: a value the last
@@ -122,9 +148,10 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
             prev = passed_claims(prev, prev_results[-1].findings if prev_results else [])
             # Numbers printed since the previous candidate justify a change.
             findings += _safe("regression", "check_regressions",
-                              lambda: check_regressions(prev, claims, output_numbers(run[solutions[-2] + 1:])))
+                              lambda: check_regressions(prev, claims, output_numbers(run[solutions[-2] + 1:])),
+                              skipped=skipped)
         findings += _safe("quantity", "check_against_outputs",
-                          lambda: check_against_outputs(claims, output_numbers(messages)))
+                          lambda: check_against_outputs(claims, output_numbers(messages)), skipped=skipped)
         agent._gate_prev_claims = claims
 
     control = getattr(agent, "round_control", None)
@@ -133,6 +160,7 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
         findings=findings,
         reviewer_state="off",
         accepted=set(control.accepted) if control is not None else set(),
+        skipped=skipped,
     )
     if getattr(agent, "review_llm", None) is not None:
         try:
@@ -143,6 +171,8 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
                               issue=f"review failed: {type(exc).__name__}: {exc}")]
             result.reviewer_state = "failed"
         result.findings += review
+        if result.reviewer_state == "ok" and rubric is None:
+            skipped.append("rubric coverage")  # a reviewer, but no rubric to check the answer against
     return result
 
 

@@ -67,12 +67,12 @@ $P -m biomentis.agent.tests.test_round_control      # gate pause control: Contin
 $P -m biomentis.agent.tests.test_gate_arithmetic     # completion gate types + arithmetic check (expr = number recomputed; non-claims and unsupported operators skipped)
 $P -m biomentis.agent.tests.test_gate_claims        # gate: unsourced "verified" versions (decimals are not versions), unlabelled simulated data, missing evidence (no figure blocks only with an unplotted table)
 $P -m biomentis.agent.tests.test_gate_quantities    # gate: chunked quantity extraction, consistency, derivations, regressions (flagged values may change), code-output cross-check
-$P -m biomentis.agent.tests.test_gate_rounds        # gate: round policy (planned rounds always run, 3 automatic rounds then ask, reviewer off/failed relaxes rubric/review, final labels)
+$P -m biomentis.agent.tests.test_gate_rounds        # gate: round policy (planned rounds always run, 3 automatic rounds then ask, reviewer off/failed relaxes rubric/review, final labels incl. "Not fully checked (X did not run)" and "(K accepted as is)")
 $P -m biomentis.agent.tests.test_rubric             # gate: rubric model, markdown format round trip, duplicate IDs, save
 $P -m biomentis.agent.tests.test_rubric_draft       # gate: per-run rubric drafted / converted / uploaded, frozen across rounds, saved, failure-safe, UI event + summary
 $P -m biomentis.agent.tests.test_gate_graph         # gate in the agent graph: fail → critique → pass, pause before round 4 + Stop, context pause, gate off = old graph, gate trace records
 $P -m biomentis.agent.tests.test_gate_critique      # gate: critique prompt from findings + rubric, keeps passed quantities, runs every critique round
-$P -m biomentis.agent.tests.test_round_pause_ui     # pause panel (accept as is, Continue, Stop, survives reruns), Stop run while paused, gate/pause/status events, status above the answer + export, sidebar toggle
+$P -m biomentis.agent.tests.test_round_pause_ui     # pause panel (accept as is, Continue, Stop, survives reruns), Stop run while paused, gate/pause/status events, status above the answer + export with the failures listed, accepted findings in the summary, Stop run mid-step adds the stopped status, sidebar toggle
 $P -m biomentis.agent.tests.test_repeat_runs        # repeat runs: K runs, one rubric, paused run parked while the next runs, partial + final report (rubric table, disagreements), CLI pause prompt, BIOMNI_REPEAT_RUNS=false
 $P -m biomentis.agent.tests.test_repeat_runs_ui     # repeat-run sidebar tool: hidden with BIOMNI_REPEAT_RUNS=false, toggle, button gating (empty prompt, batch or interactive run active, Send off during a batch), per-run pause panels, progress table, report download
 $P -m biomentis.agent.tests.test_robustness_regressions  # regressions replayed from the real run exports (false sum, NaCl i, n per solute, missing/stale figures, unsourced verified, budget x4, unlabelled sample data, revision labels)

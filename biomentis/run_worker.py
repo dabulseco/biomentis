@@ -89,6 +89,9 @@ class BackgroundRun:
         # finalize step, so the worker drains the rest of the stream (the
         # final status, the run-quality summary) instead of cutting it off.
         self._drain_after_cancel = False
+        # Events to add when a cancel cuts the stream off (not when it drains):
+        # with the completion gate, the "Stopped by user" status.
+        self.on_cancel: Callable[[], list[Any]] | None = None
         self._thread: threading.Thread | None = None
 
     # ----- state ---------------------------------------------------------
@@ -138,6 +141,9 @@ class BackgroundRun:
                     status = "cancelled"
                     if not self._drain_after_cancel:
                         break
+            if status == "cancelled" and not self._drain_after_cancel and self.on_cancel is not None:
+                for event in self.on_cancel() or []:
+                    self._append(event)
         except BaseException as exc:  # noqa: BLE001 - a worker must not die silently
             # Deliberately BaseException: Streamlit's RerunException and
             # StopException both derive from it, and one can reach here if
@@ -226,14 +232,17 @@ def start_run(
     *,
     journal: RunJournal | None = None,
     round_control: RoundControl | None = None,
+    on_cancel: Callable[[], list[Any]] | None = None,
 ) -> BackgroundRun:
     """Register and start a run for `session_key`, replacing any previous one.
 
     `round_control` is the agent's pause control. It is set before the worker
-    starts, so `cancel()` can always end a paused run.
+    starts, so `cancel()` can always end a paused run. `on_cancel` gives the
+    events to add (and journal) when a cancel cuts the stream off mid-step.
     """
     run = BackgroundRun(prompt, journal=journal)
     run.round_control = round_control
+    run.on_cancel = on_cancel
     with _REGISTRY_LOCK:
         previous = _RUNS.get(session_key)
         if previous is not None and previous.is_alive():

@@ -397,7 +397,8 @@ def format_quality_summary(
     steps whose figure was drawn but never saved, so it is in neither the
     transcript nor its export (the app's own fault, not the model's).
     `gate` (see `ui_core.gate_summary`) adds the completion gate's status,
-    rounds, accepted findings and rubric source.
+    the findings that still block (when it did not pass), rounds, the
+    findings accepted as is and the rubric source.
     """
 
     def n(count: int, word: str) -> str:
@@ -432,7 +433,12 @@ def format_quality_summary(
     if gate:
         lines.append(f"**Status:** {gate['status']}")
         lines.append(f"**Rounds:** used {gate['rounds_used']} of planned {gate['rounds_planned']}")
-        lines.append(f"**Accepted as is:** {n(gate['accepted'], 'finding')}")
+        if gate.get("failures"):
+            lines.append("**Did not pass:**\n" + gate["failures"])
+        accepted = f"**Accepted as is:** {n(gate['accepted'], 'finding')}"
+        if gate.get("accepted_findings"):
+            accepted += "\n" + gate["accepted_findings"]
+        lines.append(accepted)
         lines.append(f"**Rubric:** {gate['rubric']}")
     if issues:
         lines.append("**Along the way:** " + "; ".join(issues))

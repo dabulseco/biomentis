@@ -61,6 +61,8 @@ os.environ["BIOMENTIS_RUN_DIR"] = {tmp!r}
 os.environ["BIOMNI_DOWNLOADS_DIR"] = {tmp!r}
 if {inline!r}:
     os.environ["BIOMENTIS_BACKGROUND_RUNS"] = "0"
+else:  # AppTest runs in this process: an earlier inline app must not leak into this one
+    os.environ.pop("BIOMENTIS_BACKGROUND_RUNS", None)
 
 import streamlit as st
 from types import SimpleNamespace
@@ -96,6 +98,9 @@ if "_agent" not in st.session_state:
         path=os.path.join({tmp!r}, "agent"),
         llm=SimpleNamespace(model_name="test-model"),
         round_control=SpyControl(),
+        completion_gate=False,
+        final_status="",
+        run_gate_results=[],
     )
 agent = st.session_state["_agent"]
 
@@ -118,6 +123,7 @@ run = get_run(SESSION)
 st.markdown(
     "RESULT alive=" + str(run is not None and run.is_alive())
     + " runner_control=" + str(run is not None and run.round_control is agent.round_control)
+    + " on_cancel=" + str(run is not None and run.on_cancel is not None)
     + " active=" + str(st.session_state.get("biomni_run_active"))
 )
 st.markdown("CALLS=" + repr(agent.round_control.calls))
@@ -202,6 +208,7 @@ def test_panel_continue_and_export() -> None:
     _check("the runner holds the agent's control", "runner_control=True" in _line(at, "RESULT"),
            _line(at, "RESULT"))
     _check("still running", "alive=True" in _line(at, "RESULT"), _line(at, "RESULT"))
+    _check("the runner has the mid-step stop hook", "on_cancel=True" in _line(at, "RESULT"), _line(at, "RESULT"))
 
     print("\n(b) a rerun with no click keeps the panel")
     at.run()
@@ -319,10 +326,15 @@ def test_real_graph_cancel_during_pause() -> None:
     _check("no model call after the pause", len(llm.requests) == 6, str(len(llm.requests)))
     statuses = [e for e in runner.events if e.type == "final_status"]
     _check("final_status event: stopped",
-           len(statuses) == 1 and statuses[0].content == STOPPED and statuses[0].channel == "main", repr(statuses))
+           len(statuses) == 1 and statuses[0].content.startswith(STOPPED) and statuses[0].channel == "main",
+           repr(statuses))
+    _check("the status lists the failures under the label",
+           bool(statuses) and "arithmetic" in statuses[0].content and "24+3 = 28" in statuses[0].content
+           and statuses[0].content.index(STOPPED) < statuses[0].content.index("24+3 = 28"), repr(statuses))
     quality = [e.content for e in runner.events if e.type == "status" and e.title == "📊 Run quality"]
     q = quality[0] if quality else ""
     _check("summary: status", f"**Status:** {STOPPED}" in q, q)
+    _check("summary: the failures", "**Did not pass:**" in q and "24+3 = 28" in q, q)
     _check("summary: rounds", "**Rounds:** used 3 of planned 1" in q, q)
     _check("summary: accepted", "**Accepted as is:** 0 findings" in q, q)
     _check("summary: rubric (the helper presets an uploaded one)", "**Rubric:** uploaded" in q, q)
@@ -450,7 +462,8 @@ def test_inline_run_stops_instead_of_pausing() -> None:
     _check("it never paused", agent.round_control.pending is None)
     events = box.get("events") or []
     statuses = [e.content for e in events if e.type == "final_status"]
-    _check("final status: stopped", statuses == [STOPPED], str(statuses))
+    _check("final status: stopped, with the failures",
+           len(statuses) == 1 and statuses[0].startswith(STOPPED) and "24+3 = 28" in statuses[0], str(statuses))
     _check("no round_pause event", not any(e.type == "round_pause" for e in events))
     _check("four gates ran, no model call after round 3",
            len(agent.run_gate_results) == 4 and len(llm.requests) == 6,
@@ -503,6 +516,90 @@ def test_duplicate_findings_share_one_box() -> None:
         _check("accepting it accepts the key", _line(at, "ACCEPTED=") == f"ACCEPTED={[key]!r}", _line(at, "ACCEPTED="))
 
 
+def test_stop_run_mid_step() -> None:
+    print("\n(l) Stop run mid-step (not paused), gate on: the stopped status is still added")
+    import threading
+    from types import SimpleNamespace
+
+    from biomentis.gate import Finding, GateResult
+    from biomentis.run_worker import clear_run, start_run
+    from biomentis.ui_core import UIEvent, add_transcript_entry, stopped_events, transcript_entry_for_event
+
+    release = threading.Event()
+
+    def stream():
+        yield UIEvent(type="solution", channel="main", content="the answer", title="Answer")
+        release.wait(10)  # a step in flight: it finishes only after the stop
+        yield UIEvent(type="reasoning", channel="inner", content="the step that was in flight")
+        yield UIEvent(type="reasoning", channel="inner", content="never reached")
+
+    for gate_on in (True, False):
+        release.clear()
+        agent = SimpleNamespace(completion_gate=gate_on, final_status="", run_gate_results=[
+            GateResult(1, [Finding("arithmetic", "blocking", "24+3 = 28", "24+3 is 27")], "ok")])
+        runner = start_run(f"midstep-{gate_on}", "q", stream, on_cancel=lambda a=agent: stopped_events(a))
+        _wait_until(lambda: len(runner.events) >= 1, 5)
+        runner.cancel()
+        release.set()
+        _wait_until(lambda: runner.done, 5)
+        statuses = [e.content for e in runner.events if e.type == "final_status"]
+        types = [e.type for e in runner.events]
+        if gate_on:
+            _check("gate on: one stopped status after the step that was in flight",
+                   len(statuses) == 1 and statuses[0].startswith(STOPPED) and "24+3 = 28" in statuses[0]
+                   and types == ["solution", "reasoning", "final_status"], f"{types} {statuses}")
+            t = [{"panel": "main", "role": "user", "content": "q"}]
+            for e in runner.events:
+                entry = transcript_entry_for_event(e)
+                if entry is not None:
+                    add_transcript_entry(t, entry)
+            contents = [e.get("content", "") for e in t]
+            _check("the status lands above the answer",
+                   any(c.startswith(STOPPED) for c in contents) and
+                   next(i for i, c in enumerate(contents) if c.startswith(STOPPED)) < contents.index("the answer"),
+                   str(contents))
+        else:
+            _check("gate off: no status added (as before)", statuses == [] and types == ["solution", "reasoning"],
+                   f"{types}")
+        clear_run(f"midstep-{gate_on}")
+
+
+def test_status_text_and_summary() -> None:
+    print("\n(m) status text and run-quality summary: failures and accepted findings")
+    from types import SimpleNamespace
+
+    from biomentis.gate import Finding, GateResult
+    from biomentis.gate.control import RoundControl
+    from biomentis.run_quality import RunEvidence, format_quality_summary
+    from biomentis.ui_core import final_status_text, gate_summary, stopped_events
+
+    bad = Finding("arithmetic", "blocking", "24+3 = 28", "24+3 is 27, not 28")
+    fig = Finding("figure", "blocking", "Figure 2", "Figure 2 was never drawn")
+    control = RoundControl()
+    control.accepted = {fig.key}
+    stopped = SimpleNamespace(completion_gate=True, final_status=STOPPED, planned_rounds=1, run_rubric=None,
+                              round_control=control, run_gate_results=[GateResult(4, [bad, fig], "ok", {fig.key})])
+    text = final_status_text(stopped)
+    _check("not passed: label, then the blocking findings",
+           text.startswith(STOPPED + "\n\n") and "24+3 = 28" in text and "Figure 2 was never drawn" not in text, text)
+    passed_label = "✅ Passed all checks after 4 rounds (1 accepted as is)"
+    passed = SimpleNamespace(completion_gate=True, final_status=passed_label, planned_rounds=1, run_rubric=None,
+                             round_control=control, run_gate_results=[GateResult(4, [fig], "ok", {fig.key})])
+    _check("passed: the label alone", final_status_text(passed) == passed_label, final_status_text(passed))
+    summary = format_quality_summary(RunEvidence(), gate=gate_summary(passed))
+    _check("summary lists the accepted finding: check, issue and quote",
+           "**Accepted as is:** 1 finding" in summary and "**figure**" in summary
+           and "Figure 2 was never drawn" in summary and "“Figure 2”" in summary, summary)
+    _check("passed: no failures in the summary", "Did not pass" not in summary, summary)
+
+    mid = SimpleNamespace(completion_gate=True, final_status="", run_gate_results=[GateResult(1, [bad], "ok")])
+    events = stopped_events(mid)
+    _check("stopped mid-step: one final_status event with the failures",
+           len(events) == 1 and events[0].type == "final_status" and events[0].content.startswith(STOPPED)
+           and "24+3 = 28" in events[0].content and mid.final_status == STOPPED, repr(events))
+    _check("gate off: no stopped status", stopped_events(SimpleNamespace(completion_gate=False)) == [])
+
+
 def run_all() -> int:
     test_status_placement_and_restore()
     test_render_round_pause_alone()
@@ -512,6 +609,8 @@ def run_all() -> int:
     test_sidebar_toggle()
     test_inline_run_stops_instead_of_pausing()
     test_duplicate_findings_share_one_box()
+    test_stop_run_mid_step()
+    test_status_text_and_summary()
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     return 1 if _FAILED else 0
 

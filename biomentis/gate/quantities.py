@@ -150,8 +150,14 @@ def _claim(item) -> QuantityClaim | None:
     )
 
 
-def extract_quantities(answer: str, llm, max_chunk_chars: int = 12000) -> list[QuantityClaim]:
-    """Every quantity in ``answer``, one ``llm`` call per chunk, merged."""
+def extract_quantities(answer: str, llm, max_chunk_chars: int = 12000,
+                       skipped: list[int] | None = None) -> list[QuantityClaim]:
+    """Every quantity in ``answer``, one ``llm`` call per chunk, merged.
+
+    A chunk with no usable reply after a retry is left out; its number
+    (1-based) is appended to `skipped`, when given, so the caller can say
+    the check did not cover the whole answer.
+    """
     claims: list[QuantityClaim] = []
     seen: set[tuple[str, float, str]] = set()
     chunks = chunk_answer(answer, max_chunk_chars)
@@ -168,6 +174,8 @@ def extract_quantities(answer: str, llm, max_chunk_chars: int = 12000) -> list[Q
                 break
         if items is None:
             print(f"[gate] quantity extraction: chunk {n}/{len(chunks)} skipped, no usable JSON after a retry")
+            if skipped is not None:
+                skipped.append(n)
             continue
         for item in items:
             c = _claim(item)

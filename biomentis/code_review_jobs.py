@@ -29,7 +29,7 @@ NO_RUN_SIDECAR = "no-run" + SIDECAR_SUFFIX
 
 _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="code-review")
 _lock = Lock()  # guards _store, _futures, _seq and sidecar appends
-_store: dict[str, dict] = {}  # key -> {status, review, run_id, block_index, seq}
+_store: dict[str, dict] = {}  # key -> {status, review, run_id, block_index, source, answer_locator, seq}
 _futures: dict[str, Future] = {}
 _seq = 0
 
@@ -48,8 +48,28 @@ def _next_seq() -> int:
     return _seq
 
 
+def _entry(status: str, review: CodeReview | None, req: CodeReviewRequest) -> dict:
+    """A store entry; call with `_lock` held."""
+    return {
+        "status": status,
+        "review": review,
+        "run_id": req.run_id,
+        "block_index": req.block_index,
+        "source": req.source,
+        "answer_locator": req.answer_locator,
+        "seq": _next_seq(),
+    }
+
+
 def _append_sidecar(key: str, req: CodeReviewRequest, review: CodeReview, output_dir: str | None) -> None:
-    row = {"key": key, "run_id": req.run_id, "block_index": req.block_index, "source": req.source, **review.to_dict()}
+    row = {
+        "key": key,
+        "run_id": req.run_id,
+        "block_index": req.block_index,
+        "source": req.source,
+        "answer_locator": req.answer_locator,
+        **review.to_dict(),
+    }
     path = sidecar_path(req.run_id, output_dir)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -67,13 +87,7 @@ def _run(key: str, req: CodeReviewRequest, model: str, llm_factory: Callable[[st
     review.model = review.model or model
     review.created = review.created or date.today().isoformat()
     with _lock:
-        _store[key] = {
-            "status": "error" if review.error else "done",
-            "review": review,
-            "run_id": req.run_id,
-            "block_index": req.block_index,
-            "seq": _next_seq(),
-        }
+        _store[key] = _entry("error" if review.error else "done", review, req)
         if not review.error:
             _append_sidecar(key, req, review, output_dir)
 
@@ -90,23 +104,11 @@ def submit_review(
         entry = _store.get(key)
         if entry and entry["status"] in ("pending", "done"):
             return key
-        _store[key] = {
-            "status": "pending",
-            "review": None,
-            "run_id": req.run_id,
-            "block_index": req.block_index,
-            "seq": _next_seq(),
-        }
+        _store[key] = _entry("pending", None, req)
         try:
             _futures[key] = _executor.submit(_run, key, req, model, llm_factory, output_dir)
         except Exception as e:  # e.g. pool shut down: do not leave the key pending
-            _store[key] = {
-                "status": "error",
-                "review": CodeReview(error=f"Could not queue the review: {e}", model=model),
-                "run_id": req.run_id,
-                "block_index": req.block_index,
-                "seq": _next_seq(),
-            }
+            _store[key] = _entry("error", CodeReview(error=f"Could not queue the review: {e}", model=model), req)
     return key
 
 
@@ -118,15 +120,28 @@ def review_status(key: str) -> tuple[str, CodeReview | None]:
         return entry["status"], entry["review"]
 
 
-def review_for_block(run_id: str, block_index: int) -> CodeReview | None:
-    """The most recent finished review of a run's code block, from any model."""
+def _latest_done(match: Callable[[dict], bool]) -> CodeReview | None:
     with _lock:
         best = None
         for e in _store.values():
-            if e["status"] == "done" and e["run_id"] == run_id and e["block_index"] == block_index:
+            if e["status"] == "done" and match(e):
                 if best is None or e["seq"] > best["seq"]:
                     best = e
         return best["review"] if best else None
+
+
+def review_for_block(run_id: str, block_index: int) -> CodeReview | None:
+    """The most recent finished review of a run's agent code step, from any model."""
+    return _latest_done(
+        lambda e: e.get("source") != "answer" and e["run_id"] == run_id and e["block_index"] == block_index
+    )
+
+
+def review_for_answer(run_id: str, locator: str) -> CodeReview | None:
+    """The most recent finished review of a run's answer code block (see `answer_locator`), from any model."""
+    return _latest_done(
+        lambda e: e.get("source") == "answer" and e["run_id"] == run_id and e.get("answer_locator") == locator
+    )
 
 
 def load_saved_reviews(run_dir: str | None = None) -> int:
@@ -150,14 +165,15 @@ def load_saved_reviews(run_dir: str | None = None) -> int:
             if review.error:
                 continue
             bi = row.get("block_index")
+            req = CodeReviewRequest(
+                code="",
+                run_id=row.get("run_id"),
+                block_index=bi if isinstance(bi, int) else None,
+                source=str(row.get("source") or "agent"),
+                answer_locator=row.get("answer_locator"),
+            )
             with _lock:
-                _store[str(row["key"])] = {
-                    "status": "done",
-                    "review": review,
-                    "run_id": row.get("run_id"),
-                    "block_index": bi if isinstance(bi, int) else None,
-                    "seq": _next_seq(),
-                }
+                _store[str(row["key"])] = _entry("done", review, req)
             count += 1
     return count
 

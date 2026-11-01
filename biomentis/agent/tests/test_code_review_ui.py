@@ -288,8 +288,11 @@ def _obs(text):
     return {"panel": "inner", "role": "assistant", "kind": "observation", "content": text, "collapsible": True}
 
 
-def _answer(text, title="✅ Answer"):
-    return {"panel": "main", "role": "assistant", "content": text, "title": title}
+def _answer(text, title="✅ Answer", run_id=None):
+    e = {"panel": "main", "role": "assistant", "content": text, "title": title}
+    if run_id is not None:
+        e["journal_run_id"] = run_id
+    return e
 
 
 def _start_app(transcript, reply=None):
@@ -487,6 +490,69 @@ def test_answer_review_reloaded_after_restart() -> None:
     _check("replayed answer shows the stored report", any(e.label.startswith("Code review") for e in at.expander) and not _review_buttons(at), str([e.label for e in at.expander]))
 
 
+def test_download_name_is_one_based() -> None:
+    print("\n[16b] the panel's download is numbered from 1")
+    from biomentis.code_review import CodeReviewRequest
+    from biomentis.ui_code_review import _file_name
+
+    _check("block 0 -> code_review_1.py", _file_name(CodeReviewRequest(code="x", block_index=0)) == "code_review_1.py")
+    _check("block 2 bash -> code_review_3.sh", _file_name(CodeReviewRequest(code="x", language="bash", block_index=2)) == "code_review_3.sh")
+
+
+def test_restored_run_shows_stored_reviews() -> None:
+    print("\n[16c] Restore of a later run: its step and answer reviews shown, no button, no new review; export has both")
+    from biomentis import code_review_jobs as jobs
+    from biomentis.code_review import answer_locator, request_for_entry, requests_for_answer, review_key
+
+    ans2 = "Result:\n```python\nc = b * 2\n```"
+    live = [
+        _user("task 1"), _code("a = 1", "run-1", 0), _obs("ok"), _answer("Done 1.", run_id="run-1"),
+        _user("task 2"), _code("b = a + 1", "run-2", 0), _obs("2"), _answer(ans2, run_id="run-2"),
+    ]
+    at = _start_app(live)
+    _check("no exception", not at.exception, str(at.exception))
+    loc = answer_locator(ans2, 0)
+    step_key = review_key(request_for_entry(live, live[5], "task 2"), "fake-model")
+    ans_key = review_key(requests_for_answer(live, live[7], "task 2")[0], "fake-model")
+    next(b for b in _review_buttons(at) if b.key == "cr-run-2-0_go").click().run()
+    jobs._wait_for(step_key)
+    next(b for b in _review_buttons(at) if b.key == f"cr-{loc}_go").click().run()
+    jobs._wait_for(ans_key)
+    rows = [json.loads(l) for l in open(jobs.sidecar_path("run-2"), encoding="utf-8")]
+    _check("answer review saved under run-2 with its locator",
+           any(r["source"] == "answer" and r["run_id"] == "run-2" and r["answer_locator"] == loc for r in rows), str(rows))
+    with jobs._lock:
+        store_before = set(jobs._store)
+    calls_before = CALLS.count("invoke")
+
+    # Restore run 2 alone (what ui_recovery does): fresh entries, less earlier code.
+    restored = [_user("task 2"), _code("b = a + 1", "run-2", 0), _obs("2"), _answer(ans2, run_id="run-2")]
+    _check("restored step has a different review key",
+           review_key(request_for_entry(restored, restored[1], "task 2"), "fake-model") != step_key)
+    _check("restored answer block has a different review key",
+           review_key(requests_for_answer(restored, restored[3], "task 2")[0], "fake-model") != ans_key)
+    at.session_state["biomni_transcript"] = restored
+    at.run()
+    _check("no exception after restore", not at.exception, str(at.exception))
+    _check("no Code Review buttons", not _review_buttons(at), str([b.key for b in _review_buttons(at)]))
+    labels = [e.label for e in at.expander if e.label.startswith("Code review")]
+    _check("both stored reviews shown", len(labels) == 2, str(labels))
+    with jobs._lock:
+        _check("no new review queued", set(jobs._store) == store_before, str(set(jobs._store) - store_before))
+    _check("no model call", CALLS.count("invoke") == calls_before, str(CALLS))
+
+    next(b for b in at.button if b.key == "export_run_html").click().run()
+    out = APP_DIR[0]
+    files = sorted(os.listdir(out))
+    read = lambda n: open(os.path.join(out, n), encoding="utf-8").read()
+    main = read(next(f for f in files if f.startswith("biomentis_main_")))
+    inner_page = read(next(f for f in files if f.startswith("biomentis_inner_")))
+    _check("export: answer review under the answer", "Code block 1 of this answer (python)" in main and "code_review_1.py" in main, main[-1500:])
+    _check("export: step review names its script", "code_review_2.py" in inner_page)
+    _check("export: both corrected scripts written",
+           "x = 2" in read("code_review_1.py") and "x = 2" in read("code_review_2.py"), str(files))
+
+
 class _FakeChat:
     def ask(self, **kw):
         from types import SimpleNamespace
@@ -641,6 +707,8 @@ def run_all() -> int:
     test_button_on_tutor_plot_code()
     test_button_on_repl_history()
     test_answer_review_reloaded_after_restart()
+    test_download_name_is_one_based()
+    test_restored_run_shows_stored_reviews()
     test_tutor_turn_keeps_its_task()
     test_app_renders_with_code_review_model_setting()
     print("\n" + "=" * 60)

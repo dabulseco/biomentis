@@ -27,7 +27,8 @@ POLL_SECONDS = 2
 
 
 def _file_name(req: CodeReviewRequest) -> str:
-    block = req.block_index if req.block_index is not None else hashlib.sha1(req.code.encode("utf-8")).hexdigest()[:8]
+    """`code_review_<n>`, n the block's 1-based position (a hash for code with none)."""
+    block = req.block_index + 1 if req.block_index is not None else hashlib.sha1(req.code.encode("utf-8")).hexdigest()[:8]
     return f"code_review_{block}{_EXTENSIONS.get(req.language.lower(), '.py')}"
 
 
@@ -70,8 +71,15 @@ def render_code_review(
     output_dir: str | None = None,
     llm_factory: Callable[[str], Any] | None = None,
     model: str | None = None,
+    saved: CodeReview | None = None,
 ) -> None:
-    """Draw the review control for `req`. `llm_factory` and `model` are for tests."""
+    """Draw the review control for `req`. `llm_factory` and `model` are for tests.
+
+    `saved` is a finished review of the same block found by its locator. It is
+    shown in place of the button when this exact request has no review: a
+    restored transcript holds only one run, so its earlier code, and with it
+    the review key, differs from the session the review was made in.
+    """
     if llm_factory is None or model is None:
         from biomentis.ui_settings import code_review_llm, code_review_model
 
@@ -83,7 +91,9 @@ def render_code_review(
         submit_review(req, model, llm_factory, output_dir=output_dir)
 
     status, review = review_status(rkey)
-    if status == "none":
+    if status == "none" and saved is not None:
+        _show_report(req, saved, key)
+    elif status == "none":
         if st.button("🔎 Code Review", key=f"{key}_go"):
             submit()
             st.rerun()

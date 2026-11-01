@@ -4123,7 +4123,8 @@ Each library is listed with its description to help you understand its functiona
             run = st.session_state.get("biomni_tutor_run") if panel == "inner" else None
             step_qa = (run or {}).get("step_qa") or {}
 
-            from biomentis.code_review_jobs import review_for_block
+            from biomentis.code_review import answer_locator, extract_code_blocks
+            from biomentis.code_review_jobs import review_for_answer, review_for_block
 
             def _review_dict(e):
                 # Only agent code entries carry a locator; old runs simply have no review.
@@ -4132,6 +4133,20 @@ Each library is listed with its description to help you understand its functiona
                     return None
                 review = review_for_block(rid, idx)
                 return review.to_dict() if review else None
+
+            def _answer_reviews(e):
+                # Reviews of the code blocks inside an answer, found by each
+                # block's answer locator within the answer's run.
+                rid = e.get("journal_run_id")
+                if rid is None or e.get("kind") or e.get("panel") != "main" or e.get("role") != "assistant":
+                    return None
+                content = e.get("content") or ""
+                found = []
+                for i, (language, _code) in enumerate(extract_code_blocks(content)):
+                    review = review_for_answer(rid, answer_locator(content, i))
+                    if review:
+                        found.append({"block": i, "language": language, "review": review.to_dict()})
+                return found or None
 
             out: list[ExportEntry] = []
             for e in st.session_state.biomni_transcript:
@@ -4154,6 +4169,7 @@ Each library is listed with its description to help you understand its functiona
                         journal_run_id=e.get("journal_run_id"),
                         block_index=e.get("block_index"),
                         code_review=_review_dict(e),
+                        answer_reviews=_answer_reviews(e),
                     )
                 )
                 # "paused" is the last transcript entry generated for a
@@ -4219,7 +4235,7 @@ Each library is listed with its description to help you understand its functiona
         # raising DuplicateWidgetID.
         _review_keys: set[str] = set()
 
-        def _code_review(req, key, output_dir=None):
+        def _code_review(req, key, output_dir=None, saved=None):
             from biomentis.ui_code_review import render_code_review
 
             unique, n = key, 1
@@ -4227,36 +4243,41 @@ Each library is listed with its description to help you understand its functiona
                 n += 1
                 unique = f"{key}-{n}"
             _review_keys.add(unique)
-            render_code_review(req, key=unique, output_dir=output_dir)
+            render_code_review(req, key=unique, output_dir=output_dir, saved=saved)
 
         def _render_step_review(entry):
             from biomentis.code_review import request_for_entry, task_for_entry
+            from biomentis.code_review_jobs import review_for_block
 
             transcript = st.session_state.get("biomni_transcript") or []
             run_id, block_index = entry.get("journal_run_id"), entry.get("block_index")
+            saved = None
             if run_id is not None and block_index is not None:
                 key = f"cr-{run_id}-{block_index}"
+                # A restored run's earlier code differs from the session that
+                # reviewed it, so its review is found by locator instead.
+                saved = review_for_block(run_id, block_index)
             else:  # entries replayed from before code entries were tagged
                 key = f"cr-{hashlib.sha1((entry.get('content') or '').encode('utf-8')).hexdigest()[:12]}"
-            _code_review(request_for_entry(transcript, entry, task_for_entry(transcript, entry)), key)
+            _code_review(request_for_entry(transcript, entry, task_for_entry(transcript, entry)), key, saved=saved)
 
         def _render_answer_reviews(entry):
-            # Code blocks inside an answer each get a review, below the answer.
-            # Answers carry no run id, so the key is the answer's content hash.
-            # With self_critic on, every revised answer gets its own buttons.
-            # No output_dir: answers are replayed from run journals after a
-            # restart, so their reviews go to <run_dir>/no-run.reviews.jsonl,
-            # which load_saved_reviews reloads.
+            # Code blocks inside an answer each get a review, below the answer,
+            # keyed by the block's answer locator (the answer's content hash and
+            # the block's position). With self_critic on, every revised answer
+            # gets its own buttons. The request carries the answer's journal run
+            # id, so the review is saved in <run_dir>/<run_id>.reviews.jsonl
+            # (no-run.reviews.jsonl for an answer without one), which
+            # load_saved_reviews reloads.
             from biomentis.code_review import requests_for_answer, task_for_entry
+            from biomentis.code_review_jobs import review_for_answer
 
             transcript = st.session_state.get("biomni_transcript") or []
             requests = requests_for_answer(transcript, entry, task_for_entry(transcript, entry))
-            if not requests:
-                return
-            digest = hashlib.sha1((entry.get("content") or "").encode("utf-8")).hexdigest()[:10]
             for i, req in enumerate(requests):
                 st.caption(f"Code block {i + 1} of this answer ({req.language})")
-                _code_review(req, f"cr-ans-{digest}-{i}")
+                saved = review_for_answer(req.run_id, req.answer_locator) if req.run_id else None
+                _code_review(req, f"cr-{req.answer_locator}", saved=saved)
 
         def render_entry(container, entry):
             with container.chat_message(entry.get("role", "assistant")):

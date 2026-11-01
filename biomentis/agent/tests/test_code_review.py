@@ -298,6 +298,36 @@ def test_review_for_block():
     _check("unknown block", jobs.review_for_block("r1", 5) is None and jobs.review_for_block("zz", 0) is None)
 
 
+def test_answer_reviews_tied_to_run():
+    print("\n[answer] an answer-block review carries its run and locator, apart from agent steps")
+    from biomentis.ui_core import UIEvent, transcript_entry_for_event
+
+    _jobs_reset()
+    content = "Done.\n```python\nc = b * 2\n```"
+    answer = transcript_entry_for_event(UIEvent(type="solution", channel="main", content=content, title="✅ Answer"), [], run_id="r9")
+    summary = transcript_entry_for_event(UIEvent(type="summary", content="s", title="Summary"), [], run_id="r9")
+    _check("solution and summary entries tagged with the run", answer["journal_run_id"] == "r9" and summary["journal_run_id"] == "r9")
+    (req,) = cr.requests_for_answer([answer], answer, "task")
+    loc = cr.answer_locator(content, 0)
+    _check("request carries run id and locator", (req.run_id, req.answer_locator, req.source) == ("r9", loc, "answer"), str(req))
+    _check("locator format", loc.startswith("ans-") and loc.endswith("-0") and len(loc) == len("ans-") + 10 + 2, loc)
+    k = jobs.submit_review(req, "m", _factory([]))
+    jobs._wait_for(k, 10)
+    rows = [json.loads(l) for l in open(jobs.sidecar_path("r9"), encoding="utf-8")]
+    _check("saved in the run's sidecar with run id and locator",
+           len(rows) == 1 and rows[0]["run_id"] == "r9" and rows[0]["answer_locator"] == loc and rows[0]["source"] == "answer", str(rows))
+    _check("found by answer locator", jobs.review_for_answer("r9", loc) is not None)
+    _check("never matched as agent step 0", jobs.review_for_block("r9", 0) is None)
+    _check("other run or locator not matched", jobs.review_for_answer("r8", loc) is None and jobs.review_for_answer("r9", "ans-x-0") is None)
+    step = jobs.submit_review(_req(run_id="r9", block_index=0), "m", _factory([]))
+    jobs._wait_for(step, 10)
+    _check("an agent step is not matched as an answer block",
+           jobs.review_for_block("r9", 0) is not None and jobs.review_for_answer("r9", loc).corrected_code == rows[0]["corrected_code"])
+    jobs._clear_for_tests()
+    jobs.load_saved_reviews()
+    _check("answer locator survives a reload", jobs.review_for_answer("r9", loc) is not None and jobs.review_for_block("r9", 0) is not None)
+
+
 def test_main_journal_untouched():
     _jobs_reset()
     k = jobs.submit_review(_req(run_id="r1", block_index=0), "m", _factory([]))
@@ -637,6 +667,31 @@ def test_export_writes_corrected_scripts():
     _check("second script, by language", read("code_review_2.sh") == "echo fixed", str(os.listdir(out)))
     export_run(main, [], "m", output_dir=out)
     _check("re-export drops stale scripts", read("code_review_1.py") == "a_fixed" and read("code_review_2.sh") is None)
+
+
+def test_export_names_files_and_includes_answer_reviews():
+    print("\n[export] the page names each script; answer-block reviews exported")
+    from biomentis.ui_core import ExportEntry, export_run
+
+    review = lambda fixed: CodeReview(verdict="run_with_fixes", summary="fix it", corrected_code=fixed).to_dict()
+    answer = ExportEntry(
+        role="assistant", kind="text", content="Answer\n```python\nz = 1\n```\n```bash\necho a\n```",
+        journal_run_id="r1",
+        answer_reviews=[{"block": 0, "language": "python", "review": review("z = 2")},
+                        {"block": 1, "language": "bash", "review": review("echo b")}],
+    )
+    inner = [_reviewed_entry("b", "b_fixed")]
+    out = export_run([answer], inner, "m", downloads_dir=tempfile.mkdtemp(prefix="cr_export_"))
+    files = sorted(os.listdir(out))
+    read = lambda n: open(os.path.join(out, n), encoding="utf-8").read()
+    _check("answer scripts written first, then the step's",
+           read("code_review_1.py") == "z = 2" and read("code_review_2.sh") == "echo b" and read("code_review_3.py") == "b_fixed", str(files))
+    main = read(next(f for f in files if f.startswith("biomentis_main_")))
+    inner_page = read(next(f for f in files if f.startswith("biomentis_inner_")))
+    _check("answer reviews under the answer", "Code block 1 of this answer (python)" in main and "Code block 2 of this answer (bash)" in main, main[-2000:])
+    _check("answer page names its scripts", "saved beside this page as code_review_1.py" in main and "saved beside this page as code_review_2.sh" in main)
+    _check("step page names its script", "saved beside this page as code_review_3.py" in inner_page)
+    _check("no literal code_review_N", "code_review_N" not in main + inner_page)
 
 
 def run_all() -> int:

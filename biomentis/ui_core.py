@@ -694,7 +694,8 @@ def transcript_entry_for_event(
     `run_id` is the id of the run (the one `runs/<run_id>.jsonl` is named
     for). A code entry is tagged with it and with its 0-based position among
     the run's code entries, so a later code review can find the run's other
-    code. Live and replayed runs pass the same id and so get the same tags.
+    code. Answer entries (`solution`, `summary`) are tagged with the run id
+    too. Live and replayed runs pass the same id and so get the same tags.
 
     The one thing this does NOT do is stamp a `complete` event with the run's
     total time: that needs the run clock, which lives in the UI's session
@@ -712,7 +713,9 @@ def transcript_entry_for_event(
     elif kind == "reasoning":
         entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "solution":
-        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
+        # Tagged with the run like code entries, so a review of a code block
+        # in the answer is tied to its run (`code_review.answer_locator`).
+        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title, "journal_run_id": run_id}
     elif kind == "code":
         entry = {
             "panel": "inner",
@@ -782,7 +785,7 @@ def transcript_entry_for_event(
         if getattr(event, "caption", None):
             entry["caption"] = event.caption
     elif kind == "summary":
-        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
+        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title, "journal_run_id": run_id}
     elif kind == "complete":
         entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "instruction":
@@ -967,6 +970,11 @@ class ExportEntry:
     journal_run_id: str | None = None
     block_index: int | None = None
     code_review: dict | None = None
+    # An answer's reviewed code blocks: [{"block": 0-based, "language", "review": dict}].
+    answer_reviews: list[dict] | None = None
+    # Set by `export_run`: the file name of each corrected script it wrote
+    # (`review_file` for a code entry, `"file"` in each answer_reviews item).
+    review_file: str | None = None
 
 
 def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
@@ -1201,8 +1209,11 @@ def _qa_extras_html(entry: ExportEntry) -> str:
 _REVIEW_EXTENSIONS = {"python": ".py", "bash": ".sh", "r": ".R"}
 
 
-def _code_review_html(review_dict: dict, language: str) -> str:
-    """The review block under a piece of code. Every model-written string is escaped."""
+def _code_review_html(review_dict: dict, language: str, file_name: str | None = None) -> str:
+    """The review block under a piece of code. Every model-written string is escaped.
+
+    `file_name` is the corrected script the export wrote for this review.
+    """
     from biomentis.code_review import CodeReview
     from biomentis.ui_code_review import VERDICT_LABELS
 
@@ -1217,8 +1228,8 @@ def _code_review_html(review_dict: dict, language: str) -> str:
         if issue.quote:
             parts.append(f'<pre class="bg-body-secondary p-2 rounded mb-1"><code>{html.escape(issue.quote)}</code></pre>')
         parts.append(f"<div>Problem: {html.escape(issue.problem)}</div><div>Fix: {html.escape(issue.fix)}</div></div>")
-    if review.corrected_code:
-        parts.append("<div class='text-muted'>The corrected script is saved beside this page as code_review_N.</div>")
+    if review.corrected_code and file_name:
+        parts.append(f"<div class='text-muted'>The corrected script is saved beside this page as {html.escape(file_name)}.</div>")
     parts.append("</div>")
     return "".join(parts)
 
@@ -1228,7 +1239,7 @@ def _entry_body_html(entry: ExportEntry, assets: ExportAssets | None = None) -> 
         language = entry.language or ""
         code_html = f'<pre class="bg-dark text-light p-3 rounded"><code class="language-{html.escape(language)}">{html.escape(entry.content)}</code></pre>'
         if entry.code_review:
-            code_html += _code_review_html(entry.code_review, language)
+            code_html += _code_review_html(entry.code_review, language, entry.review_file)
         return code_html
     if entry.kind == "observation":
         return f'<pre class="bg-secondary-subtle p-3 rounded small text-wrap">{html.escape(entry.content)}</pre>'
@@ -1248,9 +1259,12 @@ def _entry_body_html(entry: ExportEntry, assets: ExportAssets | None = None) -> 
         body = _render_markdown(entry.content) if entry.content else ""
         tail = _qa_extras_html(entry) if entry.kind == "qa" else ""
         return f'<div class="d-flex align-items-start gap-2"><span class="badge {badge_class} flex-shrink-0">{badge}</span><div class="flex-grow-1">{body}{tail}</div></div>'
-    if entry.content:
-        return _render_markdown(entry.content)
-    return ""
+    body = _render_markdown(entry.content) if entry.content else ""
+    for item in entry.answer_reviews or []:
+        language = item.get("language") or "python"
+        body += f"<div class='small text-muted mt-2'>Code block {item['block'] + 1} of this answer ({html.escape(language)})</div>"
+        body += _code_review_html(item.get("review") or {}, language, item.get("file"))
+    return body
 
 
 def _render_entry_card(entry: ExportEntry, assets: ExportAssets | None = None) -> str:
@@ -1360,19 +1374,33 @@ def render_transcript_html(
 
 
 def _write_corrected_scripts(export_dir: str, entries: list[ExportEntry]) -> None:
-    """Save each reviewed block's corrected script as code_review_<n>.<ext>, n from 1 in export order."""
+    """Save each reviewed block's corrected script as code_review_<n>.<ext>, n from 1 in export order.
+
+    Code entries and the code blocks of answers both count. Each written file's
+    name is recorded on its entry (`review_file`) or answer item (`"file"`), so
+    the page names it.
+    """
     for old in os.listdir(export_dir):  # an earlier export of this folder may have had more
         if re.fullmatch(r"code_review_\d+\.(py|sh|R)", old):
             os.remove(os.path.join(export_dir, old))
     n = 0
-    for entry in entries:
-        corrected = (entry.code_review or {}).get("corrected_code") if entry.kind == "code" else None
+
+    def write(review: dict | None, language: str | None) -> str | None:
+        nonlocal n
+        corrected = (review or {}).get("corrected_code")
         if not corrected:
-            continue
+            return None
         n += 1
-        ext = _REVIEW_EXTENSIONS.get((entry.language or "python").lower(), ".py")
-        with open(os.path.join(export_dir, f"code_review_{n}{ext}"), "w", encoding="utf-8") as f:
+        name = f"code_review_{n}{_REVIEW_EXTENSIONS.get((language or 'python').lower(), '.py')}"
+        with open(os.path.join(export_dir, name), "w", encoding="utf-8") as f:
             f.write(corrected)
+        return name
+
+    for entry in entries:
+        if entry.kind == "code":
+            entry.review_file = write(entry.code_review, entry.language)
+        for item in entry.answer_reviews or []:
+            item["file"] = write(item.get("review"), item.get("language"))
 
 
 MAIN_EXPORT_TITLE = "Biomentis A1 Agent — Main Output"

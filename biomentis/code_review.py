@@ -66,6 +66,10 @@ class CodeReviewRequest:
     run_id: str | None = None
     block_index: int | None = None
     source: str = "agent"  # "agent" | "answer" | "tutor" | "repl"
+    # An answer block's place: `answer_locator(answer content, block)`. Answer
+    # blocks have their own namespace, so they never match an agent step's
+    # (run_id, block_index).
+    answer_locator: str | None = None
 
 
 @dataclass
@@ -298,19 +302,39 @@ def task_for_entry(transcript: list[dict], entry: dict) -> str:
     return ""
 
 
+def answer_locator(content: str, block: int) -> str:
+    """Stable id of code block `block` (0-based) of an answer with this content.
+
+    The same in a live and a restored transcript; with self_critic on, each
+    revised answer has different content and so its own locators.
+    """
+    return f"ans-{hashlib.sha1((content or '').encode('utf-8')).hexdigest()[:10]}-{block}"
+
+
 def requests_for_answer(transcript: list[dict], entry: dict, task: str) -> list[CodeReviewRequest]:
     """One review request per fenced code block in an answer entry.
 
     The earlier code is every code entry before the answer, so a block that
-    reuses the run's names can be made self-contained.
+    reuses the run's names can be made self-contained. Each request carries
+    the answer's journal run id (if any) and its block's `answer_locator`.
     """
     blocks = extract_code_blocks(entry.get("content") or "")
     if not blocks:
         return []
     position = _position(transcript, entry)
     earlier = _earlier_code(transcript, position) if position is not None else ""
+    content = entry.get("content") or ""
     return [
-        CodeReviewRequest(code=code, language=lang, task=task, earlier_code=earlier, block_index=i, source="answer")
+        CodeReviewRequest(
+            code=code,
+            language=lang,
+            task=task,
+            earlier_code=earlier,
+            run_id=entry.get("journal_run_id"),
+            block_index=i,
+            source="answer",
+            answer_locator=answer_locator(content, i),
+        )
         for i, (lang, code) in enumerate(blocks)
     ]
 

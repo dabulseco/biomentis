@@ -1,4 +1,5 @@
 import glob
+import hashlib
 import inspect
 import os
 import re
@@ -4199,6 +4200,48 @@ Each library is listed with its description to help you understand its functiona
 
         # Counts structure viewers drawn in this script run, for unique keys.
         _structure_keys = {"n": 0}
+        # Code Review widget keys used in this script run. The same entry, or
+        # the same code, can be drawn twice in one run (two identical answers,
+        # old untagged blocks), so a repeat gets a numeric suffix rather than
+        # raising DuplicateWidgetID.
+        _review_keys: set[str] = set()
+
+        def _code_review(req, key, output_dir=None):
+            from biomentis.ui_code_review import render_code_review
+
+            unique, n = key, 1
+            while unique in _review_keys:
+                n += 1
+                unique = f"{key}-{n}"
+            _review_keys.add(unique)
+            render_code_review(req, key=unique, output_dir=output_dir)
+
+        def _render_step_review(entry):
+            from biomentis.code_review import request_for_entry, task_for_entry
+
+            transcript = st.session_state.get("biomni_transcript") or []
+            run_id, block_index = entry.get("journal_run_id"), entry.get("block_index")
+            if run_id is not None and block_index is not None:
+                key = f"cr-{run_id}-{block_index}"
+            else:  # entries replayed from before code entries were tagged
+                key = f"cr-{hashlib.sha1((entry.get('content') or '').encode('utf-8')).hexdigest()[:12]}"
+            _code_review(request_for_entry(transcript, entry, task_for_entry(transcript, entry)), key)
+
+        def _render_answer_reviews(entry):
+            # Code blocks inside an answer each get a review, below the answer.
+            # Answers carry no run id, so the key is the answer's content hash.
+            # With self_critic on, every revised answer gets its own buttons.
+            from biomentis.code_review import requests_for_answer, task_for_entry
+
+            transcript = st.session_state.get("biomni_transcript") or []
+            requests = requests_for_answer(transcript, entry, task_for_entry(transcript, entry))
+            if not requests:
+                return
+            digest = hashlib.sha1((entry.get("content") or "").encode("utf-8")).hexdigest()[:10]
+            output_dir = st.session_state.get("biomni_output_dir") or getattr(self, "output_dir", None)
+            for i, req in enumerate(requests):
+                st.caption(f"Code block {i + 1} of this answer ({req.language})")
+                _code_review(req, f"cr-ans-{digest}-{i}", output_dir=output_dir)
 
         def render_entry(container, entry):
             with container.chat_message(entry.get("role", "assistant")):
@@ -4206,6 +4249,7 @@ Each library is listed with its description to help you understand its functiona
                     st.markdown(f"**{entry['title']}**")
                 if entry.get("kind") == "code":
                     st.code(entry["content"], language=entry.get("language") or "python")
+                    _render_step_review(entry)
                 elif entry.get("kind") in ("image", "plot"):
                     # A missing file (run dir deleted) shows a caption
                     # instead of raising and breaking transcript replay.
@@ -4270,6 +4314,8 @@ Each library is listed with its description to help you understand its functiona
                             st.markdown(entry["content"])
                 elif entry.get("content"):
                     st.markdown(entry["content"])
+                    if entry.get("panel") == "main" and entry.get("role") == "assistant":
+                        _render_answer_reviews(entry)
 
         class _StepBoxTracker:
             """Groups consecutive inner-panel entries that share the same

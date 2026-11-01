@@ -269,6 +269,52 @@ def review_code(llm, req: CodeReviewRequest, model_name: str) -> CodeReview:
     return result
 
 
+def _position(transcript: list[dict], entry: dict) -> int | None:
+    """Index of `entry` itself (by identity) in the transcript, or None."""
+    return next((i for i, e in enumerate(transcript) if e is entry), None)
+
+
+def _earlier_code(transcript: list[dict], position: int) -> str:
+    """Every code entry before `position`, in the `run_journal.code_script` block format.
+
+    The agent's Python namespace persists across tutor segments and turns, so
+    every code entry before this point counts, whichever run it came from.
+    """
+    before = [e for e in transcript[:position] if e.get("kind") == "code"]
+    return "\n\n".join(
+        format_code_block(i, e.get("language") or "python", e.get("content") or "")
+        for i, e in enumerate(before, start=1)
+    )
+
+
+def task_for_entry(transcript: list[dict], entry: dict) -> str:
+    """The run prompt an entry belongs to: the nearest user entry before it ("" if none)."""
+    position = _position(transcript, entry)
+    if position is None:
+        return ""
+    for e in reversed(transcript[:position]):
+        if e.get("role") == "user":
+            return e.get("content") or ""
+    return ""
+
+
+def requests_for_answer(transcript: list[dict], entry: dict, task: str) -> list[CodeReviewRequest]:
+    """One review request per fenced code block in an answer entry.
+
+    The earlier code is every code entry before the answer, so a block that
+    reuses the run's names can be made self-contained.
+    """
+    blocks = extract_code_blocks(entry.get("content") or "")
+    if not blocks:
+        return []
+    position = _position(transcript, entry)
+    earlier = _earlier_code(transcript, position) if position is not None else ""
+    return [
+        CodeReviewRequest(code=code, language=lang, task=task, earlier_code=earlier, block_index=i, source="answer")
+        for i, (lang, code) in enumerate(blocks)
+    ]
+
+
 def request_for_entry(transcript: list[dict], entry: dict, task: str) -> CodeReviewRequest:
     """Build the review request for one agent code entry of the transcript.
 
@@ -278,7 +324,7 @@ def request_for_entry(transcript: list[dict], entry: dict, task: str) -> CodeRev
     An entry from before entries were tagged (no run_id/block_index) still
     works; it just has no earlier code.
     """
-    position = next((i for i, e in enumerate(transcript) if e is entry), None)
+    position = _position(transcript, entry)
     output = purpose = earlier = ""
     if position is not None:
         # Output: the observation before the next code block, if any.
@@ -295,14 +341,7 @@ def request_for_entry(transcript: list[dict], entry: dict, task: str) -> CodeRev
             if not e.get("kind") and e.get("title") == REASONING_TITLE:
                 purpose = (e.get("content") or "")[:MAX_PURPOSE_CHARS]
                 break
-        # Earlier code: the agent's Python namespace persists across tutor
-        # segments and turns, so every code entry before this one counts,
-        # whichever run it came from.
-        before = [e for e in transcript[:position] if e.get("kind") == "code"]
-        earlier = "\n\n".join(
-            format_code_block(i, e.get("language") or "python", e.get("content") or "")
-            for i, e in enumerate(before, start=1)
-        )
+        earlier = _earlier_code(transcript, position)
 
     run_id, block_index = entry.get("journal_run_id"), entry.get("block_index")
     return CodeReviewRequest(

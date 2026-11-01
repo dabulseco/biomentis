@@ -423,6 +423,19 @@ def test_block_index_per_run_on_shared_list():
 
 
 
+def test_task_and_answer_requests():
+    t = _agent_transcript()
+    answer = {"panel": "main", "role": "assistant", "content": "Done.\n```python\nc = b * 2\n```\n```r\nx <- 1\n```"}
+    t.append(answer)
+    _check("task is the nearest user entry", cr.task_for_entry(t, answer) == "task")
+    _check("no task for an entry not in the transcript", cr.task_for_entry(t, dict(answer)) == "")
+    reqs = cr.requests_for_answer(t, answer, "task")
+    _check("one request per block", [(r.language, r.code) for r in reqs] == [("python", "c = b * 2"), ("r", "x <- 1")], str(reqs))
+    _check("answer source and index", [(r.source, r.block_index, r.run_id) for r in reqs] == [("answer", 0, None), ("answer", 1, None)])
+    _check("earlier code is every step before", all("a = 1" in r.earlier_code and "b = a + 1" in r.earlier_code for r in reqs))
+    _check("no blocks, no requests", cr.requests_for_answer(t, t[0], "") == [])
+
+
 def test_old_entry_without_locator():
     entry = {"panel": "inner", "role": "assistant", "kind": "code", "content": "print(1)", "language": "python"}
     t = [entry, {"kind": "observation", "content": "1", "panel": "inner", "role": "assistant"}]

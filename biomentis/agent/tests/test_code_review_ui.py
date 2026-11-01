@@ -233,6 +233,237 @@ def test_empty_error_falls_back() -> None:
     _check("blank error replaced", [e.value for e in at.error] == ["The review failed."], str([e.value for e in at.error]))
 
 
+# --- Where the button appears (Task 7) ------------------------------------
+
+# Drives the REAL `A1.launch_streamlit_demo` over a seeded transcript, no run
+# in flight. The review model and client are patched in `ui_settings`, where
+# `render_code_review` looks them up.
+_APP_HARNESS = """
+import sys, os
+sys.path.insert(0, {repo!r})
+os.environ["BIOMENTIS_RUN_DIR"] = {run_dir!r}
+import streamlit as st
+from types import SimpleNamespace
+import biomentis.ui_settings as ui_settings
+from biomentis.agent.tests.test_code_review_ui import FACTORY, TRANSCRIPT
+ui_settings.code_review_model = lambda: "fake-model"
+ui_settings.code_review_llm = FACTORY[0]
+from biomentis.agent.a1 import A1
+
+st.session_state.setdefault("biomni_session_key", "apptest-cr")
+st.session_state.setdefault("biomni_agent_key", "test")
+st.session_state.setdefault("biomni_output_dir", {run_dir!r})
+if not st.session_state.get("_seeded"):
+    st.session_state["_seeded"] = True
+    st.session_state.biomni_transcript = TRANSCRIPT[0]
+agent = SimpleNamespace(
+    main_history_copy=[],
+    path=os.path.join({run_dir!r}, "agent"),
+    llm=SimpleNamespace(model_name="test-model"),
+)
+A1.launch_streamlit_demo(agent)
+"""
+
+TRANSCRIPT: list = [[]]
+REVIEW_LABEL = "🔎 Code Review"
+
+
+def _user(text="the task"):
+    return {"panel": "main", "role": "user", "content": text}
+
+
+def _reasoning(text):
+    return {"panel": "inner", "role": "assistant", "content": text, "title": "🤔 Reasoning"}
+
+
+def _code(text, run_id="run-1", block_index=0):
+    e = {"panel": "inner", "role": "assistant", "kind": "code", "content": text, "language": "python", "title": "🛠️ Code"}
+    if run_id is not None:
+        e["journal_run_id"], e["block_index"] = run_id, block_index
+    return e
+
+
+def _obs(text):
+    return {"panel": "inner", "role": "assistant", "kind": "observation", "content": text, "collapsible": True}
+
+
+def _answer(text, title="✅ Answer"):
+    return {"panel": "main", "role": "assistant", "content": text, "title": title}
+
+
+def _start_app(transcript, reply=None):
+    from streamlit.testing.v1 import AppTest
+
+    from biomentis import code_review_jobs as jobs
+
+    jobs._clear_for_tests()
+    CALLS.clear()
+    FACTORY[0] = _factory(reply if reply is not None else _reply())
+    TRANSCRIPT[0] = transcript
+    tmp = tempfile.mkdtemp(prefix="biomni_cr_ui_")
+    path = os.path.join(tmp, "app.py")
+    with open(path, "w") as f:
+        f.write(_APP_HARNESS.format(repo=_REPO, run_dir=tmp))
+    return AppTest.from_file(path, default_timeout=60).run()
+
+
+def _review_buttons(at):
+    return [b for b in at.button if b.label == REVIEW_LABEL]
+
+
+def test_button_on_agent_code_step() -> None:
+    print("\n[9] agent code step: one button, keyed by run and block; click sends output and task")
+    from biomentis import code_review_jobs as jobs
+    from biomentis.code_review import request_for_entry, review_key
+
+    t = [_user("compute x"), _reasoning("set x"), _code("x = 1\nprint(x)", "run-1", 0), _obs("1")]
+    at = _start_app(t)
+    _check("no exception", not at.exception, str(at.exception))
+    buttons = _review_buttons(at)
+    _check("one Code Review button", len(buttons) == 1, str([b.label for b in at.button]))
+    _check("keyed by journal run id and block", [b.key for b in buttons] == ["cr-run-1-0_go"], str([b.key for b in buttons]))
+    buttons[0].click().run()
+    req = request_for_entry(t, t[2], "compute x")
+    key = review_key(req, "fake-model")
+    _check("click queues the review of this step", jobs.review_status(key)[0] in ("pending", "done"), jobs.review_status(key)[0])
+    _check("request has output, purpose and task", (req.output, req.purpose, req.task) == ("1", "set x", "compute x"))
+    jobs._wait_for(key)
+    at.run()
+    _check("report shown under the step", [e.label for e in at.expander if e.label.startswith("Code review")] == ["Code review — ⚠️ Run with fixes"], str([e.label for e in at.expander]))
+
+
+def test_untagged_and_repeated_code_get_unique_keys() -> None:
+    print("\n[10] old untagged entries and repeated code never collide")
+    import hashlib
+
+    t = [_user(), _code("print(1)", None), _obs("1"), _code("print(1)", None), _obs("1")]
+    at = _start_app(t)
+    _check("no exception", not at.exception, str(at.exception))
+    h = hashlib.sha1(b"print(1)").hexdigest()[:12]
+    keys = [b.key for b in _review_buttons(at)]
+    _check("sha1 fallback key, repeat suffixed", keys == [f"cr-{h}_go", f"cr-{h}-2_go"], str(keys))
+
+
+def test_buttons_under_answer_blocks() -> None:
+    print("\n[11] answer with two fenced blocks: two buttons, in the answer's message")
+    from biomentis import code_review_jobs as jobs
+    from biomentis.code_review import review_key
+
+    answer = "Here is the result.\n\n```python\na = 2\n```\n\nAnd in bash:\n\n```bash\necho hi\n```\n"
+    t = [_user("the task"), _code("a = 1", "run-1", 0), _obs("ok"), _answer(answer)]
+    at = _start_app(t)
+    _check("no exception", not at.exception, str(at.exception))
+    keys = [b.key for b in _review_buttons(at)]
+    _check("three buttons: one step, two answer blocks", len(keys) == 3, str(keys))
+    ans_keys = [k for k in keys if k.startswith("cr-ans-")]
+    _check("answer keys numbered 0 and 1", [k.rsplit("-", 1)[-1] for k in ans_keys] == ["0_go", "1_go"], str(ans_keys))
+    msg = next((m for m in at.chat_message if any("Here is the result." in md.value for md in m.markdown)), None)
+    _check(
+        "both answer buttons inside the answer's message",
+        msg is not None and len([b for b in msg.button if b.label == REVIEW_LABEL]) == 2,
+        "",
+    )
+    btn = next(b for b in _review_buttons(at) if b.key == ans_keys[1])
+    btn.click().run()
+    from biomentis.code_review import CodeReviewRequest
+    from biomentis.run_journal import format_code_block
+
+    req = CodeReviewRequest(
+        code="echo hi", language="bash", task="the task",
+        earlier_code=format_code_block(1, "python", "a = 1"), block_index=1, source="answer",
+    )
+    key = review_key(req, "fake-model")
+    _check("bash block reviewed with task and earlier code", jobs.review_status(key)[0] in ("pending", "done"), jobs.review_status(key)[0])
+    jobs._wait_for(key)
+
+
+def test_revised_answers_each_get_buttons() -> None:
+    print("\n[12] self-critic: a revised answer, and a repeated one, both get buttons")
+    a1 = "```python\nx = 1\n```"
+    a2 = "```python\nx = 2\n```"
+    t = [_user(), _answer(a1), _answer(a2, "✅ Answer (revised after self-critique #1)"), _answer(a2, "✅ Solution")]
+    at = _start_app(t)
+    _check("no exception", not at.exception, str(at.exception))
+    keys = [b.key for b in _review_buttons(at)]
+    _check("one button per answer", len(keys) == 3 and len(set(keys)) == 3, str(keys))
+
+
+def test_no_button_without_code() -> None:
+    print("\n[13] reasoning and observations only: no button")
+    t = [_user(), _reasoning("thinking"), _obs("some output"), _answer("No code here.")]
+    at = _start_app(t)
+    _check("no exception", not at.exception, str(at.exception))
+    _check("no Code Review button", len(_review_buttons(at)) == 0, str([b.label for b in at.button]))
+
+
+_TUTOR_HARNESS = """
+import sys
+sys.path.insert(0, {repo!r})
+import streamlit as st
+import biomentis.ui_settings as ui_settings
+from biomentis.agent.tests.test_code_review_ui import FACTORY
+ui_settings.code_review_model = lambda: "fake-model"
+ui_settings.code_review_llm = FACTORY[0]
+from biomentis.ui_tutor import _render_visuals
+
+_render_visuals({{"plot_code": "import matplotlib.pyplot as plt\\nplt.plot([1, 2])", "plot_png": None}}, key="chat-panel-0", task="plot it")
+_render_visuals({{"plot_code": None, "plot_png": None}}, key="chat-panel-1")
+"""
+
+
+def test_button_on_tutor_plot_code() -> None:
+    print("\n[14] tutor plot code: one button, keyed by the turn")
+    from streamlit.testing.v1 import AppTest
+
+    from biomentis import code_review_jobs as jobs
+
+    jobs._clear_for_tests()
+    FACTORY[0] = _factory(_reply())
+    path = os.path.join(tempfile.mkdtemp(), "tutor.py")
+    with open(path, "w") as f:
+        f.write(_TUTOR_HARNESS.format(repo=_REPO))
+    at = AppTest.from_file(path, default_timeout=60).run()
+    _check("no exception", not at.exception, str(at.exception))
+    keys = [b.key for b in _review_buttons(at)]
+    _check("one button for the turn with code", keys == ["cr-tutor-chat-panel-0_go"], str(keys))
+
+
+_REPL_HARNESS = """
+import sys
+sys.path.insert(0, {repo!r})
+import streamlit as st
+import biomentis.ui_settings as ui_settings
+from biomentis.agent.tests.test_code_review_ui import FACTORY
+ui_settings.code_review_model = lambda: "fake-model"
+ui_settings.code_review_llm = FACTORY[0]
+from biomentis.ui_repl import render_repl_panel
+
+st.session_state.setdefault("biomni_repl_history", [
+    {{"code": "y = 3\\nprint(y)", "output": "3"}},
+    {{"code": "# (namespace cleared)", "output": ""}},
+    {{"code": "print('hi')", "output": "hi"}},
+])
+render_repl_panel(None)
+"""
+
+
+def test_button_on_repl_history() -> None:
+    print("\n[15] REPL history: a button per code entry, none on the cleared marker")
+    from streamlit.testing.v1 import AppTest
+
+    from biomentis import code_review_jobs as jobs
+
+    jobs._clear_for_tests()
+    FACTORY[0] = _factory(_reply())
+    path = os.path.join(tempfile.mkdtemp(), "repl.py")
+    with open(path, "w") as f:
+        f.write(_REPL_HARNESS.format(repo=_REPO))
+    at = AppTest.from_file(path, default_timeout=60).run()
+    _check("no exception", not at.exception, str(at.exception))
+    keys = [b.key for b in _review_buttons(at)]
+    _check("buttons for #3 and #1 only", keys == ["cr-repl-3_go", "cr-repl-1_go"], str(keys))
+
+
 def run_all() -> int:
     _with_isolated_dirs()
     print("=" * 60)
@@ -246,6 +477,13 @@ def run_all() -> int:
     test_click_does_not_touch_run_state()
     test_model_text_shown_literally()
     test_empty_error_falls_back()
+    test_button_on_agent_code_step()
+    test_untagged_and_repeated_code_get_unique_keys()
+    test_buttons_under_answer_blocks()
+    test_revised_answers_each_get_buttons()
+    test_no_button_without_code()
+    test_button_on_tutor_plot_code()
+    test_button_on_repl_history()
     print("\n" + "=" * 60)
     print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")
     print("=" * 60)

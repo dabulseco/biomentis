@@ -1714,7 +1714,7 @@ def render_tutor_chat_panel(tutor) -> None:
         for _idx, turn in enumerate(st.session_state.biomni_tutor_chat_history):
             with st.chat_message(turn["role"]):
                 st.markdown(turn["content"])
-                _render_visuals(turn, key=f"chat-panel-{_idx}")
+                _render_visuals(turn, key=f"chat-panel-{_idx}", task=getattr(tutor, "current_prompt", None) or "")
                 if turn.get("citations"):
                     with st.expander(
                         f"Sources ({len(turn['citations'])})", expanded=False
@@ -1815,14 +1815,24 @@ def _chat_search_dirs(tutor) -> list[str]:
     return dirs
 
 
-def _render_visuals(turn: dict, key: str) -> None:
+def _render_visuals(turn: dict, key: str, task: str = "") -> None:
     """Show a stored turn's code, figure and structure. Reads only the dict:
-    how an answer is shown never depends on the current plot setting."""
+    how an answer is shown never depends on the current plot setting.
+
+    The plot code gets a Code Review button; `task` is the run prompt, if any."""
     import streamlit as st
 
     code = turn.get("plot_code")
     if code:
         st.code(code, language="python")
+        from biomentis.code_review import CodeReviewRequest
+        from biomentis.ui_code_review import render_code_review
+
+        render_code_review(
+            CodeReviewRequest(code=code, output=turn.get("plot_error") or "", task=task, source="tutor"),
+            key=f"cr-tutor-{key}",
+            output_dir=st.session_state.get("biomni_output_dir"),
+        )
         if turn.get("plot_png"):
             st.image(turn["plot_png"])
         elif turn.get("plot_error"):
@@ -2005,7 +2015,7 @@ def _render_step_qa(container: Any, step_id: int, run: dict, tutor, run_id: str 
                 for _qi, turn in enumerate(qa_list):
                     st.markdown(f"**Q:** {turn['question']}")
                     st.markdown(f"**A:** {turn['answer']}")
-                    _render_visuals(turn, key=f"chat-step-{_key_suffix}-{_qi}")
+                    _render_visuals(turn, key=f"chat-step-{_key_suffix}-{_qi}", task=getattr(tutor, "current_prompt", None) or "")
                     if turn.get("also_consider"):
                         with st.expander("Also worth knowing", expanded=False):
                             for item in turn["also_consider"]:

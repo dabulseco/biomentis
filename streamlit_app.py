@@ -43,6 +43,18 @@ install_renderers()
 st.set_page_config(page_title="Biomentis AI Agent", layout="wide")
 
 
+@st.cache_resource(show_spinner=False)
+def _load_saved_code_reviews() -> int:
+    """Fill the Code Review store from the saved sidecars, once per process,
+    so replayed history shows reviews from earlier sessions."""
+    from biomentis.code_review_jobs import load_saved_reviews
+
+    return load_saved_reviews()
+
+
+_load_saved_code_reviews()
+
+
 # --- Sidebar: model picker ----------------------------------------------
 def _build_model_choices() -> list[tuple[str, str]]:
     """Return a [(source, model), ...] list.

@@ -30,7 +30,9 @@ def render_round_pause(control: Any, key_prefix: str = "") -> None:
     pending = control.pending if control is not None else None
     if not pending:
         return
-    findings = pending.get("findings") or []
+    # One box per key: two identical findings share a key (and would share a
+    # widget id), and accepting the key accepts both.
+    findings = list({f.key: f for f in pending.get("findings") or []}.values())
     with st.container(border=True):
         st.warning(pause_reason(pending), icon=":material/pause_circle:")
         if pending.get("reason") == "context":

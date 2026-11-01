@@ -59,6 +59,8 @@ import sys, os
 sys.path.insert(0, {repo!r})
 os.environ["BIOMENTIS_RUN_DIR"] = {tmp!r}
 os.environ["BIOMNI_DOWNLOADS_DIR"] = {tmp!r}
+if {inline!r}:
+    os.environ["BIOMENTIS_BACKGROUND_RUNS"] = "0"
 
 import streamlit as st
 from types import SimpleNamespace
@@ -102,8 +104,10 @@ def fake_stream(agent, prompt, files, history, thread_id):
     yield UIEvent(type="solution", channel="main", content="the answer", title="Answer")
     yield UIEvent(type="round_pause", channel="main", title="⏸ Paused for your decision",
                   content="Round 4 needs your decision")
-    agent.round_control.request(4, FINDINGS, "round")
-    agent.round_control.wait()
+    # Like A1._await_user: inline, a run that needs a decision stops.
+    if getattr(agent, "pause_allowed", True):
+        agent.round_control.request(4, FINDINGS, "round")
+        agent.round_control.wait()
     yield UIEvent(type="final_status", channel="main", content={stopped!r})
     yield UIEvent(type="complete", content="finished", title="Complete")
 
@@ -150,13 +154,13 @@ def _texts(node) -> list[str]:
     return out
 
 
-def _paused_app(session: str):
+def _paused_app(session: str, inline: bool = False):
     from streamlit.testing.v1 import AppTest
 
     tmp = tempfile.mkdtemp(prefix="biomni_round_pause_")
     path = os.path.join(tmp, "app.py")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(_HARNESS.format(repo=_REPO, tmp=tmp, session=session, stopped=STOPPED))
+        f.write(_HARNESS.format(repo=_REPO, tmp=tmp, session=session, stopped=STOPPED, inline=inline))
     at = AppTest.from_file(path, default_timeout=30).run()
     at.text_area[0].set_value("the task")
     send = [b for b in at.button if b.label == "Send"]
@@ -388,6 +392,10 @@ def test_sidebar_toggle() -> None:
     joined = flat.replace('" "', "")
     _check("help text verbatim", help_text in joined, "")
     _check("configure gets completion_gate", "completion_gate=st.session_state.get(\"biomentis_completion_gate\"" in flat)
+    _check("warning when background runs are off",
+           "if not background_runs_enabled():" in flat
+           and "Background runs are off (BIOMENTIS_BACKGROUND_RUNS=0): a run that needs your decision at "
+           "round 4 will stop instead of pausing." in joined)
     _check("evidence_gate keeps the same value",
            "evidence_gate=st.session_state.get(\"biomentis_completion_gate\"" in flat)
 
@@ -417,6 +425,84 @@ def test_status_placement_and_restore() -> None:
     _check("a restored run puts the status above the answer", restored == ["q", STOPPED, "ans"], str(restored))
 
 
+def test_inline_run_stops_instead_of_pausing() -> None:
+    print("\n(j) background runs off: a run that needs a decision stops, it does not hang")
+    import threading
+
+    from biomentis.agent.tests.test_gate_graph import _EVIDENCE_STEPS, _WRONG, _agent, _Scripted
+    from biomentis.ui_core import stream_agent_events
+
+    llm = _Scripted(_EVIDENCE_STEPS + [_WRONG] * 4)
+    agent = _agent(llm, _Scripted(["Check the sum."]), planned=1)
+    agent.pause_allowed = False
+    box: dict = {}
+
+    def run():
+        try:
+            box["events"] = list(stream_agent_events(agent, "What is 24+3?", [], [], 92))
+        except Exception as exc:  # reported below
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=120)
+    _check("the run ended (bounded join)", not worker.is_alive() and "error" not in box, repr(box.get("error")))
+    _check("it never paused", agent.round_control.pending is None)
+    events = box.get("events") or []
+    statuses = [e.content for e in events if e.type == "final_status"]
+    _check("final status: stopped", statuses == [STOPPED], str(statuses))
+    _check("no round_pause event", not any(e.type == "round_pause" for e in events))
+    _check("four gates ran, no model call after round 3",
+           len(agent.run_gate_results) == 4 and len(llm.requests) == 6,
+           f"{len(agent.run_gate_results)} gates, {len(llm.requests)} calls")
+
+    print("\n(j2) the UI's inline path sets pause_allowed False")
+    t0 = time.monotonic()
+    at, _, _ = _paused_app("round-pause-inline", inline=True)
+    _check("no exception", not at.exception, str(at.exception))
+    _check("the inline script finished promptly", time.monotonic() - t0 < 25, f"{time.monotonic() - t0:.1f}s")
+    _check("no pause panel", not _panel_shown(at)[0], str([w.value for w in at.warning]))
+    _check("the stopped status reached the transcript", STOPPED in _line(at, "CONTENTS="), _line(at, "CONTENTS="))
+
+
+_DUP_HARNESS = '''
+import sys
+sys.path.insert(0, {repo!r})
+import streamlit as st
+from biomentis.gate import Finding
+from biomentis.gate.control import RoundControl
+from biomentis.ui_gate import render_round_pause
+
+if "_c" not in st.session_state:
+    c = RoundControl()
+    same = Finding("arithmetic", "blocking", "2+2 = 5", "2+2 is 4")
+    c.request(4, [same, Finding("arithmetic", "blocking", "2+2 = 5", "2+2 is 4")], "round")
+    st.session_state["_c"] = c
+render_round_pause(st.session_state["_c"])
+st.markdown("ACCEPTED=" + repr(sorted(st.session_state["_c"].accepted)))
+'''
+
+
+def test_duplicate_findings_share_one_box() -> None:
+    print("\n(k) two identical findings: one box, no duplicate widget id")
+    from streamlit.testing.v1 import AppTest
+
+    from biomentis.gate import Finding
+
+    key = Finding("arithmetic", "blocking", "2+2 = 5", "2+2 is 4").key
+    path = os.path.join(tempfile.mkdtemp(prefix="biomni_dup_"), "app.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_DUP_HARNESS.format(repo=_REPO))
+    at = AppTest.from_file(path, default_timeout=30).run()
+    _check("no exception", not at.exception, str(at.exception))
+    boxes = [c.key for c in at.checkbox]
+    _check("one Accept as is box", boxes == [f"accept_{key}"], str(boxes))
+    if boxes:
+        at.checkbox(key=f"accept_{key}").check()
+        at.button(key="round_continue").click().run()
+        _check("accepting it accepts the key", _line(at, "ACCEPTED=") == f"ACCEPTED={[key]!r}", _line(at, "ACCEPTED="))
+
+
 def run_all() -> int:
     test_status_placement_and_restore()
     test_render_round_pause_alone()
@@ -424,6 +510,8 @@ def run_all() -> int:
     test_stop_run_button_during_pause()
     test_real_graph_cancel_during_pause()
     test_sidebar_toggle()
+    test_inline_run_stops_instead_of_pausing()
+    test_duplicate_findings_share_one_box()
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     return 1 if _FAILED else 0
 

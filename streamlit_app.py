@@ -20,6 +20,7 @@ import streamlit as st
 from biomentis.agent import A1
 from biomentis.agent.tutor import TutorEngine
 from biomentis.config import default_config
+from biomentis.run_worker import background_runs_enabled
 from biomentis.ui_core import list_available_providers
 from biomentis.ui_repl import render_repl_panel
 from biomentis.ui_settings import render_anthropic_key_field, render_ncbi_email_field, render_ollama_key_field
@@ -120,6 +121,11 @@ with st.sidebar:
         "if a reviewer is set, rubric coverage). Up to 3 revision rounds run automatically; "
         "from round 4 the run pauses for you to continue or stop.",
     )
+    if not background_runs_enabled():
+        st.warning(
+            "Background runs are off (BIOMENTIS_BACKGROUND_RUNS=0): a run that needs your "
+            "decision at round 4 will stop instead of pausing."
+        )
     # Temperatures, for reproducibility. 0 is the most repeatable (the model
     # always takes its most likely next token); higher values vary more from
     # run to run. Read below when the agent is configured.

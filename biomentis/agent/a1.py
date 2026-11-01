@@ -712,6 +712,19 @@ class A1:
         self._context_pause_asked = False
         self.final_status = ""
 
+    def _await_user(self, round_number: int, findings: list, reason: str) -> str:
+        """Pause for the user's Continue or Stop; return the choice.
+
+        With `pause_allowed` False (the UI runs inline, so nobody can answer
+        while the script thread is blocked), the run stops instead: it never
+        hangs, and it is never labelled as passed without passing.
+        """
+        if not getattr(self, "pause_allowed", True):
+            print("completion gate: a pause is not possible here (no background run); stopping")
+            return "stop"
+        self.round_control.request(round_number=round_number, findings=findings, reason=reason)
+        return self.round_control.wait()
+
     def add_tool(self, api):
         """Add a new tool to the agent's tool registry and make it available for retrieval.
 
@@ -1955,8 +1968,7 @@ Each library is listed with its description to help you understand its functiona
             if self.completion_gate and context_fit.must_wrap_up and not self._context_pause_asked:
                 self._context_pause_asked = True
                 print("context budget: the context window is nearly full; waiting for Continue or Stop")
-                self.round_control.request(round_number=len(self.run_gate_results), findings=[], reason="context")
-                if self.round_control.wait() == "stop":
+                if self._await_user(len(self.run_gate_results), [], "context") == "stop":
                     print("stopped by the user at the context limit")
                     self._gate_stopped = True
                     state["next_step"] = "finalize"
@@ -2554,8 +2566,7 @@ Each library is listed with its description to help you understand its functiona
             """Past the automatic rounds: wait, with no timeout, for Continue or Stop."""
             result = self.run_gate_results[-1]
             print(f"completion gate: round {result.round + 1} needs the user's decision")
-            self.round_control.request(round_number=result.round + 1, findings=result.blocking, reason="round")
-            if self.round_control.wait() == "stop":
+            if self._await_user(result.round + 1, result.blocking, "round") == "stop":
                 self._gate_stopped = True
                 state["next_step"] = "finalize"
                 return state
@@ -4699,6 +4710,9 @@ Each library is listed with its description to help you understand its functiona
                 )
                 self.current_run_id = _journal.run_id
                 st.session_state.biomni_run_journal = _journal.path
+                # Inline, a paused run would block the script thread with no
+                # way to answer it, so a run that needs a decision stops.
+                self.pause_allowed = background_runs_enabled()
                 if background_runs_enabled():
                     # The stream is built on the worker thread, not here: the
                     # tutor's `_create_run` parks the live generator in session

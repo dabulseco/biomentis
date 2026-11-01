@@ -109,6 +109,7 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
     except Exception as exc:  # the other checks still count
         print(f"[gate] quantity extraction failed ({type(exc).__name__}: {exc}); no quantity checks this round")
         claims = None
+        agent._gate_prev_claims = None  # nothing was checked this round: nothing may be listed as passed
     if claims is not None:
         findings += _safe("quantity", "check_consistency", check_consistency, claims)
         findings += _safe("quantity", "check_derivations", check_derivations, claims)
@@ -190,9 +191,25 @@ Do not change any value listed under PASSED QUANTITIES unless a code step in thi
 Be specific and constructive. No question asked, just feedback."""
 
 
+def _num(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
+
+
 def _has_finding(claim, findings: list[Finding]) -> bool:
-    return any((claim.quote and claim.quote in f.quote) or (claim.name and claim.name in f.issue)
-               for f in findings)
+    """Whether any finding may concern the claim. Leans toward yes: omitting a passed value is harmless."""
+    for f in findings:
+        if claim.quote and f.quote and (claim.quote in f.quote or f.quote in claim.quote):
+            return True
+        if claim.name and (claim.name in f.issue or claim.name in f.fix):
+            return True
+        if f.severity == "blocking":
+            for n in _NUMBER_RE.findall(f.quote):
+                try:
+                    if abs(float(n.replace(",", "")) - claim.value) <= 1e-9 * max(1.0, abs(claim.value)):
+                        return True
+                except ValueError:
+                    pass
+    return False
 
 
 def critique_prompt(task: str, rubric, result: GateResult, claims) -> str:
@@ -204,7 +221,7 @@ def critique_prompt(task: str, rubric, result: GateResult, claims) -> str:
     lines = [_describe(f) for f in blocking]
     if warnings:
         lines += ["Warnings:"] + [_describe(f) for f in warnings]
-    passed = [f"- {c.name} = {c.value:g} {c.unit}".rstrip()
+    passed = [f"- {c.name} = {_num(c.value)} {c.unit}".rstrip() + (f" ({c.condition})" if c.condition else "")
               for c in (claims or []) if not _has_finding(c, result.findings)]
     return CRITIQUE_PROMPT_TEMPLATE.format(
         task=task,

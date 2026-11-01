@@ -190,7 +190,6 @@ def test_roundtrip_and_list_content():
 
 def _jobs_reset():
     jobs._clear_for_tests()
-    jobs.set_output_dir(None)
     os.environ["BIOMENTIS_RUN_DIR"] = tempfile.mkdtemp(prefix="cr_runs_")
 
 
@@ -292,11 +291,42 @@ def test_main_journal_untouched():
 
 def test_output_dir_sidecar():
     _jobs_reset()
-    out = tempfile.mkdtemp(prefix="cr_out_")
-    jobs.set_output_dir(out)
+    o1, o2 = tempfile.mkdtemp(prefix="cr_out_"), tempfile.mkdtemp(prefix="cr_out_")
+    k1 = jobs.submit_review(_req(code="print(1)"), "m", _factory([]), output_dir=o1)
+    k2 = jobs.submit_review(_req(code="print(2)"), "m", _factory([]), output_dir=o2)
+    jobs._wait_for(k1, 10)
+    jobs._wait_for(k2, 10)
+    rows = lambda d: [json.loads(l)["key"] for l in open(os.path.join(d, "code_reviews.jsonl"), encoding="utf-8")]
+    _check("each in its own folder", rows(o1) == [k1] and rows(o2) == [k2], f"{rows(o1)} {rows(o2)}")
+
+
+def test_fallback_no_run_reloaded():
+    _jobs_reset()
     k = jobs.submit_review(_req(), "m", _factory([]))
     jobs._wait_for(k, 10)
-    _check("no-run review in output dir", os.path.exists(os.path.join(out, "code_reviews.jsonl")))
+    _check("fallback file name", os.path.exists(jobs.sidecar_path(None)) and jobs.sidecar_path(None).endswith("no-run.reviews.jsonl"))
+    jobs._clear_for_tests()
+    _check("fallback reloaded", jobs.load_saved_reviews() == 1 and jobs.review_status(k)[0] == "done")
+
+
+def test_submit_failure_becomes_error():
+    _jobs_reset()
+    real = jobs._executor
+
+    class Broken:
+        def submit(self, *a, **k):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    jobs._executor = Broken()
+    try:
+        k = jobs.submit_review(_req(), "m", _factory([]))
+    finally:
+        jobs._executor = real
+    st, rv = jobs.review_status(k)
+    _check("error, not stuck pending", st == "error" and "shutdown" in rv.error, st)
+    k2 = jobs.submit_review(_req(), "m", _factory([]))
+    jobs._wait_for(k2, 10)
+    _check("later submit runs", k2 == k and jobs.review_status(k)[0] == "done")
 
 
 def run_all() -> int:

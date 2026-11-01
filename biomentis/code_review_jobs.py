@@ -4,8 +4,9 @@ A two-worker pool runs `review_code`; a lock-guarded store, keyed by
 `review_key`, holds each review's state. Finished reviews are appended to a
 sidecar file (`<run_dir>/<run_id>.reviews.jsonl`) so they can be reloaded after
 a restart. The run's own journal (`<run_id>.jsonl`) is never written here.
-Reviews without a run go to `<output_dir>/code_reviews.jsonl`; the output
-folder is set with `set_output_dir` (it falls back to the run directory).
+Reviews without a run go to `<output_dir>/code_reviews.jsonl`, the output
+folder passed to `submit_review`; with none given they go to
+`<run_dir>/no-run.reviews.jsonl`, which `load_saved_reviews` reloads.
 """
 
 from __future__ import annotations
@@ -24,25 +25,21 @@ from biomentis.run_journal import default_run_dir
 MAX_WORKERS = 2
 SIDECAR_SUFFIX = ".reviews.jsonl"
 OUTPUT_SIDECAR = "code_reviews.jsonl"
+NO_RUN_SIDECAR = "no-run" + SIDECAR_SUFFIX
 
 _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="code-review")
 _lock = Lock()  # guards _store, _futures, _seq and sidecar appends
 _store: dict[str, dict] = {}  # key -> {status, review, run_id, block_index, seq}
 _futures: dict[str, Future] = {}
 _seq = 0
-_output_dir: str | None = None
 
 
-def set_output_dir(path: str | None) -> None:
-    """The session's output folder, where reviews that belong to no run are saved."""
-    global _output_dir
-    _output_dir = path
-
-
-def sidecar_path(run_id: str | None) -> str:
+def sidecar_path(run_id: str | None, output_dir: str | None = None) -> str:
     if run_id:
         return os.path.join(default_run_dir(), f"{run_id}{SIDECAR_SUFFIX}")
-    return os.path.join(_output_dir or default_run_dir(), OUTPUT_SIDECAR)
+    if output_dir:
+        return os.path.join(output_dir, OUTPUT_SIDECAR)
+    return os.path.join(default_run_dir(), NO_RUN_SIDECAR)
 
 
 def _next_seq() -> int:
@@ -51,9 +48,9 @@ def _next_seq() -> int:
     return _seq
 
 
-def _append_sidecar(key: str, req: CodeReviewRequest, review: CodeReview) -> None:
+def _append_sidecar(key: str, req: CodeReviewRequest, review: CodeReview, output_dir: str | None) -> None:
     row = {"key": key, "run_id": req.run_id, "block_index": req.block_index, "source": req.source, **review.to_dict()}
-    path = sidecar_path(req.run_id)
+    path = sidecar_path(req.run_id, output_dir)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
@@ -62,7 +59,7 @@ def _append_sidecar(key: str, req: CodeReviewRequest, review: CodeReview) -> Non
         pass  # the review is still in the store; saving is best-effort
 
 
-def _run(key: str, req: CodeReviewRequest, model: str, llm_factory: Callable[[str], Any]) -> None:
+def _run(key: str, req: CodeReviewRequest, model: str, llm_factory: Callable[[str], Any], output_dir: str | None) -> None:
     try:
         review = review_code(llm_factory(model), req, model)
     except Exception as e:  # llm_factory failed (no key, ...)
@@ -78,11 +75,16 @@ def _run(key: str, req: CodeReviewRequest, model: str, llm_factory: Callable[[st
             "seq": _next_seq(),
         }
         if not review.error:
-            _append_sidecar(key, req, review)
+            _append_sidecar(key, req, review, output_dir)
 
 
-def submit_review(req: CodeReviewRequest, model: str, llm_factory: Callable[[str], Any]) -> str:
-    """Queue a review and return its key. No-op if pending or done; an error is retried."""
+def submit_review(
+    req: CodeReviewRequest, model: str, llm_factory: Callable[[str], Any], *, output_dir: str | None = None
+) -> str:
+    """Queue a review and return its key. No-op if pending or done; an error is retried.
+
+    `output_dir` is the session's output folder, used only for reviews without a run.
+    """
     key = review_key(req, model)
     with _lock:
         entry = _store.get(key)
@@ -95,7 +97,16 @@ def submit_review(req: CodeReviewRequest, model: str, llm_factory: Callable[[str
             "block_index": req.block_index,
             "seq": _next_seq(),
         }
-        _futures[key] = _executor.submit(_run, key, req, model, llm_factory)
+        try:
+            _futures[key] = _executor.submit(_run, key, req, model, llm_factory, output_dir)
+        except Exception as e:  # e.g. pool shut down: do not leave the key pending
+            _store[key] = {
+                "status": "error",
+                "review": CodeReview(error=f"Could not queue the review: {e}", model=model),
+                "run_id": req.run_id,
+                "block_index": req.block_index,
+                "seq": _next_seq(),
+            }
     return key
 
 
@@ -121,10 +132,6 @@ def review_for_block(run_id: str, block_index: int) -> CodeReview | None:
 def load_saved_reviews(run_dir: str | None = None) -> int:
     """Fill the store from the sidecar files; returns how many reviews were loaded."""
     paths = sorted(glob.glob(os.path.join(run_dir or default_run_dir(), "*" + SIDECAR_SUFFIX)))
-    if _output_dir:
-        extra = os.path.join(_output_dir, OUTPUT_SIDECAR)
-        if os.path.isfile(extra):
-            paths.append(extra)
     count = 0
     for path in paths:
         try:

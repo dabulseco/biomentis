@@ -7,8 +7,15 @@ Run with:
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
+import threading
 from types import SimpleNamespace
+
+os.environ["BIOMENTIS_RUN_DIR"] = tempfile.mkdtemp(prefix="cr_runs_")
+
+from biomentis import code_review_jobs as jobs
 
 from biomentis.code_review import (
     CodeReview,
@@ -179,6 +186,117 @@ def test_roundtrip_and_list_content():
     _check("to_dict/from_dict", r2 == r)
     llm = FakeLLM([[{"type": "text", "text": _reply()}]])
     _check("list content joined", review_code(llm, REQ, "m").corrected_code != "")
+
+
+def _jobs_reset():
+    jobs._clear_for_tests()
+    jobs.set_output_dir(None)
+    os.environ["BIOMENTIS_RUN_DIR"] = tempfile.mkdtemp(prefix="cr_runs_")
+
+
+def _factory(calls: list, reply=None):
+    def make(model):
+        calls.append(model)
+        return FakeLLM([reply or _reply()])
+    return make
+
+
+def _req(**kw):
+    return CodeReviewRequest(code=kw.pop("code", "print(1)"), **kw)
+
+
+def test_submit_and_complete():
+    _jobs_reset()
+    key = jobs.submit_review(_req(), "m", _factory([]))
+    _check("pending or done", jobs.review_status(key)[0] in ("pending", "done"))
+    jobs._wait_for(key, 10)
+    st, rv = jobs.review_status(key)
+    _check("done with verdict", st == "done" and rv is not None and rv.verdict == json.loads(_reply())["verdict"], st)
+    _check("unknown key", jobs.review_status("nope") == ("none", None))
+
+
+def test_job_survives_without_caller():
+    _jobs_reset()
+    keys = []
+    t = threading.Thread(target=lambda: keys.append(jobs.submit_review(_req(), "m", _factory([]))))
+    t.start()
+    t.join()
+    jobs._wait_for(keys[0], 10)
+    _check("done after caller exited", jobs.review_status(keys[0])[0] == "done")
+
+
+def test_second_submit_reuses():
+    _jobs_reset()
+    calls: list = []
+    k1 = jobs.submit_review(_req(), "m", _factory(calls))
+    k2 = jobs.submit_review(_req(), "m", _factory(calls))
+    jobs._wait_for(k1, 10)
+    k3 = jobs.submit_review(_req(), "m", _factory(calls))
+    _check("same key", k1 == k2 == k3)
+    _check("factory called once", len(calls) == 1, str(calls))
+
+
+def test_error_then_resubmit():
+    _jobs_reset()
+    calls: list = []
+
+    def bad(model):
+        calls.append("bad")
+        raise RuntimeError("no key")
+
+    k = jobs.submit_review(_req(), "m", bad)
+    jobs._wait_for(k, 10)
+    st, rv = jobs.review_status(k)
+    _check("error status", st == "error" and rv is not None and "no key" in rv.error and rv.model == "m", st)
+    _check("errors not saved", not os.path.exists(jobs.sidecar_path(None)))
+    k2 = jobs.submit_review(_req(), "m", _factory(calls))
+    jobs._wait_for(k2, 10)
+    _check("resubmit ran again", jobs.review_status(k)[0] == "done" and len(calls) == 2, str(calls))
+
+
+def test_sidecar_written_and_reloaded():
+    _jobs_reset()
+    k = jobs.submit_review(_req(run_id="r1", block_index=2), "m", _factory([]))
+    jobs._wait_for(k, 10)
+    path = jobs.sidecar_path("r1")
+    lines = open(path, encoding="utf-8").read().strip().split("\n")
+    row = json.loads(lines[0])
+    _check("one line", len(lines) == 1)
+    _check("row fields", row["key"] == k and row["block_index"] == 2 and row["model"] == "m" and row["verdict"] and row["corrected_code"], str(row.keys()))
+    jobs._clear_for_tests()
+    _check("cleared", jobs.review_status(k)[0] == "none")
+    n = jobs.load_saved_reviews()
+    st, rv = jobs.review_status(k)
+    _check("reloaded", n == 1 and st == "done" and rv.corrected_code == row["corrected_code"], f"{n} {st}")
+    _check("block lookup after reload", jobs.review_for_block("r1", 2) is not None)
+
+
+def test_review_for_block():
+    _jobs_reset()
+    k1 = jobs.submit_review(_req(run_id="r1", block_index=0), "m1", _factory([], _reply()))
+    jobs._wait_for(k1, 10)
+    k2 = jobs.submit_review(_req(run_id="r1", block_index=0), "m2", _factory([]))
+    jobs._wait_for(k2, 10)
+    _check("later review wins", jobs.review_for_block("r1", 0).model == "m2")
+    _check("unknown block", jobs.review_for_block("r1", 5) is None and jobs.review_for_block("zz", 0) is None)
+
+
+def test_main_journal_untouched():
+    _jobs_reset()
+    k = jobs.submit_review(_req(run_id="r1", block_index=0), "m", _factory([]))
+    jobs._wait_for(k, 10)
+    run_dir = os.environ["BIOMENTIS_RUN_DIR"]
+    _check("journal not created", not os.path.exists(os.path.join(run_dir, "r1.jsonl")))
+    _check("sidecar exists", os.path.exists(os.path.join(run_dir, "r1.reviews.jsonl")))
+
+
+def test_output_dir_sidecar():
+    _jobs_reset()
+    out = tempfile.mkdtemp(prefix="cr_out_")
+    jobs.set_output_dir(out)
+    k = jobs.submit_review(_req(), "m", _factory([]))
+    jobs._wait_for(k, 10)
+    _check("no-run review in output dir", os.path.exists(os.path.join(out, "code_reviews.jsonl")))
 
 
 def run_all() -> int:

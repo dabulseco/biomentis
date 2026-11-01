@@ -962,6 +962,11 @@ class ExportEntry:
     also_consider: list[dict] | None = None
     # A figure's titles and file name, shown under it.
     caption: str | None = None
+    # Which journal run and block an agent code entry is (the keys a code
+    # review is stored under), and its finished review as `CodeReview.to_dict()`.
+    journal_run_id: str | None = None
+    block_index: int | None = None
+    code_review: dict | None = None
 
 
 def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
@@ -1193,10 +1198,38 @@ def _qa_extras_html(entry: ExportEntry) -> str:
     return "".join(parts)
 
 
+_REVIEW_EXTENSIONS = {"python": ".py", "bash": ".sh", "r": ".R"}
+
+
+def _code_review_html(review_dict: dict, language: str) -> str:
+    """The review block under a piece of code. Every model-written string is escaped."""
+    from biomentis.code_review import CodeReview
+    from biomentis.ui_code_review import VERDICT_LABELS
+
+    review = CodeReview.from_dict(review_dict)
+    label = VERDICT_LABELS.get(review.verdict, review.verdict or "Done")
+    parts = [f'<div class="border rounded p-3 mt-2 small"><div class="fw-semibold mb-1">Code review — {html.escape(label)}</div>']
+    if review.summary:
+        parts.append(f"<p>{html.escape(review.summary)}</p>")
+    for n, issue in enumerate(review.issues, 1):
+        where = f" (line {issue.line})" if issue.line is not None else ""
+        parts.append(f"<div class='mb-2'><strong>{n}. {html.escape(issue.severity.upper())} &middot; {html.escape(issue.kind)}{where}</strong>")
+        if issue.quote:
+            parts.append(f'<pre class="bg-body-secondary p-2 rounded mb-1"><code>{html.escape(issue.quote)}</code></pre>')
+        parts.append(f"<div>Problem: {html.escape(issue.problem)}</div><div>Fix: {html.escape(issue.fix)}</div></div>")
+    if review.corrected_code:
+        parts.append("<div class='text-muted'>The corrected script is saved beside this page as code_review_N.</div>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def _entry_body_html(entry: ExportEntry, assets: ExportAssets | None = None) -> str:
     if entry.kind == "code":
         language = entry.language or ""
-        return f'<pre class="bg-dark text-light p-3 rounded"><code class="language-{html.escape(language)}">{html.escape(entry.content)}</code></pre>'
+        code_html = f'<pre class="bg-dark text-light p-3 rounded"><code class="language-{html.escape(language)}">{html.escape(entry.content)}</code></pre>'
+        if entry.code_review:
+            code_html += _code_review_html(entry.code_review, language)
+        return code_html
     if entry.kind == "observation":
         return f'<pre class="bg-secondary-subtle p-3 rounded small text-wrap">{html.escape(entry.content)}</pre>'
     if entry.kind in ("image", "plot_withheld") and entry.file_path:
@@ -1326,6 +1359,22 @@ def render_transcript_html(
 """
 
 
+def _write_corrected_scripts(export_dir: str, entries: list[ExportEntry]) -> None:
+    """Save each reviewed block's corrected script as code_review_<n>.<ext>, n from 1 in export order."""
+    for old in os.listdir(export_dir):  # an earlier export of this folder may have had more
+        if re.fullmatch(r"code_review_\d+\.(py|sh|R)", old):
+            os.remove(os.path.join(export_dir, old))
+    n = 0
+    for entry in entries:
+        corrected = (entry.code_review or {}).get("corrected_code") if entry.kind == "code" else None
+        if not corrected:
+            continue
+        n += 1
+        ext = _REVIEW_EXTENSIONS.get((entry.language or "python").lower(), ".py")
+        with open(os.path.join(export_dir, f"code_review_{n}{ext}"), "w", encoding="utf-8") as f:
+            f.write(corrected)
+
+
 MAIN_EXPORT_TITLE = "Biomentis A1 Agent — Main Output"
 INNER_EXPORT_TITLE = "Biomentis Executor — Reasoning Log"
 
@@ -1358,6 +1407,7 @@ def export_run(
     stamp = output_stamp(export_dir)
     os.makedirs(export_dir, exist_ok=True)
     shutil.rmtree(os.path.join(export_dir, "figures"), ignore_errors=True)
+    _write_corrected_scripts(export_dir, [*main_entries, *inner_entries])
     assets = ExportAssets(export_dir)
     main_name, inner_name = f"biomentis_main_{stamp}.html", f"biomentis_inner_{stamp}.html"
     pages = (

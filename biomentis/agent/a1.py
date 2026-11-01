@@ -4123,6 +4123,16 @@ Each library is listed with its description to help you understand its functiona
             run = st.session_state.get("biomni_tutor_run") if panel == "inner" else None
             step_qa = (run or {}).get("step_qa") or {}
 
+            from biomentis.code_review_jobs import review_for_block
+
+            def _review_dict(e):
+                # Only agent code entries carry a locator; old runs simply have no review.
+                rid, idx = e.get("journal_run_id"), e.get("block_index")
+                if e.get("kind") != "code" or rid is None or idx is None:
+                    return None
+                review = review_for_block(rid, idx)
+                return review.to_dict() if review else None
+
             out: list[ExportEntry] = []
             for e in st.session_state.biomni_transcript:
                 if e["panel"] != panel:
@@ -4141,6 +4151,9 @@ Each library is listed with its description to help you understand its functiona
                         step_id=step_id,
                         run_id=run_id,
                         caption=e.get("caption"),
+                        journal_run_id=e.get("journal_run_id"),
+                        block_index=e.get("block_index"),
+                        code_review=_review_dict(e),
                     )
                 )
                 # "paused" is the last transcript entry generated for a

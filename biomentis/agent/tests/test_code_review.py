@@ -568,6 +568,47 @@ def test_review_client_carries_300s_timeout():
            llm._client._client.headers.get("authorization") == "Bearer test-key", "header missing")
 
 
+def _reviewed_entry(code, fixed, language="python", problem="Uses <b>x</b> before it is set"):
+    from biomentis.code_review import ReviewIssue
+    from biomentis.ui_core import ExportEntry
+
+    review = CodeReview(
+        verdict="run_with_fixes",
+        summary="Needs <script>alert(1)</script> fixes",
+        issues=[ReviewIssue(line=2, kind="bug", severity="high", quote="y = x", problem=problem, fix="Set x first")],
+        corrected_code=fixed,
+    )
+    return ExportEntry(role="assistant", kind="code", language=language, content=code, code_review=review.to_dict())
+
+
+def test_export_includes_review():
+    print("\n[export] review shown under the code")
+    from biomentis.ui_code_review import VERDICT_LABELS
+    from biomentis.ui_core import ExportEntry, render_transcript_html
+
+    page = render_transcript_html(
+        [_reviewed_entry("y = x", "x = 1\ny = x"), ExportEntry(role="assistant", kind="code", content="print(1)")], "T", "m"
+    )
+    _check("verdict label shown", "Code review — " + VERDICT_LABELS["run_with_fixes"] in page)
+    _check("issue problem shown (escaped)", "Uses &lt;b&gt;x&lt;/b&gt; before it is set" in page)
+    _check("model text escaped", "<script>alert(1)" not in page and "&lt;script&gt;" in page)
+    _check("only the reviewed code has a block", page.count("Code review — ") == 1)
+
+
+def test_export_writes_corrected_scripts():
+    print("\n[export] corrected scripts saved")
+    from biomentis.ui_core import ExportEntry, export_run
+
+    main = [_reviewed_entry("a", "a_fixed")]
+    inner = [ExportEntry(role="assistant", kind="code", content="plain"), _reviewed_entry("b", "echo fixed", language="bash")]
+    out = export_run(main, inner, "m", downloads_dir=tempfile.mkdtemp(prefix="cr_export_"))
+    read = lambda n: open(os.path.join(out, n), encoding="utf-8").read() if os.path.exists(os.path.join(out, n)) else None
+    _check("first script", read("code_review_1.py") == "a_fixed", str(os.listdir(out)))
+    _check("second script, by language", read("code_review_2.sh") == "echo fixed", str(os.listdir(out)))
+    export_run(main, [], "m", output_dir=out)
+    _check("re-export drops stale scripts", read("code_review_1.py") == "a_fixed" and read("code_review_2.sh") is None)
+
+
 def run_all() -> int:
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

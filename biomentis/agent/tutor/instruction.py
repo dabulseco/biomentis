@@ -268,9 +268,15 @@ _MAX_LOOK_FOR = 4
 # roughly twice as long as the technical one: it is asked for 4-8 sentences of
 # mechanism and interpretation, where the technical "why" is asked for 2-4
 # sentences of engineering rationale.
-_MAX_WHAT_CHARS = {MODE_TECHNICAL: 500, MODE_SCIENTIFIC: 700}
-_MAX_WHY_CHARS = {MODE_TECHNICAL: 1200, MODE_SCIENTIFIC: 2400}
-_MAX_IMPACT_CHARS = 1200
+#
+# These are safety rails against a runaway model, not style limits — the
+# prompt sets the length. They sit well above what the prompt asks for, because
+# three dense scientific sentences routinely pass 700 characters, and a card
+# clipped mid-word reads as broken. Anything over the rail is cut at a sentence
+# boundary by `_clip_display`, never mid-word.
+_MAX_WHAT_CHARS = {MODE_TECHNICAL: 900, MODE_SCIENTIFIC: 1200}
+_MAX_WHY_CHARS = {MODE_TECHNICAL: 2000, MODE_SCIENTIFIC: 3600}
+_MAX_IMPACT_CHARS = 1600
 _MAX_CITATIONS = 3
 _CITATION_SNIPPET_MAX = 200
 _CARD_ATTEMPTS = 2  # one retry for a failed or unusable card
@@ -282,6 +288,34 @@ def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 80] + "\n\n[…truncated for prompt size…]"
+
+
+_SENTENCE_END = re.compile(r"[.!?。](?:[\"')\]]*)(?=\s|$)")
+
+
+def _clip_display(text: str, max_chars: int) -> str:
+    """Shorten text the *student* will read (card fields the model wrote).
+
+    `_truncate` is for text going into a prompt: it cuts at a fixed offset and
+    says "truncated for prompt size", which is meaningless — and looks like a
+    bug — on a card. This keeps whole sentences: it cuts after the last
+    sentence that ends within `max_chars`. If no sentence ends in the back
+    half of the window, it falls back to the last word boundary plus "…".
+    """
+    if not text:
+        return ""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    window = text[:max_chars]
+    ends = [m.end() for m in _SENTENCE_END.finditer(window)]
+    if ends and ends[-1] >= max_chars // 2:
+        return window[: ends[-1]].rstrip()
+    cut = window[: max_chars - 1]
+    space = cut.rfind(" ")
+    if space >= max_chars // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:-—") + "…"
 
 
 # --- JSON extraction -----------------------------------------------------
@@ -355,7 +389,7 @@ def _coerce_str_list(value: Any, max_items: int) -> list[str]:
         items = [v for v in value if isinstance(v, str)]
     else:
         return []
-    return [_truncate(s, 200).strip() for s in items if s.strip()][:max_items]
+    return [_clip_display(s, 200) for s in items if s.strip()][:max_items]
 
 
 def _coerce_bloom(value: Any, fallback: str) -> str:
@@ -404,7 +438,7 @@ def _coerce_citations(
             {
                 "source": src,
                 "page": page,
-                "snippet": _truncate(snippet, _CITATION_SNIPPET_MAX).strip(),
+                "snippet": _clip_display(snippet, _CITATION_SNIPPET_MAX),
             }
         )
         if len(out) >= max_items:
@@ -424,19 +458,17 @@ def _coerce_section(value: Any, mode: str) -> CardSection:
     if isinstance(value, str):
         # Model collapsed the whole section into one blob — keep it as "what"
         # rather than throwing the text away.
-        return CardSection(what=_truncate(value, _MAX_WHAT_CHARS[mode]).strip())
+        return CardSection(what=_clip_display(value, _MAX_WHAT_CHARS[mode]))
     if not isinstance(value, dict):
         return CardSection()
     section = CardSection(
-        what=_truncate(str(value.get("what", "") or ""), _MAX_WHAT_CHARS[mode]).strip(),
-        why=_truncate(str(value.get("why", "") or ""), _MAX_WHY_CHARS[mode]).strip(),
+        what=_clip_display(str(value.get("what", "") or ""), _MAX_WHAT_CHARS[mode]),
+        why=_clip_display(str(value.get("why", "") or ""), _MAX_WHY_CHARS[mode]),
         prerequisites=_coerce_str_list(value.get("prerequisites"), _MAX_PREREQS),
         look_for=_coerce_str_list(value.get("look_for"), _MAX_LOOK_FOR),
     )
     if mode == MODE_SCIENTIFIC:
-        section.impact = _truncate(
-            str(value.get("impact", "") or ""), _MAX_IMPACT_CHARS
-        ).strip()
+        section.impact = _clip_display(str(value.get("impact", "") or ""), _MAX_IMPACT_CHARS)
     return section
 
 
@@ -545,7 +577,7 @@ def generate_roadmap(llm, task: str, plan_text: str) -> RoadmapCard:
     if data is None:
         return _build_soft_failure_roadmap()
 
-    overview = _truncate(str(data.get("overview", "") or ""), 600).strip()
+    overview = _clip_display(str(data.get("overview", "") or ""), 600)
     steps: list[dict] = []
     raw_steps = data.get("steps")
     if isinstance(raw_steps, list):
@@ -558,8 +590,8 @@ def generate_roadmap(llm, task: str, plan_text: str) -> RoadmapCard:
             why = item.get("why")
             steps.append(
                 {
-                    "title": _truncate(title.strip(), 160),
-                    "why": _truncate(why.strip(), 300) if isinstance(why, str) else "",
+                    "title": _clip_display(title, 160),
+                    "why": _clip_display(why, 300) if isinstance(why, str) else "",
                 }
             )
     return RoadmapCard(overview=overview, steps=steps)

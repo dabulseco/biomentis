@@ -4,15 +4,18 @@ An R&D tool over `biomentis.eval.repeat_runs.RepeatBatch`. With
 ``BIOMNI_REPEAT_RUNS=false`` (``default_config.repeat_runs``, read at render
 time) nothing is rendered: no toggle, no expander.
 
-* One batch per session, held in a module-level registry keyed by the
-  session id (like `run_worker._RUNS`), so it survives reruns and long pauses
-  with the browser open. It need not survive an app restart.
+* At most one active batch per process (the state it protects is per
+  process), held in a module-level registry keyed by the session id (like
+  `run_worker._RUNS`), so it survives reruns and long pauses with the browser
+  open. It need not survive an app restart. Finished entries are dropped
+  when a new batch starts.
 * The button starts a launcher thread: it builds the first agent, resolves
   the rubric once (the uploaded one, else drafted with the agent's
   ``gate_llm or llm``) and starts the batch. The script never blocks on it.
-* A batch and an interactive run never overlap: the button is disabled while
-  an interactive run is in flight, and `batch_active` lets the main page
-  disable Send while a batch is.
+* A batch and an interactive run never overlap, in any session: the button
+  is disabled (and the start re-checked) while any interactive run is in
+  flight, and `active_batch_session` lets the main page disable Send in
+  every session while a batch is active.
 * While a batch is active its progress area is a fragment that reruns every
   two seconds; with nothing running there is no auto-refresh.
 """
@@ -79,6 +82,18 @@ def batch_active(session: str) -> bool:
     return entry is not None and entry.active()
 
 
+def active_batch_session() -> str | None:
+    """The session whose batch is active, in any session of this process, or None.
+
+    The state a batch protects (the REPL namespace, working folder, captured
+    plots) is per process, so at most one batch runs per process, and no
+    interactive run in any session overlaps it.
+    """
+    with _LOCK:
+        entries = list(_BATCHES.items())
+    return next((key for key, entry in entries if entry.active()), None)
+
+
 def _session_key() -> str:
     # The same key `A1.launch_streamlit_demo` uses for its background run.
     if "biomni_session_key" not in st.session_state:
@@ -86,11 +101,21 @@ def _session_key() -> str:
     return st.session_state.biomni_session_key
 
 
-def _interactive_run_active(session: str) -> bool:
-    from biomentis.run_worker import get_run
+def blocked_reason(session: str, own_run_flag: bool = False) -> str:
+    """Why a batch cannot start now ("" when it can): a batch or an interactive run anywhere."""
+    from biomentis.run_worker import live_run_sessions
 
-    run = get_run(session)
-    return bool(st.session_state.get("biomni_run_active")) or (run is not None and run.is_alive())
+    busy = active_batch_session()
+    if busy == session:
+        return "A batch is running; wait for it to finish."
+    if busy is not None:
+        return "A repeat-run batch is running in another session; wait for it to finish."
+    live = live_run_sessions()
+    if own_run_flag or session in live:
+        return "An interactive run is in progress; start a batch when it has finished."
+    if live:
+        return "An interactive run is in progress in another session; start a batch when it has finished."
+    return ""
 
 
 # ------------------------------------------------------------- starting
@@ -128,20 +153,29 @@ def _launch(entry: RepeatEntry, upload: str | None, make_agent: Callable[[], Any
 
 
 def start_batch(session: str, prompt: str, k: int, upload: str | None, make_agent: Callable[[], Any],
-                settings_label: str, out_root: Path) -> RepeatEntry:
-    """Register a new batch for `session` and prepare and start it on a launcher thread."""
+                settings_label: str, out_root: Path) -> RepeatEntry | None:
+    """Register a new batch for `session` and prepare and start it on a launcher thread.
+
+    Returns None, starting nothing, while a batch is active in any session.
+    Finished entries (of every session) are dropped when a new batch starts.
+    """
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     out_dir = Path(out_root) / f"repeat-{stamp}-{prompt_sha(prompt)[:8]}"
     entry = RepeatEntry(prompt, k)
-    set_entry(session, entry)
+    with _LOCK:  # check and register at once: two sessions cannot both start
+        if any(e.active() for e in _BATCHES.values()):
+            return None
+        _BATCHES.clear()  # all finished
+        _BATCHES[session] = entry
     threading.Thread(target=_launch, args=(entry, upload, make_agent, settings_label, out_dir),
                      name="repeat-launcher", daemon=True).start()
     return entry
 
 
 def _on_start(session: str, upload: str | None, make_agent, settings_label: str, out_root: Path) -> None:
+    # Checked again here, not only by the disabled button: the page may be stale.
     prompt = (st.session_state.get("biomentis_repeat_prompt") or "").strip()
-    if not prompt or batch_active(session):
+    if not prompt or blocked_reason(session, bool(st.session_state.get("biomni_run_active"))):
         return
     k = int(st.session_state.get("biomentis_repeat_k") or 5)
     start_batch(session, prompt, k, upload, make_agent, settings_label, out_root)
@@ -240,14 +274,9 @@ def render_repeat_runs(make_agent: Callable[[], Any], rubric_upload: str | None,
                         help="How many runs of the prompt. They run one at a time.")
         entry = get_entry(session)
         active = entry is not None and entry.active()
-        if active:
-            reason = "A batch is running; wait for it to finish."
-        elif _interactive_run_active(session):
-            reason = "An interactive run is in progress; start a batch when it has finished."
-        elif not (prompt or "").strip():
+        reason = blocked_reason(session, bool(st.session_state.get("biomni_run_active")))
+        if not reason and not (prompt or "").strip():
             reason = "Type the prompt to repeat first."
-        else:
-            reason = ""
         st.button(
             BUTTON_LABEL,
             key="biomentis_repeat_start",

@@ -142,7 +142,8 @@ class RepeatBatch:
         self._turn_waiting: set[int] = set()  # continued runs waiting for the token
         self._snapshots: dict[int, dict] = {}  # namespaces of parked runs
         self._original_namespace: dict | None = None
-        self._agents: dict[int, Any] = {}
+        self._agents: dict[int, Any] = {}  # unfinished runs only: dropped once the outcome is in
+        self._launched: set[int] = set()  # runs whose agent was built
         self._outcomes: dict[int, RunOutcome] = {}
         self._done = threading.Event()
         self._started = False
@@ -186,7 +187,7 @@ class RepeatBatch:
         """One line per unfinished run: paused, continued and waiting its turn, running, not started."""
         paused = {i: c.pending for i, c in self.paused()}
         with self._lock:
-            started = set(self._agents)
+            started = set(self._launched)
             finished = set(self._outcomes)
             turn = set(self._turn_waiting)
         lines = []
@@ -253,6 +254,7 @@ class RepeatBatch:
                 continue
             with self._lock:
                 self._agents[index] = agent
+                self._launched.add(index)
             threading.Thread(target=self._run, args=(index, agent), name=f"repeat-run-{index}",
                              daemon=True).start()
 
@@ -287,6 +289,7 @@ class RepeatBatch:
     def _finish(self, outcome: RunOutcome) -> None:
         with self._lock:
             self._outcomes[outcome.index] = outcome
+            self._agents.pop(outcome.index, None)  # the outcome has all the report needs
             all_done = len(self._outcomes) == self.k
         with self._write_lock:
             if self._done.is_set():

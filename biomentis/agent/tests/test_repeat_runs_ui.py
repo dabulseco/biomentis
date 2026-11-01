@@ -12,10 +12,18 @@ What these tests pin down:
       run's control. While the batch is active the button is disabled, and
       the interactive Send button is disabled too.
   (d) An interactive run in flight disables the button.
+  (c2) A batch in another session (the protected state is per process):
+      the button and Send are disabled here too, with "in another session"
+      captions, and `start_batch` refuses.
+  (c3) An interactive run in another session disables the button.
   (e) A real `RepeatBatch` over stub agents, started from the button: the
       rubric (an uploaded canonical one, so no model) is shown, the paused
       run gets its panel, Continue lets it finish, the progress table has
-      run #, status and rounds, and the report can be downloaded.
+      run #, status and rounds, the report can be downloaded, and the
+      finished batch holds no agents.
+  (f) The start is re-checked server-side: a click on a stale, enabled
+      button while another session's interactive run is live starts nothing.
+  (g) Starting a batch drops finished entries of every session.
 
 Run with:
     python -m biomentis.agent.tests.test_repeat_runs_ui
@@ -182,6 +190,47 @@ def test_real_app() -> None:
                    bool(frames) and list(frames[0]["Status"])[1] == "continued, waiting its turn",
                    str(frames[0] if frames else None))
 
+        print("\n(c2) a batch in another session: the button and Send are disabled here too")
+        ui_repeat.clear_entry(SESSION)
+        other = _StubBatch()
+        ui_repeat.set_entry("repeat-ui-other-session", ui_repeat.RepeatEntry("Another prompt", 2, batch=other))
+        try:
+            at.run()
+            _check("no exception", not at.exception, str(at.exception))
+            buttons = _buttons(at, BUTTON)
+            _check("the button is disabled", bool(buttons) and buttons[0].disabled)
+            send = [b for b in at.button if b.label == "Send"]
+            _check("Send is disabled", bool(send) and send[0].disabled)
+            captions = " ".join(c.value for c in at.caption)
+            _check("captions say: in another session",
+                   "A repeat-run batch is running in another session; wait" in captions
+                   and "A repeat-run batch is running in another session; Send" in captions, captions[:800])
+            _check("no pause panel for another session's run",
+                   not [b for b in at.button if b.key and b.key.startswith("repeat2_")])
+            _check("start_batch refuses while another session's batch is active",
+                   ui_repeat.start_batch(SESSION, "p", 1, None, lambda: None, "", Path(tempfile.gettempdir()))
+                   is None and ui_repeat.get_entry(SESSION) is None)
+        finally:
+            ui_repeat.clear_entry("repeat-ui-other-session")
+
+        print("\n(c3) an interactive run in another session disables the button")
+        from biomentis import run_worker
+
+        with run_worker._REGISTRY_LOCK:
+            run_worker._RUNS["repeat-ui-other-tab"] = run_worker.BackgroundRun("elsewhere")
+        try:
+            at.run()
+            buttons = _buttons(at, BUTTON)
+            _check("the button is disabled", bool(buttons) and buttons[0].disabled)
+            captions = " ".join(c.value for c in at.caption)
+            _check("caption: in another session",
+                   "An interactive run is in progress in another session" in captions, captions[:800])
+            send = [b for b in at.button if b.label == "Send"]
+            _check("Send in this session is not blocked by it", bool(send) and not send[0].disabled)
+        finally:
+            with run_worker._REGISTRY_LOCK:
+                run_worker._RUNS.pop("repeat-ui-other-tab", None)
+
         print("\n(d) an interactive run in flight disables the button")
         ui_repeat.clear_entry(SESSION)
         at.session_state["biomni_run_active"] = True
@@ -278,12 +327,57 @@ def test_real_batch() -> None:
         captions = " ".join(c.value for c in at.caption)
         _check("the report path shown", report is not None and str(report) in captions, captions[:600])
         _check("the button is enabled again", not _buttons(at, BUTTON)[0].disabled)
+        _check("the finished batch holds no agents", entry.batch._agents == {}, str(entry.batch._agents))
+
+        print("\n(f) the start is re-checked server-side: a live interactive run in another session")
+        from biomentis import run_worker
+
+        live = run_worker.BackgroundRun("an interactive run elsewhere")  # not started: is_alive() is True
+        button = _buttons(at, BUTTON)[0]
+        _check("the page still shows the button enabled (stale)", not button.disabled)
+        with run_worker._REGISTRY_LOCK:
+            run_worker._RUNS["repeat-ui-other-tab"] = live
+        try:
+            button.click().run()
+            _check("no exception", not at.exception, str(at.exception))
+            _check("no new batch started", ui_repeat.get_entry(session) is entry, "a new entry was registered")
+            captions = " ".join(c.value for c in at.caption)
+            _check("the caption names the other session",
+                   "An interactive run is in progress in another session" in captions, captions[:600])
+        finally:
+            with run_worker._REGISTRY_LOCK:
+                run_worker._RUNS.pop("repeat-ui-other-tab", None)
     finally:
         ui_repeat.clear_entry(session)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_prune_finished() -> None:
+    print("\n(g) a new batch drops finished entries of every session")
+    from biomentis import ui_repeat
+
+    done = _StubBatch()
+    done.done = lambda: True
+    ui_repeat.set_entry("repeat-ui-finished", ui_repeat.RepeatEntry("old", 2, batch=done))
+
+    def broken():
+        raise RuntimeError("no agent in this test")
+
+    tmp = tempfile.mkdtemp(prefix="biomni_repeat_prune_")
+    try:
+        entry = ui_repeat.start_batch("repeat-ui-new", "p", 1, None, broken, "", Path(tmp))
+        _check("the new batch is registered", entry is not None and ui_repeat.get_entry("repeat-ui-new") is entry)
+        _check("the finished entry is gone", ui_repeat.get_entry("repeat-ui-finished") is None)
+        _check("the failed start ends (bounded wait)", _wait_until(lambda: not entry.active(), 5), entry.error)
+        _check("with its error kept", "no agent in this test" in entry.error, entry.error)
+    finally:
+        ui_repeat.clear_entry("repeat-ui-new")
+        ui_repeat.clear_entry("repeat-ui-finished")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def run_all() -> int:
+    test_prune_finished()
     test_real_batch()
     test_real_app()
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")

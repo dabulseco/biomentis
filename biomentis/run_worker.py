@@ -50,6 +50,7 @@ __all__ = [
     "background_runs_enabled",
     "clear_run",
     "get_run",
+    "live_run_sessions",
     "start_run",
 ]
 
@@ -244,6 +245,13 @@ def start_run(
 def get_run(session_key: str) -> BackgroundRun | None:
     with _REGISTRY_LOCK:
         return _RUNS.get(session_key)
+
+
+def live_run_sessions() -> list[str]:
+    """Session keys of every run still in flight, in any session of this process."""
+    with _REGISTRY_LOCK:
+        runs = list(_RUNS.items())
+    return [key for key, run in runs if run.is_alive()]
 
 
 def clear_run(session_key: str) -> None:

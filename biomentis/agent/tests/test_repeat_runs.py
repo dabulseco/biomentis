@@ -179,6 +179,8 @@ def test_batch_and_report():
     _check("finished runs are 1 and 3", [o.index for o in batch.outcomes()] == [1, 3],
            str([o.index for o in batch.outcomes()]))
     _check("not done while a run is paused", not batch.done())
+    _check("finished runs' agents are dropped, the paused one kept", sorted(batch._agents) == [2],
+           str(sorted(batch._agents)))
 
     reports = out / "reports"
     sha8 = prompt_sha(PROMPT)[:8]
@@ -195,6 +197,7 @@ def test_batch_and_report():
     control.decide("stop")
     finished = batch.wait(timeout=10)
     _check("batch finishes after Stop on Run 2", finished and batch.done())
+    _check("a finished batch holds no agents", batch._agents == {}, str(batch._agents))
     _check("Stop ends the paused run within 1 s", time.monotonic() - stopped_at < 1.0,
            f"{time.monotonic() - stopped_at:.2f} s")
     _check("three outcomes in order", [o.index for o in batch.outcomes()] == [1, 2, 3],

@@ -4600,12 +4600,15 @@ Each library is listed with its description to help you understand its functiona
         st.session_state.setdefault("biomni_prompt_draft", "")
         # A repeat-run batch (sidebar R&D tool) shares the process state a
         # run's code steps use, so the two never overlap: Send waits for it.
+        # The state is per process, so a batch in any session counts.
         try:
-            from biomentis.ui_repeat import batch_active
+            from biomentis.ui_repeat import active_batch_session
 
-            _batch_busy = batch_active(_session_key)
-        except Exception:
-            _batch_busy = False
+            _batch_session = active_batch_session()
+        except Exception as e:
+            print(f"repeat-run batch check failed, Send left enabled: {type(e).__name__}: {e}")
+            _batch_session = None
+        _batch_busy = _batch_session is not None
         with st.form(key="biomni_prompt_form", clear_on_submit=True):
             uploaded_files = st.file_uploader(
                 "Attach files (optional)",
@@ -4637,7 +4640,11 @@ Each library is listed with its description to help you understand its functiona
                 "Send", use_container_width=False, on_click=_focus_executor_for_new_run, disabled=_batch_busy
             )
             if _batch_busy:
-                st.caption("A repeat-run batch is running; Send is available again when it has finished.")
+                st.caption(
+                    "A repeat-run batch is running"
+                    + ("" if _batch_session == _session_key else " in another session")
+                    + "; Send is available again when it has finished."
+                )
         prompt = prompt_text.strip() if submitted else ""
         st.session_state.biomni_prompt_draft = "" if submitted else prompt_text
 

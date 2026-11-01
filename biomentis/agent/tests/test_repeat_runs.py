@@ -20,6 +20,11 @@ What these tests pin down:
   6.  The CLI's pause prompt re-asks on unrecognised input and passes
       Continue or Stop to the run
   7.  With BIOMNI_REPEAT_RUNS=false the CLI exits with code 2 and the message
+  8.  One run works at a time: a continued run waits its turn (and is
+      labelled so) while the next run works; each run has its own REPL
+      namespace, kept across its pause; the pre-batch namespace comes back
+  9.  A run that raises is recorded as failed and the batch goes on; a final
+      report that cannot be written still ends the batch, with the error kept
 
 Run with:
     python -m biomentis.agent.tests.test_repeat_runs
@@ -90,7 +95,10 @@ class StubAgent:
         self.round_control.reset()
         self.run_gate_results = []
         script = self.script
+        if script["kind"] == "raise":
+            raise RuntimeError("boom")
         if script["kind"] == "pass":
+            script.get("work", lambda agent: None)(self)
             self.run_gate_results = [
                 GateResult(0, [Finding("figure", "warning", "Figure 2", "Figure 2 is cited but was not drawn")], "ok"),
             ]
@@ -102,9 +110,12 @@ class StubAgent:
         blocking = Finding("arithmetic", "blocking", "3 × 12 = 38", "3 × 12 is 36, not 38", key="arith-1")
         self.run_gate_results = [GateResult(r, [blocking], "off") for r in range(4)]
         self._gate_prev_claims = script["claims"]
+        script.get("before", lambda agent: None)(self)
         self.round_control.request(round_number=4, findings=[blocking], reason="round")
         choice = self.round_control.wait(poll_seconds=0.05)
         stopped = choice == "stop"
+        if not stopped:
+            script.get("after", lambda agent: None)(self)
         self.final_status = final_label(self.run_gate_results[-1], stopped, 3)
         return [], "<solution>Draft with 3 × 12 = 38 libraries</solution>"
 
@@ -129,8 +140,8 @@ SCRIPTS = [
 ]
 
 
-def _factory(made: list):
-    scripts = iter(SCRIPTS)
+def _factory(made: list, scripts=None):
+    scripts = iter(SCRIPTS if scripts is None else scripts)
 
     def make():
         agent = StubAgent(next(scripts))
@@ -180,9 +191,12 @@ def test_batch_and_report():
            partial[:400])
 
     _, control = batch.paused()[0]
+    stopped_at = time.monotonic()
     control.decide("stop")
     finished = batch.wait(timeout=10)
     _check("batch finishes after Stop on Run 2", finished and batch.done())
+    _check("Stop ends the paused run within 1 s", time.monotonic() - stopped_at < 1.0,
+           f"{time.monotonic() - stopped_at:.2f} s")
     _check("three outcomes in order", [o.index for o in batch.outcomes()] == [1, 2, 3],
            str([o.index for o in batch.outcomes()]))
 
@@ -221,7 +235,7 @@ def test_batch_and_report():
            len(made) == 3 and all(a.preset_rubric is RUBRIC for a in made),
            str([id(a.preset_rubric) for a in made]))
     _check("each run has its own output folder under the batch folder",
-           [Path(a.output_dir) for a in made] == [out / "run-01", out / "run-02", out / "run-03"],
+           [Path(a.output_dir) for a in made] == [out.resolve() / f"run-0{i}" for i in (1, 2, 3)],
            str([a.output_dir for a in made]))
     _check("rubric saved once in the batch folder", (out / f"rubric-{sha8}.md").exists(),
            str(list(out.glob("*"))))
@@ -290,8 +304,115 @@ def test_cli_disabled():
            err.getvalue() + outbuf.getvalue())
 
 
+def _ns() -> dict:
+    from biomentis.tool.support_tools import _persistent_namespace
+
+    return _persistent_namespace
+
+
+def test_one_run_at_a_time():
+    print("\n[8] execution token: a continued run waits its turn; REPL namespace per run")
+    from biomentis.eval.repeat_runs import RepeatBatch
+
+    intervals: dict[str, tuple[float, float]] = {}
+    seen: dict[str, object] = {}
+    run3_working = threading.Event()
+
+    def work(name: str, seconds: float, setup=None):
+        def run(agent):
+            start = time.monotonic()
+            if setup:
+                setup()
+            if name == "run3":
+                run3_working.set()
+            time.sleep(seconds)
+            intervals[name] = (start, time.monotonic())
+        return run
+
+    def run1_setup():
+        _ns()["run1_secret"] = 1
+
+    def run2_before(agent):
+        seen["run2_saw_run1"] = "run1_secret" in _ns()
+        _ns()["run2_var"] = 2
+
+    def run2_after_setup():
+        seen["run2_kept_own"] = _ns().get("run2_var") == 2
+        seen["run2_saw_run3"] = "run3_var" in _ns()
+
+    def run3_setup():
+        _ns()["run3_var"] = 3
+
+    scripts = [
+        {"kind": "pass", "answer": "A", "claims": [], "coverage": [], "work": work("run1", 0.05, run1_setup)},
+        {"kind": "pause", "claims": [], "before": run2_before, "after": work("run2", 0.3, run2_after_setup)},
+        {"kind": "pass", "answer": "C", "claims": [], "coverage": [], "work": work("run3", 0.6, run3_setup)},
+    ]
+    _ns()["pre_batch"] = "kept"
+    out = Path(tempfile.mkdtemp(prefix="repeat-token-"))
+    batch = RepeatBatch(PROMPT, 3, RUBRIC, _factory([], scripts), out)
+    batch.start()
+    _check("Run 3 starts while Run 2 is paused", run3_working.wait(10) and [i for i, _ in batch.paused()] == [2],
+           str(batch.paused()))
+    batch.paused()[0][1].decide("continue")
+    waiting_turn = _until(lambda: "Run 2: continued, waiting its turn" in batch.waiting(), timeout=2)
+    _check("continued Run 2 is labelled 'continued, waiting its turn' while Run 3 works",
+           waiting_turn and "run3" not in intervals, str(batch.waiting()))
+    _check("batch finishes", batch.wait(10))
+    _check("Run 2's post-pause work and Run 3's work never overlap",
+           "run2" in intervals and "run3" in intervals
+           and (intervals["run3"][1] <= intervals["run2"][0] or intervals["run2"][1] <= intervals["run3"][0]),
+           str(intervals))
+    _check("Run 1's work ends before Run 3's starts", intervals["run1"][1] <= intervals["run3"][0], str(intervals))
+    _check("Run 2 does not see Run 1's variables", seen.get("run2_saw_run1") is False, str(seen))
+    _check("Run 2 gets its own namespace back after Continue", seen.get("run2_kept_own") is True, str(seen))
+    _check("Run 2 does not see Run 3's variables after Continue", seen.get("run2_saw_run3") is False, str(seen))
+    ns = _ns()
+    _check("the pre-batch namespace is restored when the batch finishes",
+           ns.get("pre_batch") == "kept" and not {"run1_secret", "run2_var", "run3_var"} & set(ns),
+           str(sorted(k for k in ns if not k.startswith("__"))))
+    ns.pop("pre_batch", None)
+
+    rel = RepeatBatch(PROMPT, 1, RUBRIC, _factory([], scripts), Path("relative-repeat-dir"))
+    _check("the batch folder is absolute", rel.out_dir.is_absolute(), str(rel.out_dir))
+
+
+def test_failures():
+    print("\n[9] a run that raises, and a final report that cannot be written")
+    import biomentis.eval.repeat_runs as rr
+
+    scripts = [{"kind": "raise"},
+               {"kind": "pass", "answer": "B", "claims": [], "coverage": []}]
+    batch = rr.RepeatBatch(PROMPT, 2, RUBRIC, _factory([], scripts), Path(tempfile.mkdtemp(prefix="repeat-raise-")))
+    batch.start()
+    _check("batch finishes after a run raises", batch.wait(10))
+    statuses = [o.final_status for o in batch.outcomes()]
+    _check("the raising run is recorded as failed", statuses[:1] == ["⚠️ Run failed (RuntimeError: boom)"], str(statuses))
+    _check("the next run still runs", len(statuses) == 2 and statuses[1].startswith("✅"), str(statuses))
+    _check("the final report is written", batch.report is not None and batch.report.exists(), str(batch.report))
+
+    real = rr.write_report
+
+    def broken(*args, partial=False, **kwargs):
+        if not partial:
+            raise OSError("disk full")
+        return real(*args, partial=partial, **kwargs)
+
+    rr.write_report = broken
+    try:
+        batch = rr.RepeatBatch(PROMPT, 1, RUBRIC, _factory([], scripts[1:]),
+                               Path(tempfile.mkdtemp(prefix="repeat-broken-")))
+        batch.start()
+        finished = batch.wait(5)
+    finally:
+        rr.write_report = real
+    _check("done() is set even when the final report fails", finished and batch.done())
+    _check("the report error is kept", batch.report_error == "OSError: disk full", batch.report_error)
+
+
 def main() -> int:
-    for test in (test_batch_and_report, test_cli_pause_prompt, test_cli_disabled):
+    for test in (test_batch_and_report, test_cli_pause_prompt, test_cli_disabled, test_one_run_at_a_time,
+                 test_failures):
         try:
             test()
         except Exception as exc:  # a crash is a failure, not an abort

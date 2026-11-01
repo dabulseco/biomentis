@@ -8,21 +8,31 @@ How a batch runs:
 * One rubric for all runs: every agent gets the identical ``Rubric`` object
   as ``agent.preset_rubric``, so its ``draft_rubric`` node uses it as is. The
   rubric is saved once in the batch folder.
-* Every run gets a fresh agent from ``agent_factory`` and its own output
-  folder, ``<out_dir>/run-01/``, ``run-02/``…
-* Each run executes ``agent.go(prompt)`` on its own thread. A supervisor
-  thread starts Run 1, and starts the next run once every started run has
-  finished or is paused (``round_control.pending`` set). A paused run waits
-  on its thread for the user's Continue or Stop for as long as it takes; the
-  batch never times it out.
+* Every run gets a fresh agent from ``agent_factory`` and its own absolute
+  output folder, ``<out_dir>/run-01/``, ``run-02/``…
+* Each run executes ``agent.go(prompt)`` on its own thread, but only one run
+  executes at a time: the batch owns an execution token (a lock). A run holds
+  it while it works and gives it up only while paused. Each agent gets a
+  ``RoundControl`` subclass whose ``wait`` releases the token before blocking
+  and, on Continue, takes it back (the run is "continued, waiting its turn"
+  until then). On Stop it does not take it back, so a stopped run ends at once.
+  The supervisor thread takes the token before starting each run, so the next
+  run starts when the previous one has finished or paused.
+  The token protects the process-wide state A1's code steps use: the working
+  folder (``workspace.working_in``), ``structures`` current run ID, captured
+  plots and the shared REPL namespace.
+* REPL namespace: a fresh run starts with an empty namespace; a run that
+  pauses keeps a (shallow) copy of its namespace, restored when it resumes; the
+  namespace from before the batch is restored when the batch finishes. On each
+  hand-over the captured plots are cleared and the structures run ID reset.
+* A paused run waits on its thread for the user's Continue or Stop for as long
+  as it takes; the batch never times it out.
 * Each time a run finishes and others are not, the partial report
   (``reports/<date>-repeat-<sha8>-partial.md``) is rewritten. When the last
   run finishes, the final report (``reports/<date>-repeat-<sha8>.md``) is
-  written, the partial report is removed, and ``done()`` becomes true.
-
-Note: a run continued after a pause runs alongside whichever run started
-meanwhile. A1's code steps change the process-wide working folder, so two
-runs executing code at the same moment can see each other's folder.
+  written, the partial report is removed, and ``done()`` becomes true. If
+  writing the final report fails, ``done()`` still becomes true and the error
+  is kept in ``report_error``.
 
 CLI::
 
@@ -34,7 +44,6 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
-import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -53,7 +62,6 @@ from biomentis.eval.repeat_report import (
 __all__ = ["RepeatBatch", "RunOutcome", "write_report", "run_pause_loop", "main"]
 
 DISABLED_MESSAGE = "Repeat runs are disabled (BIOMNI_REPEAT_RUNS=false)."
-POLL_SECONDS = 0.1
 
 
 def _telemetry(agent: Any) -> str:
@@ -69,6 +77,38 @@ def _telemetry(agent: Any) -> str:
         return format_quality_summary(run_evidence(messages), run_settings(agent), gate=gate_summary(agent))
     except Exception as exc:  # telemetry must never lose a run's outcome
         return f"(telemetry unavailable: {type(exc).__name__}: {exc})"
+
+
+def _repl_namespace() -> dict:
+    """The REPL namespace A1's code steps run in (one dict for the process)."""
+    from biomentis.tool.support_tools import _persistent_namespace
+
+    return _persistent_namespace
+
+
+def _reset_step_state() -> None:
+    """Clear the per-step process state a run hands over: captured plots, structures run ID."""
+    from biomentis.structures import set_current_run_id
+    from biomentis.tool.support_tools import clear_captured_plots
+
+    clear_captured_plots()
+    set_current_run_id(None)
+
+
+class _BatchRoundControl(RoundControl):
+    """A run's pause control that gives the batch's execution token up while paused."""
+
+    def __init__(self, batch: RepeatBatch, index: int) -> None:
+        super().__init__()
+        self._batch = batch
+        self._index = index
+
+    def wait(self, poll_seconds: float = 0.5) -> str:
+        self._batch._park(self._index)
+        choice = super().wait(poll_seconds)
+        if choice == "continue":
+            self._batch._resume(self._index)
+        return choice  # on "stop" the token is not taken back: the run ends at once
 
 
 class RepeatBatch:
@@ -89,13 +129,19 @@ class RepeatBatch:
         self.k = k
         self.rubric = rubric
         self.agent_factory = agent_factory
-        self.out_dir = Path(out_dir)
+        self.out_dir = Path(out_dir).resolve()
         self.settings = settings
         self.date = datetime.now().strftime("%Y-%m-%d")
         self.sha = rubric.prompt_sha or prompt_sha(prompt)
         self.report: Path | None = None  # the final report, once written
+        self.report_error: str = ""  # why the final report could not be written
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._token = threading.Lock()  # the execution token: one run works at a time
+        self._holder: int | None = None  # the run holding the token
+        self._turn_waiting: set[int] = set()  # continued runs waiting for the token
+        self._snapshots: dict[int, dict] = {}  # namespaces of parked runs
+        self._original_namespace: dict | None = None
         self._agents: dict[int, Any] = {}
         self._outcomes: dict[int, RunOutcome] = {}
         self._done = threading.Event()
@@ -109,6 +155,7 @@ class RepeatBatch:
             raise RuntimeError("the batch has already started")
         self._started = True
         save_rubric(self.rubric, self.out_dir)
+        self._original_namespace = dict(_repl_namespace())
         threading.Thread(target=self._supervise, name="repeat-supervisor", daemon=True).start()
 
     def paused(self) -> list[tuple[int, RoundControl]]:
@@ -123,7 +170,7 @@ class RepeatBatch:
         return found
 
     def done(self) -> bool:
-        """True once all K runs have finished and the final report is written."""
+        """True once all K runs have finished and the final report is written (or failed)."""
         return self._done.is_set()
 
     def wait(self, timeout: float | None = None) -> bool:
@@ -135,34 +182,83 @@ class RepeatBatch:
         with self._lock:
             return [self._outcomes[i] for i in sorted(self._outcomes)]
 
-    # ----------------------------------------------------------- running
-
-    def _idle(self) -> bool:
-        """Every started run has finished or is paused."""
+    def waiting(self) -> list[str]:
+        """One line per unfinished run: paused, continued and waiting its turn, running, not started."""
+        paused = {i: c.pending for i, c in self.paused()}
         with self._lock:
-            running = [a for i, a in self._agents.items() if i not in self._outcomes]
-        return all(getattr(getattr(a, "round_control", None), "pending", None) is not None for a in running)
+            started = set(self._agents)
+            finished = set(self._outcomes)
+            turn = set(self._turn_waiting)
+        lines = []
+        for i in range(1, self.k + 1):
+            if i in finished:
+                continue
+            if paused.get(i):
+                lines.append(f"Run {i}: paused at round {paused[i]['round']}, waiting for Continue or Stop")
+            elif i in turn:
+                lines.append(f"Run {i}: continued, waiting its turn")
+            elif i in started:
+                lines.append(f"Run {i}: running")
+            else:
+                lines.append(f"Run {i}: not started")
+        return lines
+
+    # ---------------------------------------------------- execution token
+
+    def _take_token(self, index: int, namespace: dict | None) -> None:
+        """Block for the token, then set the process state up for run `index`."""
+        self._token.acquire()
+        with self._lock:
+            self._holder = index
+            self._turn_waiting.discard(index)
+        ns = _repl_namespace()
+        ns.clear()
+        ns.update(namespace or {})
+        _reset_step_state()
+
+    def _give_token(self, index: int) -> None:
+        with self._lock:
+            if self._holder != index:
+                return
+            self._holder = None
+        self._token.release()
+
+    def _park(self, index: int) -> None:
+        """Run `index` is pausing: keep its namespace and give the token up."""
+        with self._lock:
+            holding = self._holder == index
+        if holding:
+            self._snapshots[index] = dict(_repl_namespace())
+            self._give_token(index)
+
+    def _resume(self, index: int) -> None:
+        """Run `index` was continued: wait its turn, then restore its namespace."""
+        with self._lock:
+            self._turn_waiting.add(index)
+        self._take_token(index, self._snapshots.pop(index, None))
+
+    # ----------------------------------------------------------- running
 
     def _supervise(self) -> None:
         for index in range(1, self.k + 1):
+            self._take_token(index, None)  # a fresh run starts with an empty namespace
             try:
                 agent = self.agent_factory()
                 agent.preset_rubric = self.rubric
                 agent.output_dir = str(self.out_dir / f"run-{index:02d}")
+                agent.round_control = _BatchRoundControl(self, index)  # reset_gate keeps it
             except Exception as exc:
-                self._finish(self._failed(index, f"run-{index:02d}", exc))
+                self._give_token(index)
+                self._finish(self._failed(index, exc))
                 continue
             with self._lock:
                 self._agents[index] = agent
             threading.Thread(target=self._run, args=(index, agent), name=f"repeat-run-{index}",
                              daemon=True).start()
-            if index < self.k:
-                time.sleep(POLL_SECONDS)  # let go() reset the run's state before it is polled
-                while not self._idle():
-                    time.sleep(POLL_SECONDS)
 
-    def _failed(self, index: int, run_id: str, exc: BaseException) -> RunOutcome:
-        return RunOutcome(index=index, run_id=run_id, final_status=f"⚠️ Run failed ({type(exc).__name__}: {exc})",
+    def _failed(self, index: int, exc: BaseException) -> RunOutcome:
+        return RunOutcome(index=index, run_id=f"run-{index:02d}",
+                          final_status=f"⚠️ Run failed ({type(exc).__name__}: {exc})",
                           rounds_used=0, gate_results=[], final_answer="", telemetry="")
 
     def _run(self, index: int, agent: Any) -> None:
@@ -181,26 +277,12 @@ class RepeatBatch:
                 claims=list(getattr(agent, "_gate_prev_claims", None) or []),
             )
         except Exception as exc:  # one broken run must not stop the batch
-            outcome = self._failed(index, f"run-{index:02d}", exc)
+            outcome = self._failed(index, exc)
             outcome.gate_results = list(getattr(agent, "run_gate_results", None) or [])
-        self._finish(outcome)
-
-    def _waiting(self) -> list[str]:
-        paused = {i: c.pending for i, c in self.paused()}
-        with self._lock:
-            started = set(self._agents)
-            finished = set(self._outcomes)
-        lines = []
-        for i in range(1, self.k + 1):
-            if i in finished:
-                continue
-            if i in paused and paused[i]:
-                lines.append(f"Run {i}: paused at round {paused[i]['round']}, waiting for Continue or Stop")
-            elif i in started:
-                lines.append(f"Run {i}: running")
-            else:
-                lines.append(f"Run {i}: not started")
-        return lines
+        try:
+            self._finish(outcome)
+        finally:
+            self._give_token(index)
 
     def _finish(self, outcome: RunOutcome) -> None:
         with self._lock:
@@ -210,14 +292,25 @@ class RepeatBatch:
             if self._done.is_set():
                 return
             outcomes = self.outcomes()
-            if all_done:
+            if not all_done:
+                try:
+                    write_report(self.prompt, self.rubric, self.settings, outcomes, self.out_dir, partial=True,
+                                 waiting=self.waiting(), date=self.date, total_runs=self.k)
+                except Exception as exc:  # a partial report is a convenience; the runs go on
+                    print(f"repeat runs: could not write the partial report: {type(exc).__name__}: {exc}")
+                return
+            try:
                 self.report = write_report(self.prompt, self.rubric, self.settings, outcomes, self.out_dir,
                                            date=self.date, total_runs=self.k)
                 report_path(self.out_dir, self.sha, self.date, partial=True).unlink(missing_ok=True)
+            except Exception as exc:
+                self.report_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                if self._original_namespace is not None:
+                    ns = _repl_namespace()
+                    ns.clear()
+                    ns.update(self._original_namespace)
                 self._done.set()
-            else:
-                write_report(self.prompt, self.rubric, self.settings, outcomes, self.out_dir, partial=True,
-                             waiting=self._waiting(), date=self.date, total_runs=self.k)
 
 
 # --------------------------------------------------------------------- CLI
@@ -287,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     prompt = args.prompt_file.read_text(encoding="utf-8")
     sha = prompt_sha(prompt)
-    out_dir = args.out or Path("runs") / f"repeat-{datetime.now().strftime('%Y-%m-%d')}-{sha[:8]}"
+    out_dir = (args.out or Path("runs") / f"repeat-{datetime.now().strftime('%Y-%m-%d')}-{sha[:8]}").resolve()
     rounds = max(0, args.rounds)
 
     from biomentis.agent.a1 import A1
@@ -300,7 +393,11 @@ def main(argv: list[str] | None = None) -> int:
 
     first = make_agent()
     upload = args.rubric.read_text(encoding="utf-8") if args.rubric else None
-    rubric = resolve_rubric(prompt, upload, first.llm)
+    try:
+        rubric = resolve_rubric(prompt, upload, getattr(first, "gate_llm", None) or first.llm)
+    except Exception as exc:
+        print(f"Could not get the rubric: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
 
     agents = iter([first])
 
@@ -314,9 +411,12 @@ def main(argv: list[str] | None = None) -> int:
     if described:
         settings += f"; {described}"
     batch = RepeatBatch(prompt, args.k, rubric, factory, out_dir, settings=settings)
-    print(f"Repeat runs: {args.k} runs of prompt {sha[:8]} into {out_dir}")
+    print(f"Repeat runs: {args.k} runs of prompt {sha[:8]} into {batch.out_dir}")
     batch.start()
     run_pause_loop(batch)
+    if batch.report_error:
+        print(f"The report could not be written: {batch.report_error}", file=sys.stderr)
+        return 1
     print(f"Report: {batch.report}")
     return 0
 

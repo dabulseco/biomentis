@@ -4598,6 +4598,14 @@ Each library is listed with its description to help you understand its functiona
         # alongside the prompt; `clear_on_submit=True` resets both the text
         # area and the uploader after a send.
         st.session_state.setdefault("biomni_prompt_draft", "")
+        # A repeat-run batch (sidebar R&D tool) shares the process state a
+        # run's code steps use, so the two never overlap: Send waits for it.
+        try:
+            from biomentis.ui_repeat import batch_active
+
+            _batch_busy = batch_active(_session_key)
+        except Exception:
+            _batch_busy = False
         with st.form(key="biomni_prompt_form", clear_on_submit=True):
             uploaded_files = st.file_uploader(
                 "Attach files (optional)",
@@ -4626,8 +4634,10 @@ Each library is listed with its description to help you understand its functiona
             # would be both one rerun late and illegal (the tabs widget is
             # already instantiated by then).
             submitted = st.form_submit_button(
-                "Send", use_container_width=False, on_click=_focus_executor_for_new_run
+                "Send", use_container_width=False, on_click=_focus_executor_for_new_run, disabled=_batch_busy
             )
+            if _batch_busy:
+                st.caption("A repeat-run batch is running; Send is available again when it has finished.")
         prompt = prompt_text.strip() if submitted else ""
         st.session_state.biomni_prompt_draft = "" if submitted else prompt_text
 
@@ -4687,6 +4697,10 @@ Each library is listed with its description to help you understand its functiona
         # driving the same agent object and the same LangGraph thread id.
         # Before background runs this was impossible (the script was blocked);
         # now it has to be refused explicitly.
+        if _starting and _batch_busy:
+            st.session_state.biomni_prompt_draft = prompt
+            _starting = False
+
         if _starting and _runner is not None and _runner.is_alive():
             st.warning(
                 "A run is already in progress — it is still going in the "

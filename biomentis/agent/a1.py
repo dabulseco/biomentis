@@ -3,7 +3,6 @@ import inspect
 import os
 import re
 import time
-import uuid
 from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
@@ -4205,9 +4204,11 @@ Each library is listed with its description to help you understand its functiona
         # in a module-level dict in `biomentis.run_worker` keyed by this id.
         # Session state is the right home for the key itself: it is per-browser
         # -session and survives every rerun.
-        if "biomni_session_key" not in st.session_state:
-            st.session_state.biomni_session_key = uuid.uuid4().hex
-        _session_key = st.session_state.biomni_session_key
+        # The key is also kept in the page URL (`?s=`, see biomentis.ui_session),
+        # so a reload, or a reconnect after the session expired, re-attaches.
+        from biomentis.ui_session import session_key
+
+        _session_key = session_key()
         # `biomni_run_cursor` is how many of this run's events are already in
         # the transcript. It is what makes re-attaching after a stray click
         # exact: the worker keeps every event it ever produced, and the cursor
@@ -4286,6 +4287,27 @@ Each library is listed with its description to help you understand its functiona
         # thread is running whether or not the flag survived the last rerun.
         if _runner is not None and _runner.is_alive():
             st.session_state.biomni_run_active = True
+        # Single user: a run paused for a decision whose tab is gone (closed,
+        # or opened without its `?s=`) can be taken over here.
+        if _runner is None:
+            try:
+                from biomentis.run_worker import get_run as _get, live_run_sessions
+                from biomentis.ui_session import TAKE_OVER_LABEL, adopt, orphaned
+
+                for _key in live_run_sessions():
+                    _other = _get(_key)
+                    _ctl = getattr(_other, "round_control", None) if _other is not None else None
+                    if _key != _session_key and _ctl is not None and _ctl.pending is not None and orphaned(_key):
+                        st.warning(
+                            "A run from a browser tab that is no longer open is paused and waiting for a "
+                            "decision.",
+                            icon=":material/pause_circle:",
+                        )
+                        st.button(TAKE_OVER_LABEL, key="biomni_take_over_run", icon=":material/login:",
+                                  on_click=adopt, args=(_key,))
+                        break
+            except Exception as e:  # never cost the page
+                print(f"take-over check failed: {type(e).__name__}: {e}")
         _in_run = bool(st.session_state.get("biomni_run_active"))
 
         # Run status, rendered ABOVE the tabs and therefore outside both of
@@ -4777,6 +4799,13 @@ Each library is listed with its description to help you understand its functiona
                 (i for i, e in enumerate(st.session_state.biomni_transcript) if e.get("role") == "user"),
                 default=-1,
             )
+            if not _starting and _runner is not None and st.session_state.biomni_run_cursor == 0 and _last_user < 0:
+                # Re-attached from a new session (reload, reconnect, take over):
+                # its transcript is empty, so start it with the run's prompt.
+                st.session_state.biomni_transcript.append(
+                    {"panel": "main", "role": "user", "content": _runner.prompt}
+                )
+                _last_user = len(st.session_state.biomni_transcript) - 1
             code_execution_entries = [
                 e for e in st.session_state.biomni_transcript[_last_user + 1 :] if e.get("kind") == "code"
             ]

@@ -90,7 +90,20 @@ class SpyControl(RoundControl):
         super().decide(choice, accepted_keys)
 
 
-st.session_state.setdefault("biomni_session_key", SESSION)
+if {set_key!r}:
+    st.session_state.setdefault("biomni_session_key", SESSION)
+# AppTest runs in this process, so the patch is set (or undone) on every run.
+import biomentis.ui_session as _ui_session
+_ui_session.__dict__.setdefault("_real_session_is_live", _ui_session._session_is_live)
+_ui_session._session_is_live = (
+    (lambda streamlit_session_id: False) if {owner_gone!r}  # the tab that owned the run is closed
+    else _ui_session._real_session_is_live
+)
+# Every AppTest has the same Streamlit session id; this one stands for another tab.
+_ui_session.__dict__.setdefault("_real_streamlit_session_id", _ui_session._streamlit_session_id)
+_ui_session._streamlit_session_id = (
+    (lambda: "another tab") if {owner_gone!r} else _ui_session._real_streamlit_session_id
+)
 st.session_state.setdefault("biomni_agent_key", "test")
 if "_agent" not in st.session_state:
     st.session_state["_agent"] = SimpleNamespace(
@@ -129,6 +142,7 @@ st.markdown(
 st.markdown("CALLS=" + repr(agent.round_control.calls))
 st.markdown("CONTENTS=" + repr([e.get("content") for e in st.session_state.biomni_transcript]))
 st.markdown("OUTDIR=" + str(st.session_state.get("biomni_output_dir")))
+st.markdown("KEY=" + str(st.session_state.get("biomni_session_key")))
 '''
 
 
@@ -160,14 +174,21 @@ def _texts(node) -> list[str]:
     return out
 
 
-def _paused_app(session: str, inline: bool = False):
+def _harness_app(session: str, inline: bool = False, set_key: bool = True, owner_gone: bool = False):
+    """A fresh AppTest (a new browser session) of the harness, not yet run."""
     from streamlit.testing.v1 import AppTest
 
     tmp = tempfile.mkdtemp(prefix="biomni_round_pause_")
     path = os.path.join(tmp, "app.py")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(_HARNESS.format(repo=_REPO, tmp=tmp, session=session, stopped=STOPPED, inline=inline))
-    at = AppTest.from_file(path, default_timeout=30).run()
+        f.write(_HARNESS.format(repo=_REPO, tmp=tmp, session=session, stopped=STOPPED, inline=inline,
+                                set_key=set_key, owner_gone=owner_gone))
+    return AppTest.from_file(path, default_timeout=30), tmp
+
+
+def _paused_app(session: str, inline: bool = False):
+    at, tmp = _harness_app(session, inline=inline)
+    at.run()
     at.text_area[0].set_value("the task")
     send = [b for b in at.button if b.label == "Send"]
     assert send, f"no Send button among {[b.label for b in at.button]}"
@@ -628,6 +649,96 @@ def test_status_text_and_summary() -> None:
     _check("gate off: no stopped status", stopped_events(SimpleNamespace(completion_gate=False)) == [])
 
 
+def test_reattach_from_url_and_take_over() -> None:
+    print("\n(n) a new browser session re-attaches from ?s=, or takes an orphaned paused run over")
+    session = "round-pause-url"
+    at, _, _ = _paused_app(session)
+    _check("paused", _panel_shown(at)[0], str([w.value for w in at.warning]))
+    _check("the session key is written to the URL", at.query_params.get("s") == [session], str(at.query_params))
+
+    # A reload or reconnect after the session expired: new session state, same URL.
+    again, _ = _harness_app(session, set_key=False)
+    again.query_params["s"] = session
+    again.run()
+    _check("no exception after re-attach", not again.exception, str(again.exception))
+    _check("the key is adopted from the URL", _line(again, "KEY=") == f"KEY={session}", _line(again, "KEY="))
+    _check("the pause panel is shown again", _panel_shown(again)[0], str([w.value for w in again.warning]))
+    contents = _line(again, "CONTENTS=")
+    _check("the transcript is rebuilt: the prompt, then the answer",
+           "'the task'" in contents and "'the answer'" in contents
+           and contents.index("'the task'") < contents.index("'the answer'"), contents)
+
+    # Another tab, no ?s=, and the owning tab is gone: offer to take it over.
+    other, _ = _harness_app(session, set_key=False, owner_gone=True)
+    other.run()
+    _check("no exception in the other tab", not other.exception, str(other.exception))
+    _check("its own key", _line(other, "KEY=") != f"KEY={session}", _line(other, "KEY="))
+    take = [b for b in other.button if b.label == "Take over this run"]
+    _check("a Take over this run button", len(take) == 1, str([b.label for b in other.button]))
+    _check("no pause panel before taking over", not _panel_shown(other)[0])
+    if take:
+        take[0].click().run()
+        _check("no exception after taking over", not other.exception, str(other.exception))
+        _check("the key is adopted", _line(other, "KEY=") == f"KEY={session}", _line(other, "KEY="))
+        _check("and written to the URL", other.query_params.get("s") == [session], str(other.query_params))
+        _check("the pause panel is shown here now", _panel_shown(other)[0], str([w.value for w in other.warning]))
+        stop = [b for b in other.button if b.key == "round_stop"]
+        if stop:  # end the run so it does not outlive the test
+            stop[0].click().run()
+
+    # A live owner: nothing to take over.
+    live, _ = _harness_app("round-pause-url-live", set_key=True)
+    live.run()
+    send = [b for b in live.button if b.label == "Send"]
+    live.text_area[0].set_value("the task")
+    send[0].click().run()
+    watcher, _ = _harness_app("round-pause-url-live", set_key=False)
+    watcher.run()
+    _check("owner still connected (or unknown): no take-over offered",
+           not [b for b in watcher.button if b.label == "Take over this run"], str([b.label for b in watcher.button]))
+    stop = [b for b in live.button if b.key == "round_stop"]
+    if stop:
+        stop[0].click().run()
+
+
+_REPL_HARNESS = '''
+import sys
+sys.path.insert(0, {repo!r})
+import streamlit as st
+import biomentis.ui_repeat as ui_repeat
+from biomentis.ui_repl import render_repl_panel
+
+ui_repeat.active_batch_session = lambda: {busy!r}
+render_repl_panel(None)
+'''
+
+
+def test_repl_disabled_during_batch() -> None:
+    print("\n(o) the sidebar REPL is disabled while a repeat-run batch is active")
+    from streamlit.testing.v1 import AppTest
+
+    from biomentis.ui_repl import BATCH_BUSY_CAPTION
+
+    for busy in ("some-session", None):
+        path = os.path.join(tempfile.mkdtemp(prefix="biomni_repl_"), "app.py")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(_REPL_HARNESS.format(repo=_REPO, busy=busy))
+        at = AppTest.from_file(path, default_timeout=30).run()
+        _check("no exception", not at.exception, str(at.exception))
+        buttons = {b.key: b.disabled for b in at.sidebar.button}
+        captions = [c.value for c in at.sidebar.caption]
+        if busy:
+            _check("batch active: Run and Clear disabled",
+                   buttons.get("biomni_repl_run") is True and buttons.get("biomni_repl_clear") is True, str(buttons))
+            _check("batch active: code box and auto-run disabled",
+                   at.sidebar.text_area[0].disabled and at.sidebar.toggle[0].disabled)
+            _check("batch active: the caption says why", BATCH_BUSY_CAPTION in captions, str(captions))
+        else:
+            _check("no batch: Run and Clear enabled",
+                   buttons.get("biomni_repl_run") is False and buttons.get("biomni_repl_clear") is False, str(buttons))
+            _check("no batch: no caption", BATCH_BUSY_CAPTION not in captions, str(captions))
+
+
 def run_all() -> int:
     test_status_placement_and_restore()
     test_render_round_pause_alone()
@@ -639,6 +750,8 @@ def run_all() -> int:
     test_duplicate_findings_share_one_box()
     test_stop_run_mid_step()
     test_status_text_and_summary()
+    test_reattach_from_url_and_take_over()
+    test_repl_disabled_during_batch()
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     return 1 if _FAILED else 0
 

@@ -23,7 +23,6 @@ time) nothing is rendered: no toggle, no expander.
 from __future__ import annotations
 
 import threading
-import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -95,10 +94,11 @@ def active_batch_session() -> str | None:
 
 
 def _session_key() -> str:
-    # The same key `A1.launch_streamlit_demo` uses for its background run.
-    if "biomni_session_key" not in st.session_state:
-        st.session_state.biomni_session_key = uuid.uuid4().hex
-    return st.session_state.biomni_session_key
+    # The same key `A1.launch_streamlit_demo` uses for its background run,
+    # kept in the URL so a reload or reconnect finds the batch again.
+    from biomentis.ui_session import session_key
+
+    return session_key()
 
 
 def blocked_reason(session: str, own_run_flag: bool = False) -> str:
@@ -287,4 +287,12 @@ def render_repeat_runs(make_agent: Callable[[], Any], rubric_upload: str | None,
         )
         if reason:
             st.caption(reason)
+        busy = active_batch_session()
+        if busy is not None and busy != session:
+            from biomentis.ui_session import TAKE_OVER_LABEL, adopt, orphaned
+
+            if orphaned(busy):
+                st.caption("The running batch belongs to a browser tab that is no longer open.")
+                st.button(TAKE_OVER_LABEL, key="biomentis_repeat_take_over", icon=":material/login:",
+                          on_click=adopt, args=(busy,))
         st.fragment(_render_progress, run_every=REFRESH_SECONDS if active else None)(session, active)

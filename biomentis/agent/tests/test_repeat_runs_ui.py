@@ -402,8 +402,58 @@ def test_repeat_agents_use_the_gate() -> None:
            "_configure_agent(repeat_agent, repeat_settings(s))" in src)
 
 
+_TAKE_OVER_HARNESS = '''
+import sys
+sys.path.insert(0, {repo!r})
+import streamlit as st
+import biomentis.ui_session as ui_session
+from biomentis.ui_repeat import render_repeat_runs
+
+ui_session._session_is_live = lambda streamlit_session_id: False  # the batch's tab is closed
+ui_session._streamlit_session_id = lambda: "this tab"
+with st.sidebar:
+    render_repeat_runs(lambda: None, None, "test")
+st.markdown("KEY=" + str(st.session_state.get("biomni_session_key")))
+'''
+
+
+def test_take_over_batch() -> None:
+    print("\n[take over] a batch whose tab is gone can be taken over")
+    import tempfile
+
+    from streamlit.testing.v1 import AppTest
+
+    import biomentis.ui_session as ui_session
+    from biomentis import ui_repeat
+
+    live, owner = ui_session._session_is_live, ui_session._streamlit_session_id
+    stub = _StubBatch()
+    ui_repeat.set_entry("gone-tab", ui_repeat.RepeatEntry("the prompt", 2, stub))
+    ui_session._OWNERS["gone-tab"] = "closed tab"
+    try:
+        path = Path(tempfile.mkdtemp(prefix="repeat-take-over-")) / "app.py"
+        path.write_text(_TAKE_OVER_HARNESS.format(repo=str(_REPO)), encoding="utf-8")
+        at = AppTest.from_file(str(path), default_timeout=30).run()
+        _check("no exception", not at.exception, str(at.exception))
+        take = [b for b in at.button if b.label == "Take over this run"]
+        _check("a Take over this run button", len(take) == 1, str([b.label for b in at.button]))
+        _check("no pause panel before", not [b for b in at.button if b.key == "repeat2_round_continue"])
+        if take:
+            take[0].click().run()
+            _check("the batch's key is adopted", [m.value for m in at.markdown if m.value.startswith("KEY=")]
+                   == ["KEY=gone-tab"], str([m.value for m in at.markdown]))
+            _check("the URL carries it", at.query_params.get("s") == ["gone-tab"], str(at.query_params))
+            _check("the batch's pause panel is shown",
+                   bool([b for b in at.button if b.key == "repeat2_round_continue"]), str([b.key for b in at.button]))
+    finally:
+        ui_session._session_is_live, ui_session._streamlit_session_id = live, owner
+        stub.control.stop()
+        ui_repeat.clear_entry("gone-tab")
+
+
 def run_all() -> int:
     test_repeat_agents_use_the_gate()
+    test_take_over_batch()
     test_prune_finished()
     test_real_batch()
     test_real_app()

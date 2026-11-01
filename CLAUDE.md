@@ -68,6 +68,7 @@ $P -m biomentis.agent.tests.test_gate_arithmetic     # completion gate types + a
 $P -m biomentis.agent.tests.test_gate_claims        # gate: unsourced "verified" versions, unlabelled simulated data, missing evidence
 $P -m biomentis.agent.tests.test_gate_quantities    # gate: chunked quantity extraction, consistency, derivations, regressions, code-output cross-check
 $P -m biomentis.agent.tests.test_gate_rounds        # gate: round policy (planned rounds always run, 3 automatic rounds then ask, reviewer off/failed relaxes rubric/review, final labels)
+$P -m biomentis.agent.tests.test_rubric             # gate: rubric model, markdown format round trip, duplicate IDs, save
 $P -m biomentis.agent.tests.test_gate_graph         # gate in the agent graph: fail → critique → pass, pause before round 4 + Stop, context pause, gate off = old graph, gate trace records
 $P -m biomentis.agent.tests.test_round_pause_ui     # pause panel (accept as is, Continue, Stop, survives reruns), Stop run while paused, gate/pause/status events, status above the answer + export, sidebar toggle
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end

@@ -701,6 +701,75 @@ class A1:
         except Exception as exc:
             print(f"[independent_review] could not save the reviewer's reply: {exc}")
 
+    def reviewer_name(self) -> str:
+        """The review model's name, as shown with its reviews."""
+        return getattr(self, "review_model_name", "") or get_llm_display_name(self.review_llm)
+
+    def run_review(self, messages: list[BaseMessage], rubric: Rubric | None = None,
+                   focus_numbers: set[str] = frozenset()) -> Review:
+        """One independent review of the run's latest answer by `self.review_llm`.
+
+        See biomentis.independent_review. The reviewer first names the answer's
+        key assumptions, which are web-searched; then it reviews, with one retry
+        on an unusable reply. The raw replies are saved and the review is added
+        to `run_reviews`. A failed call or a reply still unusable after the
+        retry gives a Review with `error` set; this never raises for it. With a
+        `rubric` the reviewer also reports its coverage; `focus_numbers` keep
+        the full output of the steps that printed them.
+        """
+        reviewer_llm = self.review_llm
+        reviewer = self.reviewer_name()
+        inputs = review_inputs(messages, focus_numbers)
+        print(f"independent review {self.review_count + 1} by {reviewer}...")
+        # Phase 1: the reviewer names the answer's key assumptions, and each is
+        # web-searched. Reviewers judged on consistency alone: on a 2026-10-28
+        # CHO run every model tested accepted a harvest HCP input ~70x below
+        # published values, which one search would have shown.
+        raw_replies: list[str] = []
+        assumption_checks = ""
+        try:
+            reply_text = _reply_text(
+                _invoke_llm_with_retry(
+                    reviewer_llm,
+                    [SystemMessage(content=ASSUMPTIONS_SYSTEM_PROMPT), HumanMessage(content=build_assumptions_prompt(inputs))],
+                )
+            )
+            raw_replies.append(reply_text)
+            assumptions = parse_assumptions(reply_text)
+            if assumptions:
+                print(f"independent review: checking {len(assumptions)} assumptions by web search")
+                assumption_checks = check_assumptions(assumptions, search=getattr(self, "review_search", None))
+        except Exception as exc:  # the review goes on without the checks
+            print(f"independent review: assumption check failed ({type(exc).__name__}: {exc})")
+        prompt = build_review_prompt(inputs, assumption_checks, rubric)
+        # One retry when the reply can't be read: in a 2026-10-28 run,
+        # gemma4:31b-cloud's reply was "not valid JSON", and the same
+        # request answered properly when sent again.
+        review_messages = [SystemMessage(content=REVIEW_SYSTEM_PROMPT), HumanMessage(content=prompt)]
+        review = Review(error="no reply")
+        for _attempt in range(2):
+            try:
+                reply_text = _reply_text(_invoke_llm_with_retry(reviewer_llm, review_messages))
+            except Exception as exc:  # a failed review must not cost the answer
+                review = Review(error=f"the review call failed ({type(exc).__name__}: {exc})")
+                break
+            raw_replies.append(reply_text)
+            review = compare_reported(require_sources(parse_review(reply_text), assumption_checks))
+            if not review.error:
+                break
+            print(f"independent review: {review.error}; asking once more")
+            review_messages = review_messages + [
+                AIMessage(content=reply_text or "(empty reply)"),
+                HumanMessage(content=REVIEW_RETRY_MESSAGE),
+            ]
+        self.review_count += 1
+        self._save_review_replies(raw_replies)
+        self.run_reviews.append(
+            {"review": review, "reviewer": reviewer, "after_correction": self.review_count > 1}
+        )
+        print(f"independent review: {review.verdict or review.error}")
+        return review
+
     def reset_review(self) -> None:
         """Start a run with no independent reviews done."""
         self.review_count = 0
@@ -2467,56 +2536,8 @@ Each library is listed with its description to help you understand its functiona
                 return state
             if not isinstance(last, str) or not re.search(r"<solution>.*?</solution>", last, re.DOTALL | re.IGNORECASE):
                 return state
-            reviewer = getattr(self, "review_model_name", "") or get_llm_display_name(reviewer_llm)
-            inputs = review_inputs(state["messages"])
-            print(f"independent review {self.review_count + 1} by {reviewer}...")
-            # Phase 1: the reviewer names the answer's key assumptions, and each is
-            # web-searched. Reviewers judged on consistency alone: on a 2026-10-28
-            # CHO run every model tested accepted a harvest HCP input ~70x below
-            # published values, which one search would have shown.
-            raw_replies: list[str] = []
-            assumption_checks = ""
-            try:
-                reply_text = _reply_text(
-                    _invoke_llm_with_retry(
-                        reviewer_llm,
-                        [SystemMessage(content=ASSUMPTIONS_SYSTEM_PROMPT), HumanMessage(content=build_assumptions_prompt(inputs))],
-                    )
-                )
-                raw_replies.append(reply_text)
-                assumptions = parse_assumptions(reply_text)
-                if assumptions:
-                    print(f"independent review: checking {len(assumptions)} assumptions by web search")
-                    assumption_checks = check_assumptions(assumptions, search=getattr(self, "review_search", None))
-            except Exception as exc:  # the review goes on without the checks
-                print(f"independent review: assumption check failed ({type(exc).__name__}: {exc})")
-            prompt = build_review_prompt(inputs, assumption_checks)
-            # One retry when the reply can't be read: in a 2026-10-28 run,
-            # gemma4:31b-cloud's reply was "not valid JSON", and the same
-            # request answered properly when sent again.
-            review_messages = [SystemMessage(content=REVIEW_SYSTEM_PROMPT), HumanMessage(content=prompt)]
-            review = Review(error="no reply")
-            for _attempt in range(2):
-                try:
-                    reply_text = _reply_text(_invoke_llm_with_retry(reviewer_llm, review_messages))
-                except Exception as exc:  # a failed review must not cost the answer
-                    review = Review(error=f"the review call failed ({type(exc).__name__}: {exc})")
-                    break
-                raw_replies.append(reply_text)
-                review = compare_reported(require_sources(parse_review(reply_text), assumption_checks))
-                if not review.error:
-                    break
-                print(f"independent review: {review.error}; asking once more")
-                review_messages = review_messages + [
-                    AIMessage(content=reply_text or "(empty reply)"),
-                    HumanMessage(content=REVIEW_RETRY_MESSAGE),
-                ]
-            self.review_count += 1
-            self._save_review_replies(raw_replies)
-            self.run_reviews.append(
-                {"review": review, "reviewer": reviewer, "after_correction": self.review_count > 1}
-            )
-            print(f"independent review: {review.verdict or review.error}")
+            reviewer = self.reviewer_name()
+            review = self.run_review(state["messages"])
             # One correction round, and not when the context is already full.
             if self.review_count == 1 and review.needs_rework and not getattr(self, "_context_wrap_ups", 0):
                 state["messages"].append(HumanMessage(content=feedback_for_agent(review, reviewer)))

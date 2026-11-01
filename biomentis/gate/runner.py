@@ -23,6 +23,7 @@ from biomentis.gate.quantities import (
     extract_quantities,
     output_numbers,
 )
+from biomentis.independent_review import coverage_findings, review_findings
 from biomentis.run_quality import GATE_FEEDBACK_PREFIX, current_run, run_evidence
 
 _SOLUTION_RE = re.compile(r"<solution>(.*?)</solution>", re.DOTALL | re.IGNORECASE)
@@ -37,9 +38,43 @@ def _solution_indices(run: list[BaseMessage]) -> list[int]:
     return [i for i, m in enumerate(run) if isinstance(m, AIMessage) and _SOLUTION_RE.search(_text(m))]
 
 
-def _review_findings(agent, messages: list[BaseMessage], result: GateResult) -> tuple[list[Finding], str]:
-    """The reviewer's findings and state ("ok" | "failed"). Task 12 fills this in."""
-    return [], "ok"
+# The checks whose questioned numbers the reviewer should see in full.
+_FOCUS_CHECKS = ("quantity", "arithmetic", "regression")
+_NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def focus_numbers(findings: list[Finding]) -> set[str]:
+    """The numbers quoted by this round's quantity, arithmetic and regression findings.
+
+    As written in the answer, plus the same number without thousands
+    separators (code prints 1015, the answer says 1,015). Single digits are
+    left out: they would match nearly every step's output.
+    """
+    numbers: set[str] = set()
+    for f in findings:
+        if f.check not in _FOCUS_CHECKS:
+            continue
+        for n in _NUMBER_RE.findall(f.quote):
+            n = n.rstrip(",")
+            if len(n.replace(",", "").replace(".", "")) < 2:
+                continue
+            numbers |= {n, n.replace(",", "")}
+    return numbers
+
+
+def _review_findings(agent, messages: list[BaseMessage], result: GateResult,
+                     rubric=None) -> tuple[list[Finding], str]:
+    """The reviewer's findings and state: "ok", or "failed" with a "review failed" warning.
+
+    The review fails when its call raised or its reply was still unusable
+    after the one retry; then no reviewer-dependent check is reported.
+    Rubric coverage is checked only when the run has a rubric.
+    """
+    review = agent.run_review(messages, rubric=rubric, focus_numbers=focus_numbers(result.findings))
+    if review.error:
+        return [Finding(check="review", severity="warning", quote="", issue=f"review failed: {review.error}")], "failed"
+    findings = coverage_findings(review, rubric) if rubric is not None else []
+    return findings + review_findings(review), "ok"
 
 
 def _safe(check: str, name: str, fn, *args) -> list[Finding]:
@@ -94,7 +129,7 @@ def run_gate(agent, messages: list[BaseMessage], round_number: int, rubric=None)
     )
     if getattr(agent, "review_llm", None) is not None:
         try:
-            review, result.reviewer_state = _review_findings(agent, messages, result)
+            review, result.reviewer_state = _review_findings(agent, messages, result, rubric)
         except Exception as exc:  # a reviewer outage is reported, not fatal
             print(f"[gate] review failed ({type(exc).__name__}: {exc})")
             review = [Finding(check="review", severity="warning", quote="",

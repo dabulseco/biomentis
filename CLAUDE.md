@@ -59,7 +59,7 @@ $P -m biomentis.agent.tests.test_plot_feedback     # figure summaries in observa
 $P -m biomentis.agent.tests.test_show_structure    # plot guidance, show_structure tool, uploaded structures
 $P -m biomentis.agent.tests.test_run_quality       # evidence check before an answer, run-quality summary, critic checks numbers
 $P -m biomentis.agent.tests.test_gate_figures      # gate: figures cited but not drawn, stale after revision, garbled titles
-$P -m biomentis.agent.tests.test_independent_review # second-model review, one correction round, temperatures
+$P -m biomentis.agent.tests.test_independent_review # second-model review, one correction round, temperatures; in the gate: rubric coverage, review failed, same-family check
 $P -m biomentis.agent.tests.test_web_search         # web search through Ollama's API, page text reuse, scraper fallback
 $P -m biomentis.agent.tests.test_output_folder      # agent's files saved in the session's output folder (Downloads), export into it
 $P -m biomentis.agent.tests.test_revision_labels    # each revised answer titled by what sent it back (self-critique, review, checks)

@@ -13,6 +13,10 @@ code output and sources of the run, and whether the reason given for each
 major workflow decision holds. A "needs rework" verdict sends the problems back
 to the agent for one correction round, then the reviewer checks again; both
 reviews are reported, and anything left is the user's call.
+
+With the completion gate on (biomentis.gate), the same review runs at every
+gate round instead, and also checks the run's rubric: `coverage_findings` and
+`review_findings` turn the review into gate findings.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from dataclasses import dataclass, field
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from biomentis.gate import Finding
 from biomentis.run_quality import CRITIC_FEEDBACK_PREFIX, REVIEW_FEEDBACK_PREFIX, current_run
 
 VERDICTS = ("accept", "accept_with_corrections", "needs_rework")
@@ -52,6 +57,7 @@ Check, in this order:
    - rationale: a design decision whose stated reason is wrong, missing, or does not follow
 3. RATIONALE: the 3 to 8 most important decisions in FINAL_ANSWER (choices of method, order of steps, criteria, limits). Is the reason given for each sound?
 4. ASSUMPTIONS: for each assumption listed under ASSUMPTION_CHECKS, judge the value FINAL_ANSWER uses against the search results shown for it: "supported" (the sources report similar values), "contradicted" (they report clearly different values; give the typical value and the URL), or "unclear" (the results don't settle it). "supported" and "contradicted" must cite a URL from the results; without one, the status is "unclear". Convert units before comparing, using the answer's own numbers where needed: e.g. HCP in ppm is ng HCP per mg product, so at a titer of 5 g/L, 100 mg/L of HCP is 20,000 ppm. Fill "reported" and "converted" first, then decide the status from those two numbers: a value several-fold outside the reported range is "contradicted", however plausible it sounds. Search results are partial: say "unclear" rather than guess, but a value that the sources clearly contradict is a problem of kind "assumption" and, if a decision rests on it, makes the verdict "needs_rework".
+5. COVERAGE: for each item listed under RUBRIC, does FINAL_ANSWER deliver it? "present" (quote the exact text from FINAL_ANSWER that delivers it; without a quote it counts as missing), "missing" (nothing in FINAL_ANSWER delivers it), or "wrong" (FINAL_ANSWER addresses it incorrectly; quote that text and say what is wrong). Report every rubric ID. With no RUBRIC section, return an empty list.
 
 Verdict:
 - "needs_rework" if any problem would change a decision, a quantity someone would act on, or a safety/quality limit (including a decision that rests on an unrealistic assumption)
@@ -67,7 +73,8 @@ Return ONLY a JSON object, no markdown fences, with exactly these keys:
   "changes": [{"change": "<what changed>", "status": "valid" | "invalid" | "unverified", "reason": "<why, citing EVIDENCE where possible>"}],
   "problems": [{"kind": "number" | "assumption" | "unit" | "unsupported" | "contradiction" | "rationale", "quote": "<exact text from FINAL_ANSWER>", "issue": "<what is wrong>", "fix": "<the correct value or reasoning>"}],
   "rationale": [{"decision": "<the decision>", "sound": "yes" | "no" | "unverified", "note": "<one sentence>"}],
-  "assumptions": [{"assumption": "<as listed>", "value": "<value FINAL_ANSWER uses>", "reported": "<the value or range the sources report, in their units, or none>", "converted": "<the answer's value in the sources' units, with the arithmetic, e.g. 100 mg/L / 6.76 g/L = 14,800 ppm>", "status": "supported" | "contradicted" | "unclear", "evidence": "<what the sources report, with the URL>"}]
+  "assumptions": [{"assumption": "<as listed>", "value": "<value FINAL_ANSWER uses>", "reported": "<the value or range the sources report, in their units, or none>", "converted": "<the answer's value in the sources' units, with the arithmetic, e.g. 100 mg/L / 6.76 g/L = 14,800 ppm>", "status": "supported" | "contradicted" | "unclear", "evidence": "<what the sources report, with the URL>"}],
+  "coverage": [{"id": "<rubric ID, e.g. D1>", "status": "present" | "missing" | "wrong", "quote": "<exact text from FINAL_ANSWER, or empty>", "issue": "<what is missing or wrong, or empty>"}]
 }"""
 
 ASSUMPTIONS_SYSTEM_PROMPT = """You are preparing an independent review of a research answer. Before the review, its key assumptions will be checked against a web search.
@@ -106,6 +113,7 @@ class Review:
     problems: list[dict] = field(default_factory=list)
     rationale: list[dict] = field(default_factory=list)
     assumptions: list[dict] = field(default_factory=list)
+    coverage: list[dict] = field(default_factory=list)
     error: str = ""
 
     @property
@@ -123,8 +131,18 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + f"\n... [{len(text) - limit} more characters]"
 
 
-def review_inputs(messages: list[BaseMessage]) -> dict:
-    """The task, first draft, critiques, final answer and evidence of the latest run."""
+def _prints_any(output: str, numbers) -> bool:
+    """Whether `output` shows any of `numbers` as a whole number (not inside a longer one)."""
+    return any(re.search(rf"(?<![\d.]){re.escape(n)}(?!\d)", output) for n in numbers if n)
+
+
+def review_inputs(messages: list[BaseMessage], focus_numbers: set[str] = frozenset()) -> dict:
+    """The task, first draft, critiques, final answer and evidence of the latest run.
+
+    A step whose output shows any of `focus_numbers` (numbers the gate's
+    checks questioned, as written in the answer) keeps its full output, so the
+    reviewer can judge them; every other step is clipped to fit.
+    """
     run = current_run(messages)
     task = run[0].content if run and isinstance(run[0].content, str) else ""
     answers = [_solution_body(m.content) for m in run if isinstance(m, AIMessage) and isinstance(m.content, str)]
@@ -152,7 +170,8 @@ def review_inputs(messages: list[BaseMessage]) -> dict:
     code_cap = max(300, int(_STEP_CODE_CHARS * scale))
     output_cap = max(500, int(_STEP_OUTPUT_CHARS * scale))
     evidence = "\n\n".join(
-        f"[step {i}] CODE:\n{_clip(c, code_cap)}\n[step {i}] OUTPUT:\n{_clip(o, output_cap)}"
+        f"[step {i}] CODE:\n{_clip(c, code_cap)}\n[step {i}] OUTPUT:\n"
+        + (o.strip() if _prints_any(o, focus_numbers) else _clip(o, output_cap))
         for i, (c, o) in enumerate(steps, 1)
     )
     return {
@@ -412,20 +431,25 @@ def compare_reported(review: Review) -> Review:
     return review
 
 
-def build_review_prompt(inputs: dict, assumption_checks: str = "") -> str:
+def build_review_prompt(inputs: dict, assumption_checks: str = "", rubric=None) -> str:
+    """The review request; with a `rubric` (gate.rubric.Rubric), a RUBRIC section for COVERAGE."""
     critiques = "\n\n".join(f"[round {i}]\n{c}" for i, c in enumerate(inputs["critiques"], 1)) or "(none)"
     same = inputs["first_draft"] == inputs["final_answer"]
-    return "\n\n".join(
-        [
-            f"TASK:\n{inputs['task']}",
-            f"EVIDENCE (code the agent ran and its output):\n{inputs['evidence'] or '(no code was run)'}",
-            "FIRST_DRAFT:\n" + ("(same as FINAL_ANSWER: the self-critique did not change it)" if same else inputs["first_draft"]),
-            f"SELF_CRITIQUE (the agent's own feedback, which led to the revision):\n{critiques}",
-            "ASSUMPTION_CHECKS (web search results for the answer's key assumptions):\n"
-            + (assumption_checks or "(none: no assumptions were checked)"),
-            f"FINAL_ANSWER:\n{inputs['final_answer']}",
-        ]
-    )
+    sections = [
+        f"TASK:\n{inputs['task']}",
+        f"EVIDENCE (code the agent ran and its output):\n{inputs['evidence'] or '(no code was run)'}",
+        "FIRST_DRAFT:\n" + ("(same as FINAL_ANSWER: the self-critique did not change it)" if same else inputs["first_draft"]),
+        f"SELF_CRITIQUE (the agent's own feedback, which led to the revision):\n{critiques}",
+        "ASSUMPTION_CHECKS (web search results for the answer's key assumptions):\n"
+        + (assumption_checks or "(none: no assumptions were checked)"),
+        f"FINAL_ANSWER:\n{inputs['final_answer']}",
+    ]
+    if rubric is not None:
+        sections.append(
+            "RUBRIC:\nWhat FINAL_ANSWER must deliver, respect and teach; report each ID under coverage.\n"
+            + "\n".join(f"- [{item.id}] ({item.kind}) {item.text}" for item in rubric.items)
+        )
+    return "\n\n".join(sections)
 
 
 def _extract_json(text: str) -> dict | None:
@@ -464,7 +488,68 @@ def parse_review(text: str) -> Review:
         problems=_dicts(data.get("problems")),
         rationale=_dicts(data.get("rationale")),
         assumptions=_dicts(data.get("assumptions")),
+        coverage=_dicts(data.get("coverage")),
     )
+
+
+def coverage_findings(review: Review, rubric) -> list[Finding]:
+    """A blocking `rubric` finding for each rubric item the answer does not deliver.
+
+    An item is delivered only when the reviewer marked it "present" with a
+    quote; "missing", "wrong", "present" without a quote, any other status,
+    and an ID the reviewer did not report all block. The key is the item's
+    ID, so the user's "accept as is" holds for the run however the reviewer
+    words it next round.
+    """
+    reported: dict[str, dict] = {}
+    for entry in review.coverage:
+        reported.setdefault(str(entry.get("id", "")).strip(), entry)
+    findings = []
+    for item in rubric.items:
+        entry = reported.get(item.id)
+        status = str(entry.get("status", "")).strip().lower() if entry else ""
+        quote = str(entry.get("quote", "")).strip() if entry else ""
+        note = str(entry.get("issue", "")).strip() if entry else ""
+        if status == "present" and quote:
+            continue
+        if entry is None:
+            issue = f"rubric {item.id} ({item.kind}) was not checked by the reviewer: {item.text}"
+        elif status == "wrong":
+            issue = f"rubric {item.id} ({item.kind}) is addressed wrongly: {item.text}"
+        elif status == "present":
+            issue = f"rubric {item.id} ({item.kind}) is marked present with no quote, so it counts as missing: {item.text}"
+        else:
+            issue = f"rubric {item.id} ({item.kind}) is missing: {item.text}"
+        if note:
+            issue += f" ({note})"
+        findings.append(Finding(check="rubric", severity="blocking", quote=quote if status == "wrong" else "",
+                                issue=issue, fix=f"deliver {item.id} in the answer", key=f"rubric:{item.id}"))
+    return findings
+
+
+def review_findings(review: Review) -> list[Finding]:
+    """The reviewer's problems as `review` findings: blocking on "needs rework", else warnings."""
+    if review.error or review.verdict == "accept":
+        return []
+    severity = "blocking" if review.verdict == "needs_rework" else "warning"
+    findings = [
+        Finding(check="review", severity=severity, quote=str(p.get("quote", "")).strip(),
+                issue=f"[{p.get('kind', 'problem')}] {p.get('issue', '')}".strip(), fix=str(p.get("fix", "")).strip())
+        for p in review.problems
+    ]
+    if not findings and review.verdict == "needs_rework":
+        # A rework verdict with no problem listed must still block.
+        findings.append(Finding(check="review", severity="blocking", quote="",
+                                issue=f"the reviewer asked for rework: {review.summary or 'no reason given'}"))
+    return findings
+
+
+def same_model_family(a: str, b: str) -> bool:
+    """Whether two model names share a vendor token: the first segment split on - : / or space."""
+    def vendor(name: str) -> str:
+        return re.split(r"[-:/ ]", (name or "").strip().lower(), maxsplit=1)[0]
+
+    return bool(vendor(a)) and vendor(a) == vendor(b)
 
 
 def feedback_for_agent(review: Review, reviewer: str) -> str:

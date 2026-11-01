@@ -20,6 +20,8 @@ import streamlit as st
 from biomentis.agent import A1
 from biomentis.agent.tutor import TutorEngine
 from biomentis.config import default_config
+from biomentis.independent_review import same_model_family
+from biomentis.llm import get_llm
 from biomentis.run_worker import background_runs_enabled
 from biomentis.ui_core import list_available_providers
 from biomentis.ui_repl import render_repl_panel
@@ -265,11 +267,31 @@ if not st.session_state.get("biomni_run_active"):
     ):
         tutor.set_llm(agent.llm)
     # The independent reviewer is the Critic model picked under Tutor →
-    # Self-improvement; with the Critic off ("stub") there is no review.
+    # Self-improvement; with the Critic off ("stub"), the BIOMNI_REVIEW_MODEL
+    # default if one is set, else there is no review.
     _critic = tutor.critic
     _reviewing = _critic is not None and _critic.model_name != "stub" and _critic.llm is not None
     agent.review_llm = _critic.llm if _reviewing else None
     agent.review_model_name = _critic.model_name if _reviewing else ""
+    if not _reviewing and default_config.review_model:
+        # Built once per model name and kept in the session; a model that
+        # can't be built means no reviewer (warned about below).
+        _default_name = default_config.review_model
+        if st.session_state.get("biomentis_default_reviewer_name") != _default_name:
+            try:
+                st.session_state.biomentis_default_reviewer = get_llm(
+                    _default_name,
+                    temperature=default_config.temperature,  # verification runs cold, like the Critic
+                    config=default_config,
+                )
+                st.session_state.biomentis_default_reviewer_error = ""
+            except Exception as e:
+                st.session_state.biomentis_default_reviewer = None
+                st.session_state.biomentis_default_reviewer_error = f"{type(e).__name__}: {e}"
+            st.session_state.biomentis_default_reviewer_name = _default_name
+        if st.session_state.biomentis_default_reviewer is not None:
+            agent.review_llm = st.session_state.biomentis_default_reviewer
+            agent.review_model_name = _default_name
     # A deselected segmented control reads None; treat it as the default.
     _critique_rounds = st.session_state.get("biomentis_critique_rounds")
     _critique_rounds = 2 if _critique_rounds is None else _critique_rounds
@@ -287,6 +309,17 @@ if not st.session_state.get("biomni_run_active"):
     agent.set_rubric_upload(
         _rubric_file.getvalue().decode("utf-8", errors="replace") if _rubric_file is not None else None
     )
+
+# Reviewer warnings, also while a run is in flight (the reviewer is fixed then).
+if st.session_state.get("biomentis_default_reviewer_error") and getattr(agent, "review_llm", None) is None:
+    st.sidebar.warning(
+        f"Default reviewer `{st.session_state.get('biomentis_default_reviewer_name', '')}` could not be loaded "
+        f"({st.session_state.biomentis_default_reviewer_error}); answers are not independently reviewed."
+    )
+if getattr(agent, "review_llm", None) is not None and same_model_family(
+    selected_model, getattr(agent, "review_model_name", "")
+):
+    st.sidebar.warning("Reviewer and agent are the same model family — they may share blind spots.")
 
 # Sidebar order: Model picker (above) → REPL (existing) → Tutor (new).
 # The REPL panel renders its own divider; we add ours after.

@@ -29,6 +29,12 @@ What these tests pin down:
  10.  Before the review, the reviewer names the key assumptions, each is
       web-searched, and the review is given the results; a contradicted
       assumption goes back to the agent and is shown under the answer
+ 11.  Inside the completion gate the reviewer checks rubric coverage: an item
+      missing, wrong, "present" without a quote, or not reported blocks;
+      "needs rework" problems block, corrections warn; model families compare
+      by vendor; focus numbers keep their step's output in full
+ 12.  A reviewer that raises, or replies unusably after one retry, sets the
+      gate's reviewer state to "failed" with a "review failed" warning
 
 Run with:
     python -m biomentis.agent.tests.test_independent_review
@@ -544,6 +550,194 @@ def test_compare_reported() -> None:
            str(last))
 
 
+# --- [11] The reviewer inside the completion gate (Task 12) ---------------
+
+def _gate_rubric():
+    from biomentis.gate.rubric import parse_rubric_markdown
+
+    return parse_rubric_markdown(
+        "## Deliverables\n- [D1] The total\n- [D5] A figure of the totals\n\n## Constraints\n- [C1] Show the sum\n\n"
+        "## Core lessons\n- [L2] Check arithmetic in code\n",
+        source="uploaded", prompt_sha="0" * 64)
+
+
+def _coverage_review(coverage: list, verdict: str = "accept", problems: list | None = None):
+    from biomentis.independent_review import parse_review
+
+    return parse_review(json.dumps({"verdict": verdict, "summary": "s", "problems": problems or [],
+                                    "coverage": coverage}))
+
+
+def test_rubric_coverage() -> None:
+    print("\n[11] rubric coverage, review findings, model families")
+    from biomentis.independent_review import (
+        REVIEW_SYSTEM_PROMPT,
+        build_review_prompt,
+        coverage_findings,
+        review_findings,
+        review_inputs,
+        same_model_family,
+    )
+
+    rubric = _gate_rubric()
+    present = lambda i: {"id": i, "status": "present", "quote": f"text for {i}", "issue": ""}
+    review = _coverage_review([present("D1"), present("D5"), present("C1"),
+                               {"id": "L2", "status": "missing", "quote": "", "issue": "never checked in code"}])
+    _check("coverage is parsed", len(review.coverage) == 4, str(review.coverage))
+    found = coverage_findings(review, rubric)
+    _check("L2 missing: one blocking finding naming L2",
+           len(found) == 1 and found[0].severity == "blocking" and found[0].check == "rubric" and "L2" in found[0].issue,
+           repr(found))
+
+    review = _coverage_review([present("D1"), present("C1"), present("L2")])
+    found = coverage_findings(review, rubric)
+    _check("D5 absent from coverage: blocking",
+           len(found) == 1 and found[0].severity == "blocking" and "D5" in found[0].issue, repr(found))
+
+    review = _coverage_review([present("D1"), present("D5"), present("L2"),
+                               {"id": "C1", "status": "present", "quote": "  ", "issue": ""}])
+    found = coverage_findings(review, rubric)
+    _check("present with an empty quote: blocking",
+           len(found) == 1 and found[0].severity == "blocking" and "C1" in found[0].issue, repr(found))
+
+    review = _coverage_review([present("D1"), present("D5"), present("L2"),
+                               {"id": "C1", "status": "wrong", "quote": "24+3", "issue": "no working shown"}])
+    found = coverage_findings(review, rubric)
+    _check("wrong: blocking, quoting the answer",
+           len(found) == 1 and found[0].severity == "blocking" and found[0].quote == "24+3", repr(found))
+    _check("all present: no findings",
+           coverage_findings(_coverage_review([present(i) for i in ("D1", "D5", "C1", "L2")]), rubric) == [])
+
+    problem = {"kind": "number", "quote": "33 rpm", "issue": "wrong", "fix": "124 rpm"}
+    rework = review_findings(_coverage_review([], "needs_rework", [problem, {**problem, "quote": "5 g/L"}]))
+    _check("needs rework: one blocking review finding per problem",
+           len(rework) == 2 and all(f.check == "review" and f.severity == "blocking" for f in rework), repr(rework))
+    minor = review_findings(_coverage_review([], "accept_with_corrections", [problem]))
+    _check("accept with corrections: warnings",
+           len(minor) == 1 and minor[0].severity == "warning" and minor[0].quote == "33 rpm", repr(minor))
+    _check("accept: no review findings", review_findings(_coverage_review([], "accept")) == [])
+
+    _check("same family: deepseek vs deepseek",
+           same_model_family("deepseek-v4.1-flash:1017-cloud", "deepseek-v4.1-flash:cloud") is True)
+    _check("different family: deepseek vs gemma",
+           same_model_family("deepseek-v4.1-flash:cloud", "gemma4:31b-cloud") is False)
+
+    _check("the prompt asks for coverage", "COVERAGE" in REVIEW_SYSTEM_PROMPT and '"coverage"' in REVIEW_SYSTEM_PROMPT)
+    inputs = review_inputs([HumanMessage(content="Q"), AIMessage(content="<solution>A</solution>")])
+    with_rubric = build_review_prompt(inputs, "", rubric)
+    _check("the prompt lists the rubric", "RUBRIC:" in with_rubric and "[L2]" in with_rubric
+           and "Check arithmetic in code" in with_rubric, with_rubric[-400:])
+    _check("no rubric: no RUBRIC section", "RUBRIC:" not in build_review_prompt(inputs, ""))
+
+    msgs = [HumanMessage(content="Q")]
+    for i in range(80):
+        out = "x" * 10_000 if i != 40 else "y" * 9_000 + " result 0.0593 " + "z" * 3_000
+        msgs += [AIMessage(content=f"<execute>print({i})</execute>"), AIMessage(content=f"<observation>{out}</observation>")]
+    msgs.append(AIMessage(content="<solution>A = 0.0593</solution>"))
+    clipped = review_inputs(msgs)["evidence"]
+    focused = review_inputs(msgs, focus_numbers={"0.0593"})["evidence"]
+    _check("without focus the step is clipped", "z" * 3_000 not in clipped)
+    _check("focus_numbers keeps the full output of the step that printed it",
+           "y" * 9_000 + " result 0.0593 " + "z" * 3_000 in focused)
+    _check("other steps stay clipped", "x" * 10_000 not in focused)
+
+    from biomentis.gate import Finding
+    from biomentis.gate.runner import focus_numbers
+
+    nums = focus_numbers([Finding("quantity", "blocking", "k = 0.0593 per 1,015 h at 3 sites", "x"),
+                          Finding("arithmetic", "blocking", "24+3 = 28", "x"),
+                          Finding("figure", "blocking", "Figure 77", "x")])
+    _check("focus numbers: from quantity/arithmetic quotes, as written and without commas",
+           {"0.0593", "1,015", "1015", "24", "28"} <= nums and "3" not in nums and "77" not in nums, str(nums))
+
+
+class _Raises:
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, messages):
+        self.calls += 1
+        raise RuntimeError("reviewer outage")
+
+
+def _gate_agent(reviewer):
+    from biomentis.agent.a1 import A1
+
+    agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
+    agent.llm = _Scripted([])
+    agent.gate_llm = _Reviewer([json.dumps({"quantities": []})] * 5)
+    agent.review_llm = reviewer
+    agent.review_model_name = "gpt-oss:120b" if reviewer else ""
+    agent.review_search = lambda query, num_results=3: "(no results)"
+    agent.reset_review()
+    return agent
+
+
+_GATE_MSGS = [
+    HumanMessage(content="What is 24+3?"),
+    AIMessage(content="<execute>print(24 + 3)</execute>"),
+    AIMessage(content="<observation>27</observation>"),
+    AIMessage(content="<solution>The total is 24+3 = 27 items.</solution>"),
+]
+
+
+def test_gate_reviewer() -> None:
+    print("\n[12] the reviewer inside the completion gate: failure, coverage, recording")
+    import biomentis.agent.a1 as a1_module
+    from biomentis.gate.rounds import final_label
+    from biomentis.gate.runner import run_gate
+
+    sleep = a1_module.time.sleep
+    a1_module.time.sleep = lambda s: None  # the transient-error retry's back-off
+    try:
+        agent = _gate_agent(_Raises())
+        result = run_gate(agent, list(_GATE_MSGS), 0, rubric=_gate_rubric())
+        _check("reviewer raises: state failed", result.reviewer_state == "failed", result.reviewer_state)
+        failed = [f for f in result.findings if f.check == "review"]
+        _check("reviewer raises: one 'review failed' warning",
+               len(failed) == 1 and failed[0].severity == "warning" and failed[0].issue.startswith("review failed: "),
+               repr(result.findings))
+        _check("no rubric findings without a review", not [f for f in result.findings if f.check == "rubric"])
+        _check("label: not fully checked (review failed)",
+               final_label(result, False, 0) == "⚠️ Not fully checked (review failed)", final_label(result, False, 0))
+        _check("the failed review is recorded", len(agent.run_reviews) == 1 and agent.run_reviews[0]["review"].error,
+               str(agent.run_reviews))
+
+        agent = _gate_agent(_Reviewer(["not json", "still not json"]))
+        result = run_gate(agent, list(_GATE_MSGS), 0, rubric=_gate_rubric())
+        _check("unusable twice: state failed", result.reviewer_state == "failed", result.reviewer_state)
+        _check("unusable twice: asked once more, not more", len(agent.review_llm.requests) == 2,
+               str(len(agent.review_llm.requests)))
+
+        coverage = [{"id": i, "status": "present", "quote": "The total", "issue": ""} for i in ("D1", "C1", "L2")]
+        reply = json.dumps({"verdict": "accept_with_corrections", "summary": "ok", "coverage": coverage,
+                            "problems": [{"kind": "unit", "quote": "27 items", "issue": "say units", "fix": ""}]})
+        reviewer = _Reviewer([reply])
+        agent = _gate_agent(reviewer)
+        agent.current_run_id = "run-gate-review"
+        result = run_gate(agent, list(_GATE_MSGS), 0, rubric=_gate_rubric())
+        _check("usable review: state ok", result.reviewer_state == "ok", result.reviewer_state)
+        _check("D5 not covered: a blocking rubric finding",
+               [f.issue for f in result.blocking if f.check == "rubric" and "D5" in f.issue], repr(result.findings))
+        _check("the correction is a warning",
+               [f for f in result.findings if f.check == "review" and f.severity == "warning"], repr(result.findings))
+        _check("the reviewer saw the rubric", "RUBRIC:" in reviewer.requests[0][-1].content)
+        _check("the review is recorded for the run summary",
+               len(agent.run_reviews) == 1 and agent.run_reviews[0]["review"].verdict == "accept_with_corrections",
+               str(agent.run_reviews))
+        path = os.path.join(os.environ["BIOMENTIS_ARTIFACT_DIR"], "run-gate-review", "review-1.txt")
+        _check("the raw reply is saved", os.path.exists(path), path)
+
+        reviewer = _Reviewer([json.dumps({"verdict": "accept", "summary": "ok"})])
+        agent = _gate_agent(reviewer)
+        result = run_gate(agent, list(_GATE_MSGS), 0, rubric=None)
+        _check("no rubric: no RUBRIC section, no coverage findings",
+               "RUBRIC:" not in reviewer.requests[0][-1].content and result.reviewer_state == "ok"
+               and not [f for f in result.findings if f.check in ("rubric", "review")], repr(result.findings))
+    finally:
+        a1_module.time.sleep = sleep
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Independent review tests")
@@ -560,6 +754,8 @@ def run_all() -> int:
         test_retry_and_saved_replies,
         test_assumption_checks,
         test_compare_reported,
+        test_rubric_coverage,
+        test_gate_reviewer,
     ):
         try:
             test()

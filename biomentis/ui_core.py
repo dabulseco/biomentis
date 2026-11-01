@@ -661,6 +661,20 @@ def run_settings(agent: Any) -> str:
     return " · ".join(parts)
 
 
+def _next_block_index(code_entries: list[dict[str, Any]] | None, run_id: str | None) -> int | None:
+    """Position of the next code block within its run (0-based).
+
+    `code_entries` can span several runs (a tutor continue starts a new run
+    without a new user message), so with a run id only that run's blocks
+    count; that matches replaying the run's journal on its own.
+    """
+    if code_entries is None:
+        return None
+    if run_id is None:
+        return len(code_entries)
+    return sum(1 for e in code_entries if e.get("journal_run_id") == run_id)
+
+
 def transcript_entry_for_event(
     event: Any, code_entries: list[dict[str, Any]] | None = None, run_id: str | None = None
 ) -> dict[str, Any] | None:
@@ -710,7 +724,7 @@ def transcript_entry_for_event(
             # Not "run_id": that key is the tutor's run id, which step grouping
             # (`_StepBoxTracker`) reads; this one names the journal file.
             "journal_run_id": run_id,
-            "block_index": len(code_entries) if code_entries is not None else None,
+            "block_index": _next_block_index(code_entries, run_id),
         }
         if code_entries is not None:
             code_entries.append(entry)

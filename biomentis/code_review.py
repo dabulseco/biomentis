@@ -273,34 +273,38 @@ def request_for_entry(transcript: list[dict], entry: dict, task: str) -> CodeRev
     """Build the review request for one agent code entry of the transcript.
 
     The output is the observation that follows the entry, the purpose is the
-    reasoning the agent wrote just before it, and the earlier code is the same
-    run's earlier code entries in the `run_journal.code_script` block format.
+    reasoning the agent wrote just before it, and the earlier code is all code
+    entries before it in the transcript, in the `run_journal.code_script` block format.
     An entry from before entries were tagged (no run_id/block_index) still
     works; it just has no earlier code.
     """
     position = next((i for i, e in enumerate(transcript) if e is entry), None)
-    output = purpose = ""
+    output = purpose = earlier = ""
     if position is not None:
-        output = next(
-            (e.get("content") or "" for e in transcript[position + 1 :] if e.get("kind") == "observation"), ""
-        )
+        # Output: the observation before the next code block, if any.
+        for e in transcript[position + 1 :]:
+            if e.get("kind") == "observation":
+                output = e.get("content") or ""
+                break
+            if e.get("kind") == "code":
+                break
+        # Purpose: the reasoning immediately before the code, if any.
         for e in reversed(transcript[:position]):
+            if e.get("kind") == "code" or e.get("role") == "user":
+                break
             if not e.get("kind") and e.get("title") == REASONING_TITLE:
                 purpose = (e.get("content") or "")[:MAX_PURPOSE_CHARS]
                 break
+        # Earlier code: the agent's Python namespace persists across tutor
+        # segments and turns, so every code entry before this one counts,
+        # whichever run it came from.
+        before = [e for e in transcript[:position] if e.get("kind") == "code"]
+        earlier = "\n\n".join(
+            format_code_block(i, e.get("language") or "python", e.get("content") or "")
+            for i, e in enumerate(before, start=1)
+        )
 
     run_id, block_index = entry.get("journal_run_id"), entry.get("block_index")
-    earlier = ""
-    if run_id is not None and block_index is not None:
-        blocks = sorted(
-            (e for e in transcript if e.get("kind") == "code" and e.get("journal_run_id") == run_id
-             and e.get("block_index") is not None and e["block_index"] < block_index),
-            key=lambda e: e["block_index"],
-        )
-        earlier = "\n\n".join(
-            format_code_block(e["block_index"] + 1, e.get("language") or "python", e.get("content") or "")
-            for e in blocks
-        )
     return CodeReviewRequest(
         code=entry.get("content") or "",
         language=entry.get("language") or "python",

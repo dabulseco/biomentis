@@ -365,11 +365,62 @@ def test_request_for_entry():
     _check("code", req.code == "b = a + 1")
     _check("output is next observation", req.output == "obs1", req.output)
     _check("purpose is nearest reasoning", req.purpose == "second plan", req.purpose)
-    _check("earlier has code0", "a = 1" in req.earlier_code and "block 1" in req.earlier_code, req.earlier_code)
+    _check("earlier has code0", "a = 1" in req.earlier_code and "block 1 (python)" in req.earlier_code, req.earlier_code)
     _check("earlier lacks code1", "b = a + 1" not in req.earlier_code)
     _check("locator + source + task", (req.run_id, req.block_index, req.source, req.task) == ("r1", 1, "agent", "the task"))
     long = [dict(t[1], content="x" * 3000), *t[2:]]
     _check("purpose clipped to 1500", len(cr.request_for_entry(long, long[1], "").purpose) <= 1500)
+
+
+def test_purpose_and_output_stop_at_neighbouring_code():
+    t = _agent_transcript()
+    # code1 with its reasoning removed: the only reasoning is before code0
+    no_reason = [t[0], t[1], t[2], t[3], t[5], t[6]]
+    _check("no purpose across an earlier code block", cr.request_for_entry(no_reason, t[5], "").purpose == "")
+    # a user message also ends the search
+    user = [t[1], {"role": "user", "panel": "main", "content": "q"}, t[5]]
+    _check("no purpose across a user entry", cr.request_for_entry(user, t[5], "").purpose == "")
+    # code0 has no observation yet; the next block's output is not its output
+    pending = [t[1], t[2], t[4], t[5], t[6]]
+    _check("no output borrowed from next block", cr.request_for_entry(pending, t[2], "").output == "")
+
+
+def test_earlier_code_spans_runs():
+    t = _agent_transcript()
+    t[2]["journal_run_id"] = "R1"
+    t[5]["journal_run_id"] = "R2"
+    t[5]["block_index"] = 0
+    req = cr.request_for_entry(t, t[5], "")
+    _check("R1 code is earlier code for R2 block", "a = 1" in req.earlier_code, req.earlier_code)
+    _check("own locator kept", (req.run_id, req.block_index) == ("R2", 0))
+    legacy = {"panel": "inner", "role": "assistant", "kind": "code", "content": "z = 0", "language": "python"}
+    req2 = cr.request_for_entry([legacy, *t[5:]], t[5], "")
+    _check("entry without locator counts", "z = 0" in req2.earlier_code)
+
+
+def test_block_index_per_run_on_shared_list():
+    import tempfile
+    from biomentis import run_journal
+    from biomentis.ui_core import UIEvent, transcript_entry_for_event
+    evs = [_code_event("a = 1"), UIEvent(type="observation", content="ok", collapsible=True), _code_event("b = 2")]
+    shared: list = []
+    with tempfile.TemporaryDirectory() as tmp:
+        ids, live2 = [], []
+        for n in range(2):
+            j = run_journal.RunJournal(f"task {n}", tmp)
+            for e in evs:
+                j.append(e)
+            j.finish("complete")
+            ids.append(j.run_id)
+            for e in evs:
+                got = transcript_entry_for_event(e, shared, run_id=j.run_id)
+                if n == 1 and got is not None:
+                    live2.append(got)
+        replay2 = run_journal.entries_for_run(run_journal.load_run(j.path))
+    codes = [e for e in shared if e["journal_run_id"] == ids[1]]
+    _check("R2 blocks indexed 0 and 1", [e["block_index"] for e in codes] == [0, 1], str(codes))
+    _check("R2 live equals replay", replay2[1:] == live2, f"{replay2[1:]} vs {live2}")
+
 
 
 def test_old_entry_without_locator():

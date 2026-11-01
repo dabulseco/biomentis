@@ -33,7 +33,7 @@ VERDICT_LABELS = {
 }
 
 # The evidence handed to the reviewer: each step's code and output, cut to fit.
-_STEP_CODE_CHARS = 1500
+_STEP_CODE_CHARS = 4000
 _STEP_OUTPUT_CHARS = 2500
 _EVIDENCE_TOTAL_CHARS = 90_000
 
@@ -119,8 +119,13 @@ def _solution_body(text: str) -> str:
 
 
 def _clip(text: str, limit: int) -> str:
+    """Cut text to about `limit` characters, keeping its head (60%) and its tail (40%)."""
     text = text.strip()
-    return text if len(text) <= limit else text[:limit] + f"\n... [{len(text) - limit} more characters]"
+    if len(text) <= limit:
+        return text
+    head = int(limit * 0.6)
+    tail = limit - head
+    return text[:head] + f"\n... [{len(text) - limit} characters omitted] ...\n" + text[len(text) - tail :]
 
 
 def review_inputs(messages: list[BaseMessage]) -> dict:

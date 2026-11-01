@@ -2332,6 +2332,10 @@ Each library is listed with its description to help you understand its functiona
                 code in this run and whether its units are right. List the ones that were only
                 stated, or look wrong, and tell the agent to recompute them in code.
                 Name design choices or limits that no source consulted in this run supports.
+                For each script, compare its printed values with the comments and labels that
+                describe them, check its units and conversions, and
+                recompute one key value by hand. Name any script whose output contradicts its own
+                labels.
                 No question asked, just feedbacks.
                 """
                 # Divergent by design ("think hard what are missing"), so this is

@@ -196,6 +196,8 @@ def test_critic_checks_numbers() -> None:
     _check("asks whether each number was computed in code", "whether it was computed in" in src)
     _check("asks for units", "whether its units are right" in src)
     _check("asks for unsupported choices", "no source consulted in this run supports" in src)
+    _check("asks to compare printed values with labels", "printed values with the comments and labels" in src)
+    _check("asks to recompute one value by hand", "recompute one key value by hand" in src)
 
 
 def _scripted_agent(messages: list):

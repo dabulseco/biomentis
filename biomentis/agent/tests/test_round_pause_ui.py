@@ -285,7 +285,7 @@ def test_real_graph_cancel_during_pause() -> None:
     from biomentis.ui_core import stream_agent_events
 
     llm = _Scripted(_EVIDENCE_STEPS + [_WRONG] * 4)
-    agent = _agent(llm, _Scripted(["Check the sum."]), planned=1)
+    agent = _agent(llm, _Scripted(["Check the sum."] * 3), planned=1)
     runner = start_run(
         "real-graph-pause",
         "What is 24+3?",
@@ -433,7 +433,7 @@ def test_inline_run_stops_instead_of_pausing() -> None:
     from biomentis.ui_core import stream_agent_events
 
     llm = _Scripted(_EVIDENCE_STEPS + [_WRONG] * 4)
-    agent = _agent(llm, _Scripted(["Check the sum."]), planned=1)
+    agent = _agent(llm, _Scripted(["Check the sum."] * 3), planned=1)
     agent.pause_allowed = False
     box: dict = {}
 

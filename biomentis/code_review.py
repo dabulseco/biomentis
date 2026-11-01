@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -16,10 +17,15 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from biomentis.agent.tutor.instruction import _extract_json
 from biomentis.independent_review import _clip
+from biomentis.run_journal import format_code_block
 
 MAX_CODE_CHARS = 40_000
 MAX_EARLIER_CHARS = 30_000
 MAX_OUTPUT_CHARS = 8_000
+MAX_PURPOSE_CHARS = 1_500
+
+# The title the transcript gives the agent's reasoning (ui_core.stream_agent_events).
+REASONING_TITLE = "🤔 Reasoning"
 
 VERDICTS = ("ok", "run_with_fixes", "do_not_trust")
 KINDS = ("bug", "mismatch", "units", "science", "portability")
@@ -261,3 +267,56 @@ def review_code(llm, req: CodeReviewRequest, model_name: str) -> CodeReview:
     if result.corrected_code:
         result.corrected_code = _header(model_name) + result.corrected_code + "\n"
     return result
+
+
+def request_for_entry(transcript: list[dict], entry: dict, task: str) -> CodeReviewRequest:
+    """Build the review request for one agent code entry of the transcript.
+
+    The output is the observation that follows the entry, the purpose is the
+    reasoning the agent wrote just before it, and the earlier code is the same
+    run's earlier code entries in the `run_journal.code_script` block format.
+    An entry from before entries were tagged (no run_id/block_index) still
+    works; it just has no earlier code.
+    """
+    position = next((i for i, e in enumerate(transcript) if e is entry), None)
+    output = purpose = ""
+    if position is not None:
+        output = next(
+            (e.get("content") or "" for e in transcript[position + 1 :] if e.get("kind") == "observation"), ""
+        )
+        for e in reversed(transcript[:position]):
+            if not e.get("kind") and e.get("title") == REASONING_TITLE:
+                purpose = (e.get("content") or "")[:MAX_PURPOSE_CHARS]
+                break
+
+    run_id, block_index = entry.get("journal_run_id"), entry.get("block_index")
+    earlier = ""
+    if run_id is not None and block_index is not None:
+        blocks = sorted(
+            (e for e in transcript if e.get("kind") == "code" and e.get("journal_run_id") == run_id
+             and e.get("block_index") is not None and e["block_index"] < block_index),
+            key=lambda e: e["block_index"],
+        )
+        earlier = "\n\n".join(
+            format_code_block(e["block_index"] + 1, e.get("language") or "python", e.get("content") or "")
+            for e in blocks
+        )
+    return CodeReviewRequest(
+        code=entry.get("content") or "",
+        language=entry.get("language") or "python",
+        output=output,
+        task=task,
+        purpose=purpose,
+        earlier_code=earlier,
+        run_id=run_id,
+        block_index=block_index,
+        source="agent",
+    )
+
+
+_FENCE = re.compile(r"^```[ \t]*([\w+-]*)[^\n]*\n(.*?)^```[ \t]*$", re.DOTALL | re.MULTILINE)
+
+
+def extract_code_blocks(markdown: str) -> list[tuple[str, str]]:
+    """Fenced code blocks of a markdown text as `(language, code)`; an unlabelled block is python."""
+    return [((lang or "python").lower(), body.rstrip("\n")) for lang, body in _FENCE.findall(markdown or "")]

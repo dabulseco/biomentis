@@ -4542,7 +4542,11 @@ Each library is listed with its description to help you understand its functiona
                     # One shared mapping with `biomentis.ui_core`, so a run
                     # restored from a journal renders exactly like the live
                     # one that produced it.
-                    entry = transcript_entry_for_event(event, code_execution_entries)
+                    entry = transcript_entry_for_event(
+                        event,
+                        code_execution_entries,
+                        run_id=_runner.run_id if _runner is not None else getattr(self, "current_run_id", None),
+                    )
 
                     if event.type in ("solution", "summary"):
                         self.main_history_copy += [{"role": "assistant", "content": event.content}]

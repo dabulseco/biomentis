@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 os.environ["BIOMENTIS_RUN_DIR"] = tempfile.mkdtemp(prefix="cr_runs_")
 
+from biomentis import code_review as cr
 from biomentis import code_review_jobs as jobs
 
 from biomentis.code_review import (
@@ -327,6 +328,90 @@ def test_submit_failure_becomes_error():
     k2 = jobs.submit_review(_req(), "m", _factory([]))
     jobs._wait_for(k2, 10)
     _check("later submit runs", k2 == k and jobs.review_status(k)[0] == "done")
+
+
+# --- Task 4: locating code blocks and building their review request ---------
+
+def _code_event(text, language="python"):
+    from biomentis.ui_core import UIEvent
+    return UIEvent(type="code", content=text, language=language, title="🛠️ Code")
+
+
+def test_entries_carry_locator():
+    from biomentis.ui_core import transcript_entry_for_event
+    entries: list = []
+    got = [transcript_entry_for_event(_code_event(f"x = {i}"), entries, run_id="r1") for i in range(3)]
+    _check("block_index 0,1,2", [e["block_index"] for e in got] == [0, 1, 2], str(got))
+    _check("journal_run_id on each", all(e["journal_run_id"] == "r1" for e in got))
+
+
+def _agent_transcript():
+    return [
+        {"panel": "main", "role": "user", "content": "task"},
+        {"panel": "inner", "role": "assistant", "content": "first plan", "title": "🤔 Reasoning"},
+        {"panel": "inner", "role": "assistant", "kind": "code", "content": "a = 1", "language": "python",
+         "journal_run_id": "r1", "block_index": 0},
+        {"panel": "inner", "role": "assistant", "kind": "observation", "content": "obs0"},
+        {"panel": "inner", "role": "assistant", "content": "second plan", "title": "🤔 Reasoning"},
+        {"panel": "inner", "role": "assistant", "kind": "code", "content": "b = a + 1", "language": "python",
+         "journal_run_id": "r1", "block_index": 1},
+        {"panel": "inner", "role": "assistant", "kind": "observation", "content": "obs1"},
+    ]
+
+
+def test_request_for_entry():
+    t = _agent_transcript()
+    req = cr.request_for_entry(t, t[5], "the task")
+    _check("code", req.code == "b = a + 1")
+    _check("output is next observation", req.output == "obs1", req.output)
+    _check("purpose is nearest reasoning", req.purpose == "second plan", req.purpose)
+    _check("earlier has code0", "a = 1" in req.earlier_code and "block 1" in req.earlier_code, req.earlier_code)
+    _check("earlier lacks code1", "b = a + 1" not in req.earlier_code)
+    _check("locator + source + task", (req.run_id, req.block_index, req.source, req.task) == ("r1", 1, "agent", "the task"))
+    long = [dict(t[1], content="x" * 3000), *t[2:]]
+    _check("purpose clipped to 1500", len(cr.request_for_entry(long, long[1], "").purpose) <= 1500)
+
+
+def test_old_entry_without_locator():
+    entry = {"panel": "inner", "role": "assistant", "kind": "code", "content": "print(1)", "language": "python"}
+    t = [entry, {"kind": "observation", "content": "1", "panel": "inner", "role": "assistant"}]
+    req = cr.request_for_entry(t, entry, "")
+    _check("code and output", req.code == "print(1)" and req.output == "1")
+    _check("no earlier code", req.earlier_code == "")
+
+
+def test_replay_matches_live():
+    import tempfile
+    from biomentis import run_journal
+    from biomentis.ui_core import UIEvent, transcript_entry_for_event
+    events = [
+        UIEvent(type="reasoning", content="plan", title="🤔 Reasoning"),
+        _code_event("a = 1"),
+        UIEvent(type="observation", content="ok", duration=1.0, collapsible=True),
+        _code_event("b = 2"),
+        UIEvent(type="observation", content="ok", duration=1.0, collapsible=True),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        journal = run_journal.RunJournal("a task", tmp)
+        for e in events:
+            journal.append(e)
+        journal.finish("complete")
+        run = run_journal.load_run(journal.path)
+        replay = run_journal.entries_for_run(run)
+        live_codes: list = []
+        live = [transcript_entry_for_event(e, live_codes, run_id=journal.run_id) for e in events]
+    live = [e for e in live if e is not None]
+    _check("replay entries equal live", replay[1:] == live, f"{replay[1:]} vs {live}")
+    _check("replay locators", [(e["journal_run_id"], e["block_index"]) for e in replay if e.get("kind") == "code"]
+           == [(journal.run_id, 0), (journal.run_id, 1)])
+
+
+def test_extract_code_blocks():
+    md = "Intro\n```python\nx = 1\n```\ntext\n```bash\nls -l\n```\n```\ny = 2\n```\n"
+    got = cr.extract_code_blocks(md)
+    _check("three blocks", [g[0] for g in got] == ["python", "bash", "python"], str(got))
+    _check("code bodies", [g[1] for g in got] == ["x = 1", "ls -l", "y = 2"], str(got))
+
 
 
 def run_all() -> int:

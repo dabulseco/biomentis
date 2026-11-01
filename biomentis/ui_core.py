@@ -662,7 +662,7 @@ def run_settings(agent: Any) -> str:
 
 
 def transcript_entry_for_event(
-    event: Any, code_entries: list[dict[str, Any]] | None = None
+    event: Any, code_entries: list[dict[str, Any]] | None = None, run_id: str | None = None
 ) -> dict[str, Any] | None:
     """Map one `UIEvent` to the transcript entry that renders it.
 
@@ -676,6 +676,11 @@ def transcript_entry_for_event(
     An `observation` retro-titles the code block it belongs to (the one
     immediately before it), so the caller must pass the same list across the
     whole run for the "done in Xs" stamp to appear.
+
+    `run_id` is the id of the run (the one `runs/<run_id>.jsonl` is named
+    for). A code entry is tagged with it and with its 0-based position among
+    the run's code entries, so a later code review can find the run's other
+    code. Live and replayed runs pass the same id and so get the same tags.
 
     The one thing this does NOT do is stamp a `complete` event with the run's
     total time: that needs the run clock, which lives in the UI's session
@@ -702,6 +707,10 @@ def transcript_entry_for_event(
             "content": event.content,
             "language": event.language,
             "title": event.title,
+            # Not "run_id": that key is the tutor's run id, which step grouping
+            # (`_StepBoxTracker`) reads; this one names the journal file.
+            "journal_run_id": run_id,
+            "block_index": len(code_entries) if code_entries is not None else None,
         }
         if code_entries is not None:
             code_entries.append(entry)

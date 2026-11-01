@@ -602,6 +602,11 @@ class A1:
         # The conversation's output folder (see `biomentis.workspace`); code
         # steps run in its files/. None (scripts, tests) runs them in place.
         self.output_dir = None
+        # Whether a completion-gate pause can wait for the user. Only a caller
+        # that runs the agent on its own thread and can answer the pause sets
+        # it, per run (the UI's background path, RepeatBatch). Otherwise a
+        # round-4 pause stops the run and a context pause wraps up.
+        self.pause_allowed = False
         # The completion gate's rubric settings (see `draft_rubric` in the
         # graph): a rubric every run uses as is (the repeat-run batch sets
         # it), and the teacher's uploaded rubric text. Neither is reset per
@@ -800,13 +805,16 @@ class A1:
     def _await_user(self, round_number: int, findings: list, reason: str) -> str:
         """Pause for the user's Continue or Stop; return the choice.
 
-        With `pause_allowed` False (the UI runs inline, so nobody can answer
-        while the script thread is blocked), the run stops instead: it never
-        hangs, and it is never labelled as passed without passing.
+        With `pause_allowed` False (the default: a plain `go()`, or the UI
+        running inline, where nobody can answer while the thread is blocked)
+        the run never hangs: a round pause stops it (it is never labelled as
+        passed without passing), and a context pause continues, so the run
+        wraps up with what it has, as it did before the gate.
         """
-        if not getattr(self, "pause_allowed", True):
-            print("completion gate: a pause is not possible here (no background run); stopping")
-            return "stop"
+        if not getattr(self, "pause_allowed", False):
+            choice = "continue" if reason == "context" else "stop"
+            print(f"completion gate: nobody can answer a pause here; {reason} pause resolved as {choice}")
+            return choice
         self.round_control.request(round_number=round_number, findings=findings, reason=reason)
         return self.round_control.wait()
 

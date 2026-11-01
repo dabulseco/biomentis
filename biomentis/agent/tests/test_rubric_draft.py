@@ -327,9 +327,11 @@ def test_sidebar() -> None:
            'key="biomentis_rubric_upload",' in flat, "")
     _check("near Self-critique rounds",
            0 < src.index('"Rubric (optional)"') - src.index('"Self-critique rounds"') < 800, "")
+    # The settings and configure step live in biomentis/agent_setup.py, shared with the CLI.
+    setup = " ".join((Path(__file__).resolve().parents[2] / "agent_setup.py").read_text(encoding="utf-8").split())
     _check("the upload reaches the agent, decoded as UTF-8 with replacement",
-           'agent.set_rubric_upload(' in flat and 'decode("utf-8", errors="replace")' in flat
-           and "else None" in flat, "")
+           'agent.set_rubric_upload(' in setup and 'decode("utf-8", errors="replace")' in setup
+           and "else None" in setup and "settings_from_state(st.session_state" in flat, "")
 
     import shutil
 

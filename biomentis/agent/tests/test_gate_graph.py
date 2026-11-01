@@ -90,7 +90,7 @@ def _preset_rubric():
 _RUBRIC = _preset_rubric()
 
 
-def _agent(llm, critic=None, planned=1, gate=True, trace_dir=None):
+def _agent(llm, critic=None, planned=1, gate=True, trace_dir=None, pause_allowed=True):
     from biomentis.agent.a1 import A1
 
     agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[],
@@ -103,6 +103,8 @@ def _agent(llm, critic=None, planned=1, gate=True, trace_dir=None):
     # A fixed rubric, so the gate model only extracts quantities here
     # (drafting is tested in test_rubric_draft).
     agent.preset_rubric = _RUBRIC
+    # These tests answer the pause from another thread, as the UI does.
+    agent.pause_allowed = pause_allowed
     return agent
 
 
@@ -355,6 +357,34 @@ def test_runs_without_answer_get_a_status() -> None:
     _check("step guard: no final answer", agent.final_status == "⚠️ No final answer", agent.final_status)
 
 
+def test_no_pause_by_default() -> None:
+    print("\n(j) a plain go() never blocks: pause_allowed is False by default")
+    from biomentis.agent.a1 import A1
+
+    fresh = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[])
+    _check("A1() starts with pause_allowed False", fresh.pause_allowed is False, str(fresh.pause_allowed))
+
+    llm = _Scripted(_EVIDENCE_STEPS + [_WRONG] * 4)
+    agent = _agent(llm, _Scripted(["Check the sum."] * 3), planned=1, pause_allowed=False)
+    worker, box = _run_in_thread(agent, "What is 24+3?")
+    worker.join(timeout=60)
+    _check("the run ended on its own", not worker.is_alive() and "error" not in box, repr(box.get("error")))
+    _check("it never paused", agent.round_control.pending is None)
+    _check("stopped at round 4 with the stopped label",
+           agent.final_status == "⛔ Stopped by user — did not pass" and len(agent.run_gate_results) == 4
+           and len(llm.requests) == 6, f"{agent.final_status} {len(agent.run_gate_results)} {len(llm.requests)}")
+
+    llm = _Scripted(_EVIDENCE_STEPS + [_RIGHT])
+    agent = _agent(llm, planned=0, pause_allowed=False)
+    _wrap_up_fit(agent)
+    worker, box = _run_in_thread(agent, "What is 24+3?")
+    worker.join(timeout=60)
+    _check("context limit, no pause possible: the run wraps up (continue), it does not stop",
+           not worker.is_alive() and "24+3 = 27" in box.get("final", "") and not agent._gate_stopped
+           and agent.round_control.pending is None, f"{box} {agent.final_status}")
+    _check("... and the model was called (not stopped)", len(llm.requests) == 3, str(len(llm.requests)))
+
+
 def main() -> int:
     trace_dir = tempfile.mkdtemp(prefix="biomentis_gate_trace_")
     test_fix_after_one_round(trace_dir)
@@ -366,6 +396,7 @@ def main() -> int:
     test_feedback_message()
     test_checker_crash()
     test_runs_without_answer_get_a_status()
+    test_no_pause_by_default()
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     return 1 if _FAILED else 0
 

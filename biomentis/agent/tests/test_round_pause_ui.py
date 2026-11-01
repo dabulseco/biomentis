@@ -403,13 +403,41 @@ def test_sidebar_toggle() -> None:
     flat = " ".join(src.split())
     joined = flat.replace('" "', "")
     _check("help text verbatim", help_text in joined, "")
-    _check("configure gets completion_gate", "completion_gate=st.session_state.get(\"biomentis_completion_gate\"" in flat)
+    from biomentis.agent_setup import configure_agent, settings_from_state
+
+    class _Agent:
+        def set_temperatures(self, *a):
+            return False
+
+        def configure(self, **kw):
+            self.configured = kw
+            self.evidence_gate = kw["evidence_gate"]
+            self.completion_gate = kw["completion_gate"]
+
+        def set_rubric_upload(self, text):
+            self.rubric_upload = text
+
+    for gate_on in (False, True):
+        agent = _Agent()
+        configure_agent(agent, settings_from_state({"biomentis_completion_gate": gate_on}, None, "", []))
+        _check(f"gate {'on' if gate_on else 'off'}: configure gets completion_gate={gate_on}",
+               agent.completion_gate is gate_on, str(agent.configured))
+        _check(f"gate {'on' if gate_on else 'off'}: evidence_gate stays True (the original default)",
+               agent.evidence_gate is True, str(agent.configured))
+    from biomentis.agent.a1 import A1
+
+    real = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[])
+    real.review_llm = None
+    configure_agent(real, settings_from_state({"biomentis_completion_gate": False}, None, "", []))
+    _check("a real agent with the gate off has evidence_gate True",
+           real.evidence_gate is True and real.completion_gate is False, f"{real.evidence_gate} {real.completion_gate}")
+    _check("the app reads the settings from the session state",
+           "settings_from_state(st.session_state" in flat and "configure_agent" in flat)
     _check("warning when background runs are off",
            "if not background_runs_enabled():" in flat
            and "Background runs are off (BIOMENTIS_BACKGROUND_RUNS=0): a run that needs your decision at "
            "round 4 will stop instead of pausing." in joined)
-    _check("evidence_gate keeps the same value",
-           "evidence_gate=st.session_state.get(\"biomentis_completion_gate\"" in flat)
+
 
 
 def test_status_placement_and_restore() -> None:

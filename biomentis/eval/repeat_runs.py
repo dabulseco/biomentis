@@ -248,6 +248,7 @@ class RepeatBatch:
                 agent.preset_rubric = self.rubric
                 agent.output_dir = str(self.out_dir / f"run-{index:02d}")
                 agent.round_control = _BatchRoundControl(self, index)  # reset_gate keeps it
+                agent.pause_allowed = True  # each run has its own thread, so it can wait for an answer
             except Exception as exc:
                 self._give_token(index)
                 self._finish(self._failed(index, exc))
@@ -358,6 +359,28 @@ def run_pause_loop(batch: RepeatBatch, ask: Callable[[str], str] = input,
         batch.wait(poll)
 
 
+def cli_reviewer(review_model: str, agent_model: str, build: Callable[..., Any] | None = None,
+                 out: Callable[[str], Any] = print) -> tuple[Any, str]:
+    """(review_llm, review_model_name) for the CLI's runs, built like the app's default reviewer.
+
+    Says which reviewer the runs get, or that there is none (so they will be
+    "Not fully checked"), and warns when it is the agent's model family.
+    """
+    from biomentis.agent_setup import REVIEWER_NONE_MESSAGE, SAME_FAMILY_WARNING, build_reviewer
+    from biomentis.independent_review import same_model_family
+
+    review_llm, error = (None, "") if not review_model else build_reviewer(review_model, build)
+    if review_llm is None:
+        if error:
+            out(f"Reviewer {review_model} could not be loaded ({error}).")
+        out(REVIEWER_NONE_MESSAGE)
+        return None, ""
+    out(f"Reviewer: {review_model}")
+    if same_model_family(agent_model, review_model):
+        out(SAME_FAMILY_WARNING)
+    return review_llm, review_model
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m biomentis.eval.repeat_runs",
                                 description="Run one prompt K times with one rubric and compare the runs.")
@@ -388,11 +411,15 @@ def main(argv: list[str] | None = None) -> int:
 
     from biomentis.agent.a1 import A1
 
+    cfg = BiomentisConfig()
+    review_llm, review_model_name = cli_reviewer(cfg.review_model, cfg.llm)
+
     def make_agent():
         agent = A1()  # models and settings from default_config / env, as other entry points do
+        agent.review_llm = review_llm
+        agent.review_model_name = review_model_name
         agent.configure(self_critic=rounds > 0, test_time_scale_round=rounds, completion_gate=True)
-        agent.pause_allowed = True  # each run has its own thread, so it can wait for an answer
-        return agent
+        return agent  # RepeatBatch allows each run to pause
 
     first = make_agent()
     upload = args.rubric.read_text(encoding="utf-8") if args.rubric else None

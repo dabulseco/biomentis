@@ -376,7 +376,34 @@ def test_prune_finished() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_repeat_agents_use_the_gate() -> None:
+    print("\n[gate] repeat agents always use the completion gate, whatever the toggle says")
+    from biomentis.agent_setup import configure_agent, repeat_settings, settings_from_state
+
+    class _Agent:
+        def set_temperatures(self, *a):
+            return False
+
+        def configure(self, **kw):
+            self.kw = kw
+
+        def set_rubric_upload(self, text):
+            pass
+
+    interactive = settings_from_state({"biomentis_completion_gate": False}, None, "", [])
+    agent = _Agent()
+    configure_agent(agent, repeat_settings(interactive))
+    _check("toggle off: the repeat agent still gets completion_gate=True", agent.kw["completion_gate"] is True,
+           str(agent.kw))
+    _check("the interactive settings are not changed", interactive["completion_gate"] is False)
+    with open(os.path.join(_REPO, "streamlit_app.py"), encoding="utf-8") as f:
+        src = f.read()
+    _check("the app's repeat agents are configured with repeat_settings",
+           "_configure_agent(repeat_agent, repeat_settings(s))" in src)
+
+
 def run_all() -> int:
+    test_repeat_agents_use_the_gate()
     test_prune_finished()
     test_real_batch()
     test_real_app()

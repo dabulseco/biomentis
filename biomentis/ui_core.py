@@ -778,7 +778,7 @@ def _gate_events(agent: Any, state: dict, gates_seen: int, context_pause_shown: 
             title=f"🧪 Checks after round {result.round}",
             content=head + "\n\n" + format_findings(result.findings, result.accepted),
         )
-    can_pause = getattr(agent, "pause_allowed", True)
+    can_pause = getattr(agent, "pause_allowed", False)
     if can_pause and results[gates_seen:] and state.get("next_step") == "await_decision":
         last = results[-1]
         yield UIEvent(

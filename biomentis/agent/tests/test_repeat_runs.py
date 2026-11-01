@@ -179,6 +179,9 @@ def test_batch_and_report():
     _check("finished runs are 1 and 3", [o.index for o in batch.outcomes()] == [1, 3],
            str([o.index for o in batch.outcomes()]))
     _check("not done while a run is paused", not batch.done())
+    _check("the batch lets every run pause (pause_allowed set per run)",
+           len(made) == 3 and all(getattr(a, "pause_allowed", False) is True for a in made),
+           str([getattr(a, "pause_allowed", None) for a in made]))
     _check("finished runs' agents are dropped, the paused one kept", sorted(batch._agents) == [2],
            str(sorted(batch._agents)))
 
@@ -307,6 +310,43 @@ def test_cli_disabled():
            err.getvalue() + outbuf.getvalue())
 
 
+def test_cli_reviewer():
+    print("\n[7b] the CLI's reviewer: built like the app's, announced, same-family warning")
+    from biomentis.agent_setup import REVIEWER_NONE_MESSAGE, SAME_FAMILY_WARNING
+    from biomentis.eval.repeat_runs import cli_reviewer
+
+    built = []
+
+    def build(name, temperature=None, config=None):
+        built.append((name, temperature))
+        return f"llm<{name}>"
+
+    lines: list[str] = []
+    llm, name = cli_reviewer("gpt-oss:120b", "deepseek-v4.1-flash:cloud", build=build, out=lines.append)
+    _check("the reviewer is built with the stub builder", llm == "llm<gpt-oss:120b>" and name == "gpt-oss:120b"
+           and built and built[0][0] == "gpt-oss:120b", f"{llm} {name} {built}")
+    _check("announced: Reviewer: <name>", lines == ["Reviewer: gpt-oss:120b"], str(lines))
+
+    lines = []
+    cli_reviewer("deepseek-v4.1-pro:cloud", "deepseek-v4.1-flash:cloud", build=build, out=lines.append)
+    _check("same family: warned", lines == ["Reviewer: deepseek-v4.1-pro:cloud", SAME_FAMILY_WARNING], str(lines))
+
+    lines = []
+    llm, name = cli_reviewer("", "deepseek-v4.1-flash:cloud", build=build, out=lines.append)
+    _check("none set: the 'Not fully checked' message", (llm, name) == (None, "") and lines == [REVIEWER_NONE_MESSAGE],
+           str(lines))
+    _check("the message text",
+           REVIEWER_NONE_MESSAGE == "Reviewer: none (set BIOMNI_REVIEW_MODEL) — runs will be 'Not fully checked'")
+
+    def broken(name, temperature=None, config=None):
+        raise RuntimeError("no such model")
+
+    lines = []
+    llm, _ = cli_reviewer("nope", "x", build=broken, out=lines.append)
+    _check("cannot be built: says why, then none", llm is None and len(lines) == 2 and "no such model" in lines[0]
+           and lines[1] == REVIEWER_NONE_MESSAGE, str(lines))
+
+
 def _ns() -> dict:
     from biomentis.tool.support_tools import _persistent_namespace
 
@@ -414,8 +454,8 @@ def test_failures():
 
 
 def main() -> int:
-    for test in (test_batch_and_report, test_cli_pause_prompt, test_cli_disabled, test_one_run_at_a_time,
-                 test_failures):
+    for test in (test_batch_and_report, test_cli_pause_prompt, test_cli_disabled, test_cli_reviewer,
+                 test_one_run_at_a_time, test_failures):
         try:
             test()
         except Exception as exc:  # a crash is a failure, not an abort

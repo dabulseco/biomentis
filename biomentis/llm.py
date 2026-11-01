@@ -181,6 +181,7 @@ def get_llm(
     base_url: str | None = None,
     api_key: str | None = None,
     config: Optional["BiomentisConfig"] = None,
+    timeout: float | None = None,
 ) -> BaseChatModel:
     """Build a chat model for the given source, and verify what it was given.
 
@@ -196,6 +197,7 @@ def get_llm(
         base_url=base_url,
         api_key=api_key,
         config=config,
+        timeout=timeout,
     )
     return _check_stop_sequences(llm, stop_sequences)
 
@@ -208,6 +210,7 @@ def _build_llm(
     base_url: str | None = None,
     api_key: str | None = None,
     config: Optional["BiomentisConfig"] = None,
+    timeout: float | None = None,
 ) -> BaseChatModel:
     """
     Build a language model instance. Call `get_llm`, not this — it adds the
@@ -228,6 +231,8 @@ def _build_llm(
         base_url (str): The base URL for custom model serving (e.g., "http://localhost:8000/v1"), default is None
         api_key (str): The API key for the custom llm
         config (BiomentisConfig): Optional configuration object. If provided, unspecified parameters will use config values
+        timeout (float): Request timeout in seconds. Only the Ollama sources apply it
+                      (to the HTTP client); None keeps the client's default (no limit)
     """
     # Use config values for any unspecified parameters
     if config is not None:
@@ -432,6 +437,7 @@ def _build_llm(
             base_url=ollama_host,
             num_predict=int(os.getenv("BIOMENTIS_OLLAMA_NUM_PREDICT") or OLLAMA_NUM_PREDICT_DEFAULT),
             reasoning=_ollama_reasoning(model, ollama_host),
+            **({"client_kwargs": {"timeout": timeout}} if timeout is not None else {}),
         )
 
     elif source == "OllamaCloud":
@@ -456,7 +462,7 @@ def _build_llm(
             model=model,
             temperature=temperature,
             base_url=host,
-            client_kwargs={"headers": headers},
+            client_kwargs={"headers": headers, **({"timeout": timeout} if timeout is not None else {})},
             num_predict=int(os.getenv("BIOMENTIS_OLLAMA_NUM_PREDICT") or OLLAMA_NUM_PREDICT_DEFAULT),
             reasoning=_ollama_reasoning(model, host, cloud=True, headers=headers),
         )

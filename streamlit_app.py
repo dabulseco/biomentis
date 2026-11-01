@@ -22,7 +22,12 @@ from biomentis.agent.tutor import TutorEngine
 from biomentis.config import default_config
 from biomentis.ui_core import list_available_providers
 from biomentis.ui_repl import render_repl_panel
-from biomentis.ui_settings import render_anthropic_key_field, render_ncbi_email_field, render_ollama_key_field
+from biomentis.ui_settings import (
+    render_anthropic_key_field,
+    render_code_review_model_field,
+    render_ncbi_email_field,
+    render_ollama_key_field,
+)
 from biomentis.ui_tutor import (
     install_renderers,
     render_tutor_chat_panel,
@@ -170,6 +175,9 @@ with st.sidebar:
     st.divider()
     st.header("Ollama Cloud")
     render_ollama_key_field()
+
+    # Model that the Code review button sends code to (Ollama models only).
+    render_code_review_model_field()
 
 
 # --- Agent (rebuilt when the model changes) -----------------------------

@@ -464,6 +464,96 @@ def test_extract_code_blocks():
     _check("code bodies", [g[1] for g in got] == ["x = 1", "ls -l", "y = 2"], str(got))
 
 
+_MODEL_HARNESS = '''
+import sys
+sys.path.insert(0, {repo!r})
+import streamlit as st
+import biomentis.ui_core as core
+core.list_available_providers = lambda: {providers!r}
+from biomentis.ui_settings import render_code_review_model_field
+with st.sidebar:
+    render_code_review_model_field()
+'''
+
+_PROVIDERS_WITH_DEFAULT = {
+    "Ollama": ["gemma4:31b-cloud", "gpt-oss:120b-cloud"],
+    "OllamaCloud": ["deepseek-v4:flash", "gemma4:31b-cloud"],
+    "Anthropic": ["claude-sonnet-5-5"],
+}
+_PROVIDERS_NO_DEFAULT = {"Ollama": ["llama3:8b"], "Anthropic": ["claude-sonnet-5-5"]}
+
+
+def _model_app(providers):
+    from streamlit.testing.v1 import AppTest
+
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    path = os.path.join(tempfile.mkdtemp(prefix="cr_model_"), "app.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_MODEL_HARNESS.format(repo=repo, providers=providers))
+    return AppTest.from_file(path, default_timeout=60)
+
+
+def test_setting_lists_ollama_only():
+    at = _model_app(_PROVIDERS_WITH_DEFAULT)
+    at.run()
+    _check("no exception", not at.exception, str(at.exception))
+    sb = at.sidebar.selectbox
+    _check("one selectbox", len(sb) == 1, str(len(sb)))
+    opts = list(sb[0].options)
+    _check("ollama models listed, deduplicated",
+           opts == ["gemma4:31b-cloud", "gpt-oss:120b-cloud", "deepseek-v4:flash"], str(opts))
+    _check("no anthropic", not any("claude" in o for o in opts), str(opts))
+    _check("no off/stub", not any(o.lower() in ("off", "stub") or "stub" in o.lower() for o in opts), str(opts))
+
+
+def test_setting_default():
+    from biomentis.config import DEFAULT_CODE_REVIEW_MODEL
+
+    _check("default constant", DEFAULT_CODE_REVIEW_MODEL == "gpt-oss:120b-cloud")
+    at = _model_app(_PROVIDERS_WITH_DEFAULT)
+    at.run()
+    _check("default selected when listed", at.sidebar.selectbox[0].value == DEFAULT_CODE_REVIEW_MODEL,
+           at.sidebar.selectbox[0].value)
+    at = _model_app(_PROVIDERS_NO_DEFAULT)
+    at.run()
+    _check("first ollama model when default absent", at.sidebar.selectbox[0].value == "llama3:8b",
+           at.sidebar.selectbox[0].value)
+
+
+def test_review_client_carries_300s_timeout():
+    import httpx
+    from unittest import mock
+
+    from biomentis import ui_settings as us
+    from biomentis.config import default_config
+
+    def timeout_of(llm):
+        t = llm._client._client.timeout
+        return t.read if isinstance(t, httpx.Timeout) else t
+
+    # Local daemon (model listed locally): no network call is made building it.
+    with mock.patch("biomentis.ollama_utils.list_ollama_models", return_value=["gpt-oss:120b-cloud"]), \
+         mock.patch("biomentis.llm._ollama_reasoning", return_value=True) as reasoning:
+        llm = us.code_review_llm("gpt-oss:120b-cloud")
+    _check("local client type", type(llm).__name__ == "ChatOllama", type(llm).__name__)
+    _check("local timeout 300", timeout_of(llm) == 300, str(llm._client._client.timeout))
+    _check("thinking decided by _ollama_reasoning", reasoning.called and llm.reasoning is True, str(llm.reasoning))
+
+    # Ollama Cloud (not listed locally, key set): timeout and auth header both kept.
+    old = default_config.ollama_key
+    default_config.ollama_key = "test-key"
+    try:
+        with mock.patch("biomentis.ollama_utils.list_ollama_models", return_value=[]), \
+             mock.patch("biomentis.config.resolve_ollama_key", return_value="test-key"), \
+             mock.patch("biomentis.ui_settings.resolve_ollama_key", return_value="test-key"), \
+             mock.patch("biomentis.llm._ollama_reasoning", return_value=None):
+            llm = us.code_review_llm("deepseek-v4:flash")
+    finally:
+        default_config.ollama_key = old
+    _check("cloud timeout 300", timeout_of(llm) == 300, str(llm._client._client.timeout))
+    _check("cloud auth header kept",
+           llm._client._client.headers.get("authorization") == "Bearer test-key", "header missing")
+
 
 def run_all() -> int:
     for name, fn in list(globals().items()):

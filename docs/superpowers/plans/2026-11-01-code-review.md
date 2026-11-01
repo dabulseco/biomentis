@@ -138,6 +138,7 @@ Start the system prompt from the spec's Appendix A, extended with: the earlier-c
   - `review_status(key: str) -> tuple[str, CodeReview | None]` — `("none" | "pending" | "done" | "error", review)`.
   - `load_saved_reviews(run_dir: str | None = None) -> int` — fills the store from `*.reviews.jsonl`; returns count; called once per process.
   - `sidecar_path(run_id: str | None) -> str` — `<run_dir>/<run_id>.reviews.jsonl`, or `<output_dir>/code_reviews.jsonl` when `run_id` is None.
+  - `review_for_block(run_id: str, block_index: int) -> CodeReview | None` — the most recent `done` review for that agent code block (any model), from the store (which `load_saved_reviews` fills from sidecars). Used by Task 8's export.
   - Module-level `ThreadPoolExecutor(max_workers=2)` and a lock-guarded dict store.
 
 - [ ] **Step 1: Write the failing tests** (`BIOMENTIS_RUN_DIR` pointed at a temp dir; fake llm_factory)
@@ -147,6 +148,7 @@ Start the system prompt from the spec's Appendix A, extended with: the earlier-c
 - `test_second_submit_reuses`: two submits of the same request → factory called once.
 - `test_error_then_resubmit`: first factory raises → `error`; resubmit → runs again.
 - `test_sidecar_written_and_reloaded`: done review with `run_id="r1"` → `r1.reviews.jsonl` has one line with key, block_index, model, verdict, corrected_code; clear the store; `load_saved_reviews()` → status `done` again.
+- `test_review_for_block`: two done reviews for `run_id="r1", block_index=0` (different models, the second later) → returns the later; unknown block → None.
 - `test_main_journal_untouched`: after a review for `run_id="r1"`, `r1.jsonl` does not exist / is unchanged.
 
 - [ ] **Step 2: Run; expect failures.**
@@ -296,5 +298,5 @@ Start the system prompt from the spec's Appendix A, extended with: the earlier-c
   `$P -m biomentis.agent.tests.test_code_review       # code review core, jobs + sidecars, context, setting, export`
   `$P -m biomentis.agent.tests.test_code_review_ui    # Code Review button + report panel wherever code is shown`
 - [ ] **Step 2:** Run every test listed in CLAUDE.md; expect all pass.
-- [ ] **Step 3:** Launch `streamlit run streamlit_app.py`, run a short task that writes code, click Code Review on a step, and confirm the report and corrected script appear and the run is unaffected.
+- [ ] **Step 3:** Headless smoke: an `AppTest` of `streamlit_app.py` (agent and Ollama calls faked) renders without exceptions and shows the "Code review model" setting. A live click-through in the real app is left to the owner and must be reported as not done.
 - [ ] **Step 4: Commit** — `git commit -m "Document the code review tests"`

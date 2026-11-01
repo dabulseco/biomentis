@@ -128,10 +128,11 @@ from biomentis.independent_review import (
     require_sources,
     review_inputs,
 )
-from biomentis.run_quality import MAX_EVIDENCE_ASKS, evidence_nudge, missing_evidence, run_evidence
+from biomentis.run_quality import MAX_EVIDENCE_ASKS, current_run, evidence_nudge, missing_evidence, run_evidence
 from biomentis.gate import GateResult
 from biomentis.gate.control import RoundControl
 from biomentis.gate.rounds import final_label, next_action
+from biomentis.gate.rubric import Rubric, resolve_rubric, save_rubric
 from biomentis.gate.runner import gate_feedback, run_gate
 
 # The status of a gate-on run that ended without an answer to check.
@@ -600,6 +601,14 @@ class A1:
         # The conversation's output folder (see `biomentis.workspace`); code
         # steps run in its files/. None (scripts, tests) runs them in place.
         self.output_dir = None
+        # The completion gate's rubric settings (see `draft_rubric` in the
+        # graph): a rubric every run uses as is (the repeat-run batch sets
+        # it), and the teacher's uploaded rubric text. Neither is reset per
+        # run; `run_rubric`, the rubric the current run is checked against,
+        # is (see `reset_gate`).
+        self.preset_rubric: Rubric | None = None
+        self.rubric_upload: str | None = None
+        self.run_rubric: Rubric | None = None
 
         # Step-level tracing. Cheap (a few JSON lines per step, no extra LLM
         # calls), so it defaults on -- the failures worth studying are the
@@ -711,6 +720,12 @@ class A1:
         self._gate_stopped = False
         self._context_pause_asked = False
         self.final_status = ""
+        self.run_rubric = None
+        self.rubric_error = ""
+
+    def set_rubric_upload(self, text: str | None) -> None:
+        """The teacher's rubric for the next runs (any format), or None for none."""
+        self.rubric_upload = text if text and text.strip() else None
 
     def _await_user(self, round_number: int, findings: list, reason: str) -> str:
         """Pause for the user's Continue or Stop; return the choice.
@@ -2514,7 +2529,36 @@ Each library is listed with its description to help you understand its functiona
         # latest result, so the gate count minus one.
 
         def draft_rubric(state: AgentState) -> AgentState:
-            """Draft (or convert) the run's rubric. A pass-through until the rubric task lands."""
+            """Fix the run's rubric before the first answer: preset, uploaded, converted or drafted.
+
+            It is frozen for the run and saved to the output folder. Nothing is
+            added to the message history: the model sees the rubric only
+            through the gate's feedback. A failure costs the rubric, never the
+            run; the gate then runs without one.
+            """
+            self.run_rubric = None
+            self.rubric_error = ""
+            try:
+                if self.preset_rubric is not None:
+                    rubric = self.preset_rubric
+                else:
+                    run = current_run(state["messages"])
+                    first = next((m for m in run if isinstance(m, HumanMessage)), None)
+                    prompt = getattr(self, "user_task", "") or (first.content if first is not None else "")
+                    llm = getattr(self, "gate_llm", None) or self.llm
+                    rubric = resolve_rubric(str(prompt), self.rubric_upload, llm)
+            except Exception as exc:  # the run goes on without a rubric
+                self.rubric_error = f"{type(exc).__name__}: {exc}"
+                print(f"[gate] rubric failed ({self.rubric_error}); the gate runs without one")
+                return state
+            self.run_rubric = rubric
+            n = len(rubric.items)
+            print(f"completion gate: rubric {rubric.source}, {n} item{'s' if n != 1 else ''}")
+            if getattr(self, "output_dir", None):
+                try:
+                    save_rubric(rubric, Path(self.output_dir))
+                except Exception as exc:  # a file that can't be written must not cost the run
+                    print(f"[gate] could not save the rubric: {exc}")
             return state
 
         def routing_function_gate(state: AgentState) -> Literal["execute", "generate", "gate", "finalize"]:
@@ -2531,7 +2575,7 @@ Each library is listed with its description to help you understand its functiona
 
         def gate(state: AgentState) -> AgentState:
             round_done = len(self.run_gate_results)
-            result = run_gate(self, state["messages"], round_done)
+            result = run_gate(self, state["messages"], round_done, rubric=self.run_rubric)
             self.run_gate_results.append(result)
             try:
                 self.tracer.record_gate(
@@ -4468,6 +4512,9 @@ Each library is listed with its description to help you understand its functiona
                     if entry.get("content"):
                         with st.expander("💬 Tutor Q&A", expanded=False):
                             st.markdown(entry["content"])
+                elif entry.get("kind") == "rubric":
+                    with st.expander("Show the rubric", expanded=False):
+                        st.markdown(entry.get("content", ""))
                 elif entry.get("kind") == "final_status":
                     status = entry.get("content", "")
                     if status.startswith("✅"):

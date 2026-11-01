@@ -78,6 +78,18 @@ _WRONG = "<solution>The total is 24+3 = 28 items.</solution>"
 _RIGHT = "<solution>The total is 24+3 = 27 items.</solution>"
 
 
+def _preset_rubric():
+    from biomentis.gate.rubric import parse_rubric_markdown
+
+    return parse_rubric_markdown(
+        "## Deliverables\n- [D1] The total\n\n## Constraints\n- [C1] Show the sum\n\n"
+        "## Core lessons\n- [L1] Check arithmetic in code\n",
+        source="uploaded", prompt_sha="0" * 64)
+
+
+_RUBRIC = _preset_rubric()
+
+
 def _agent(llm, critic=None, planned=1, gate=True, trace_dir=None):
     from biomentis.agent.a1 import A1
 
@@ -88,6 +100,9 @@ def _agent(llm, critic=None, planned=1, gate=True, trace_dir=None):
     agent.gate_llm = _NoQuantities()
     agent.configure(self_critic=planned > 0, test_time_scale_round=planned, completion_gate=gate)
     agent.review_llm = None
+    # A fixed rubric, so the gate model only extracts quantities here
+    # (drafting is tested in test_rubric_draft).
+    agent.preset_rubric = _RUBRIC
     return agent
 
 

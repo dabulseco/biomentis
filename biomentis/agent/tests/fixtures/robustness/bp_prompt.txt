@@ -1,0 +1,18 @@
+ou are a chemistry lab-course developer writing for undergraduates (1st–2nd year, non-majors or majors). Design a complete, runnable laboratory workflow on boiling-point elevation, delivered in two sequential phases:
+
+Phase 1 — Pure water only. Students establish the baseline: what boiling is (vapor pressure = external pressure), how to measure a boiling point defensibly, and what makes a measurement untrustworthy. No solutes in Phase 1. Phase 2 — Solute effects. Same apparatus and method, now comparing NaCl (i ≈ 2) vs glucose/sucrose (i = 1) at matched molality to show the effect is colligative (particle count), not identity. Include at least one non-1:1 comparison if feasible.
+
+For each phase, deliver all of the following:
+
+Learning objectives (3–5, measurable) and prerequisite knowledge.
+Experimental design — variables (independent/dependent/controlled), number of replicates, why each control exists, and the specific comparison that makes the physics visible rather than inferred.
+Detailed protocol — numbered steps, exact masses/volumes per student group, glassware sizes, target concentrations, and the expected observation at each step. Assume groups of 2–3, 3–4 groups total, and one 2–3 h lab period per phase.
+Supplies & reagents list — item, grade/purity, quantity per group, quantity for the whole class, and consumables.
+Equipment list — including thermometry (specify resolution/accuracy needed and justify it from the expected ΔT), heating source, and any pressure-measurement device.
+Time estimate for every individual step in minutes, plus a phase total and a workable in-period timeline.
+Data handling — what is recorded, a sample data table, the calculation template (ΔTb = i·Kb·m), and how to correct the measured boiling point to 760 mmHg using the recorded barometric pressure.
+Error and pitfall notes — where a class is most likely to get a wrong number and why.
+Safety and waste — hazards, PPE, disposal, and a note on bumping/superheating.
+Assessment — 3–4 post-lab questions that require interpreting the data, not recalling the formula.
+
+Constraints: use only equipment found in a standard teaching lab (no ebulliometer unless you justify it); flag any step needing a fume hood; keep total reagent cost modest; state explicitly how the two phases connect (Phase 1's method is reused unchanged in Phase 2).

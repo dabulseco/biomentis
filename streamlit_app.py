@@ -156,6 +156,16 @@ with st.sidebar:
         help="Reviews of the answer by the agent's model before it is final. Each round can "
         "send the agent back to recompute numbers or find sources. 0 turns review off.",
     )
+    # Read before each run, when the agent is configured below.
+    st.file_uploader(
+        "Rubric (optional)",
+        type=["md", "txt", "yaml", "yml"],
+        key="biomentis_rubric_upload",
+        help="What the answer must deliver, respect and teach. A rubric in the standard format "
+        "(## Deliverables / ## Constraints / ## Core lessons, items like - [D1] ...) is used as is; "
+        "any other text is converted. With none, the agent drafts one from the prompt. The rubric is "
+        "fixed for the run and is used only with the completion checks on.",
+    )
 
     # NCBI contact email. Rendered here (early, before the agent is built)
     # so `Bio.Entrez.email` is in place before any Entrez-touching code runs
@@ -271,6 +281,11 @@ if not st.session_state.get("biomni_run_active"):
         # evidence nudge still sends an unsupported answer back.
         completion_gate=st.session_state.get("biomentis_completion_gate", default_config.completion_gate),
         evidence_gate=st.session_state.get("biomentis_completion_gate", default_config.completion_gate),
+    )
+    # The rubric upload, for the next run (the draft_rubric node reads it).
+    _rubric_file = st.session_state.get("biomentis_rubric_upload")
+    agent.set_rubric_upload(
+        _rubric_file.getvalue().decode("utf-8", errors="replace") if _rubric_file is not None else None
     )
 
 # Sidebar order: Model picker (above) → REPL (existing) → Tutor (new).

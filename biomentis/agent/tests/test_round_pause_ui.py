@@ -325,7 +325,7 @@ def test_real_graph_cancel_during_pause() -> None:
     _check("summary: status", f"**Status:** {STOPPED}" in q, q)
     _check("summary: rounds", "**Rounds:** used 3 of planned 1" in q, q)
     _check("summary: accepted", "**Accepted as is:** 0 findings" in q, q)
-    _check("summary: rubric", "**Rubric:** none" in q, q)
+    _check("summary: rubric (the helper presets an uploaded one)", "**Rubric:** uploaded" in q, q)
     clear_run("real-graph-pause")
 
 

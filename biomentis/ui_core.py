@@ -64,9 +64,11 @@ UIEventType = Literal[
     # "gate_result": the checks after one round, in the step log.
     # "round_pause": the run is waiting for Continue or Stop.
     # "final_status": the run's status label, shown above the final answer.
+    # "rubric": the run's frozen rubric, once, at the start of a gate-on run.
     "gate_result",
     "round_pause",
     "final_status",
+    "rubric",
 ]
 
 
@@ -406,6 +408,7 @@ def stream_agent_events(
 
     # Completion gate progress: results already shown, and the context pause.
     gates_seen = len(getattr(agent, "run_gate_results", None) or [])
+    rubric_shown = False
     context_pause_shown = bool(getattr(agent, "_context_pause_asked", False))
     # The last message processed. Nodes that leave the history unchanged (the
     # gate, the rubric step, finalize) emit the same state again; showing its
@@ -417,6 +420,8 @@ def stream_agent_events(
         t_step = time() - t
         message = s["messages"][-1]
 
+        if not rubric_shown:
+            rubric_shown = yield from _rubric_events(agent)
         yield from _gate_events(agent, s, gates_seen, context_pause_shown)
         gates_seen = len(getattr(agent, "run_gate_results", None) or [])
         context_pause_shown = bool(getattr(agent, "_context_pause_asked", False))
@@ -727,6 +732,30 @@ def format_findings(findings: list[Any], accepted: set[str] | frozenset = frozen
     return "\n".join(lines)
 
 
+RUBRIC_TITLE = "📋 Rubric for this run (frozen)"
+
+
+def _rubric_events(agent: Any) -> Generator[UIEvent, None, bool]:
+    """The run's frozen rubric (or a warning that it failed); returns True once it has been shown.
+
+    The `draft_rubric` node runs first, so its emission is the first state
+    of a gate-on run; with the gate off there is no rubric and nothing shows.
+    """
+    if not getattr(agent, "completion_gate", False):
+        return True
+    rubric = getattr(agent, "run_rubric", None)
+    if rubric is not None:
+        from biomentis.gate.rubric import format_rubric_markdown
+
+        yield UIEvent(type="rubric", channel="main", title=RUBRIC_TITLE, content=format_rubric_markdown(rubric))
+        return True
+    error = getattr(agent, "rubric_error", "")
+    if error:
+        yield UIEvent(type="status", content=f"⚠️ No rubric for this run ({error}); the checks run without one.")
+        return True
+    return False
+
+
 def _gate_events(agent: Any, state: dict, gates_seen: int, context_pause_shown: bool) -> Generator[UIEvent, None, None]:
     """Events for the gate's progress since the last state emission.
 
@@ -777,7 +806,7 @@ def gate_summary(agent: Any) -> dict | None:
         "rounds_used": results[-1].round if results else 0,
         "rounds_planned": getattr(agent, "planned_rounds", 0),
         "accepted": len(getattr(control, "accepted", None) or ()),
-        "rubric": getattr(agent, "rubric_source", "") or "none",
+        "rubric": getattr(getattr(agent, "run_rubric", None), "source", "") or "none",
     }
 
 
@@ -906,6 +935,8 @@ def transcript_entry_for_event(
         entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "final_status":
         entry = {"panel": "main", "role": "assistant", "kind": "final_status", "content": event.content}
+    elif kind == "rubric":
+        entry = {"panel": "main", "role": "assistant", "kind": "rubric", "content": event.content, "title": event.title}
     elif kind == "complete":
         entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "instruction":

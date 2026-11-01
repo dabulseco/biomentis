@@ -73,6 +73,7 @@ $P -m biomentis.agent.tests.test_rubric_draft       # gate: per-run rubric draft
 $P -m biomentis.agent.tests.test_gate_graph         # gate in the agent graph: fail → critique → pass, pause before round 4 + Stop, context pause, gate off = old graph, gate trace records
 $P -m biomentis.agent.tests.test_gate_critique      # gate: critique prompt from findings + rubric, keeps passed quantities, runs every critique round
 $P -m biomentis.agent.tests.test_round_pause_ui     # pause panel (accept as is, Continue, Stop, survives reruns), Stop run while paused, gate/pause/status events, status above the answer + export, sidebar toggle
+$P -m biomentis.agent.tests.test_repeat_runs        # repeat runs: K runs, one rubric, paused run parked while the next runs, partial + final report (rubric table, disagreements), CLI pause prompt, BIOMNI_REPEAT_RUNS=false
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

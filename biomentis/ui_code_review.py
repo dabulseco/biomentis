@@ -9,6 +9,7 @@ its widget keys.
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any, Callable
 
 import streamlit as st
@@ -30,18 +31,23 @@ def _file_name(req: CodeReviewRequest) -> str:
     return f"code_review_{block}{_EXTENSIONS.get(req.language.lower(), '.py')}"
 
 
+def _plain(text: str) -> str:
+    """Escape Markdown and LaTeX characters so model text shows literally."""
+    return re.sub(r"([\\`*_$~#<>\[\]])", r"\\\1", text)
+
+
 def _show_report(req: CodeReviewRequest, review: CodeReview, key: str) -> None:
     label = VERDICT_LABELS.get(review.verdict, review.verdict or "Done")
     with st.expander(f"Code review — {label}", expanded=True):
         if review.summary:
-            st.write(review.summary)
+            st.markdown(_plain(review.summary))
         for n, issue in enumerate(review.issues, 1):
             where = f" (line {issue.line})" if issue.line is not None else ""
             st.markdown(f"**{n}. {issue.severity.upper()} · {issue.kind}{where}**")
             if issue.quote:
                 st.code(issue.quote, language=req.language)
-            st.markdown(f"Problem: {issue.problem}")
-            st.markdown(f"Fix: {issue.fix}")
+            st.markdown(f"Problem: {_plain(issue.problem)}")
+            st.markdown(f"Fix: {_plain(issue.fix)}")
         if not review.corrected_code:
             st.write("No corrected script could be produced.")
             return
@@ -87,13 +93,13 @@ def render_code_review(
         def _pending() -> None:
             if review_status(rkey)[0] != "pending":
                 st.rerun()  # full rerun: draws the finished report (or the error)
-            st.caption(f"Reviewing… ({model})")
+            st.status(f"Reviewing… ({model})", state="running")
 
         _pending()
     elif status == "done" and review is not None:
         _show_report(req, review, key)
     else:
-        st.error(review.error if review else "The review failed.")
+        st.error((review.error if review else "") or "The review failed.")
         if st.button("Try again", key=f"{key}_retry"):
             submit()
             st.rerun()

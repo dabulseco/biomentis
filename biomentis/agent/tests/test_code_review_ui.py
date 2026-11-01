@@ -39,7 +39,8 @@ from biomentis.code_review import CodeReviewRequest
 from biomentis.ui_code_review import render_code_review
 
 st.session_state.setdefault("biomni_run_active", True)
-st.session_state.setdefault("tutor_paused", "card-3")
+st.session_state.setdefault("biomni_tutor_run", {{"step_id": 3, "paused_at": 12.5, "step_qa": {{3: []}}}})
+st.session_state.setdefault("biomni_run_cursor", 7)
 st.write("page body")
 render_code_review(
     CodeReviewRequest(code=CODE, language="python", block_index=2),
@@ -108,7 +109,7 @@ def _key():
 
 
 def _texts(at) -> str:
-    return "\n".join(str(e.value) for e in list(at.markdown) + list(at.caption) + list(at.warning) + list(at.error))
+    return "\n".join(str(e.value) for e in list(at.markdown) + list(at.caption) + list(at.warning) + list(at.error)) + "\n" + "\n".join(str(s.label) for s in at.status)
 
 
 def _with_isolated_dirs():
@@ -195,15 +196,41 @@ def test_click_does_not_touch_run_state() -> None:
 
     gate = threading.Event()
     at = _start(_reply(), gate)
-    before = {k: at.session_state[k] for k in ("biomni_run_active", "tutor_paused")}
+    before = {k: at.session_state[k] for k in ("biomni_run_active", "biomni_tutor_run", "biomni_run_cursor")}
     keys_before = set(at.session_state.filtered_state)
     at.button[0].click().run()
-    after = {k: at.session_state[k] for k in ("biomni_run_active", "tutor_paused")}
+    after = {k: at.session_state[k] for k in ("biomni_run_active", "biomni_tutor_run", "biomni_run_cursor")}
     new_keys = set(at.session_state.filtered_state) - keys_before
     _check("run and tutor state unchanged", before == after, f"{before} vs {after}")
     _check("no new session keys beyond the widget", all(k.startswith("blk_") for k in new_keys), str(new_keys))
     gate.set()
     jobs._wait_for(_key())
+
+
+def test_model_text_shown_literally() -> None:
+    from biomentis import code_review_jobs as jobs
+
+    txt = "costs $5 per 500 g and $6 total"
+    at = _start(_reply(summary=txt, issues=[{"line": 1, "kind": "units", "severity": "low", "quote": "q", "problem": txt, "fix": "a_b*c"}]))
+    at.button[0].click().run()
+    jobs._wait_for(_key())
+    at.run()
+    vals = [m.value for m in at.markdown]
+    _check("dollar signs escaped in summary", any(v == r"costs \$5 per 500 g and \$6 total" for v in vals), str(vals))
+    _check("dollar signs escaped in problem", any(v.startswith("Problem: ") and r"\$5" in v for v in vals), str(vals))
+    _check("underscore and star escaped in fix", any(v == r"Fix: a\_b\*c" for v in vals), str(vals))
+    _check("no LaTeX element", len(at.latex) == 0)
+
+
+def test_empty_error_falls_back() -> None:
+    from biomentis import code_review_jobs as jobs
+    from biomentis.code_review import CodeReview
+
+    at = _start(_reply())
+    with jobs._lock:
+        jobs._store[_key()] = {"status": "error", "review": CodeReview(error=""), "run_id": None, "block_index": 2, "seq": 1}
+    at.run()
+    _check("blank error replaced", [e.value for e in at.error] == ["The review failed."], str([e.value for e in at.error]))
 
 
 def run_all() -> int:
@@ -217,6 +244,8 @@ def run_all() -> int:
     test_syntax_warning_shown()
     test_error_panel_offers_retry()
     test_click_does_not_touch_run_state()
+    test_model_text_shown_literally()
+    test_empty_error_falls_back()
     print("\n" + "=" * 60)
     print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")
     print("=" * 60)

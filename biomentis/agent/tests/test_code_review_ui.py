@@ -265,6 +265,7 @@ A1.launch_streamlit_demo(agent)
 """
 
 TRANSCRIPT: list = [[]]
+APP_DIR: list = [""]  # the harness's run dir (also its session output folder)
 REVIEW_LABEL = "🔎 Code Review"
 
 
@@ -301,6 +302,7 @@ def _start_app(transcript, reply=None):
     FACTORY[0] = _factory(reply if reply is not None else _reply())
     TRANSCRIPT[0] = transcript
     tmp = tempfile.mkdtemp(prefix="biomni_cr_ui_")
+    APP_DIR[0] = tmp
     path = os.path.join(tmp, "app.py")
     with open(path, "w") as f:
         f.write(_APP_HARNESS.format(repo=_REPO, run_dir=tmp))
@@ -406,7 +408,7 @@ ui_settings.code_review_model = lambda: "fake-model"
 ui_settings.code_review_llm = FACTORY[0]
 from biomentis.ui_tutor import _render_visuals
 
-_render_visuals({{"plot_code": "import matplotlib.pyplot as plt\\nplt.plot([1, 2])", "plot_png": None}}, key="chat-panel-0", task="plot it")
+_render_visuals({{"plot_code": "import matplotlib.pyplot as plt\\nplt.plot([1, 2])", "plot_png": None, "task": "plot it"}}, key="chat-panel-0")
 _render_visuals({{"plot_code": None, "plot_png": None}}, key="chat-panel-1")
 """
 
@@ -464,6 +466,91 @@ def test_button_on_repl_history() -> None:
     _check("buttons for #3 and #1 only", keys == ["cr-repl-3_go", "cr-repl-1_go"], str(keys))
 
 
+def test_answer_review_reloaded_after_restart() -> None:
+    print("\n[16] an answer-block review is saved under the run dir and reloaded")
+    from biomentis import code_review_jobs as jobs
+    from biomentis.code_review import CodeReviewRequest, review_key
+
+    t = [_user("the task"), _answer("```python\nz = 3\n```")]
+    at = _start_app(t)
+    run_dir = APP_DIR[0]
+    _review_buttons(at)[0].click().run()
+    key = review_key(CodeReviewRequest(code="z = 3", task="the task", block_index=0, source="answer"), "fake-model")
+    jobs._wait_for(key)
+    _check("saved in the run dir's no-run sidecar", os.path.exists(os.path.join(run_dir, jobs.NO_RUN_SIDECAR)), str(os.listdir(run_dir)))
+    _check("not in the session output folder's file", not os.path.exists(os.path.join(run_dir, jobs.OUTPUT_SIDECAR)))
+    jobs._clear_for_tests()
+    _check("store emptied (restart)", jobs.review_status(key)[0] == "none")
+    loaded = jobs.load_saved_reviews(run_dir)
+    _check("reloaded from disk", loaded == 1 and jobs.review_status(key)[0] == "done", f"{loaded} {jobs.review_status(key)[0]}")
+    at.run()
+    _check("replayed answer shows the stored report", any(e.label.startswith("Code review") for e in at.expander) and not _review_buttons(at), str([e.label for e in at.expander]))
+
+
+class _FakeChat:
+    def ask(self, **kw):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            content="Here is a plot.", citations=[], also_consider=[], bloom_level=None, dok_level=None,
+            rubric_hit=[], confidence=None, failed=False, plot_code="import matplotlib.pyplot as plt\nplt.plot([1])",
+            plot_png=None, plot_error="", structure_path=None, plot_mode="student",
+        )
+
+
+TUTOR: list = [None]
+RUN: list = [None]
+
+_STEP_QA_HARNESS = """
+import sys
+sys.path.insert(0, {repo!r})
+import streamlit as st
+import biomentis.ui_settings as ui_settings
+from biomentis.agent.tests.test_code_review_ui import FACTORY, TUTOR, RUN
+ui_settings.code_review_model = lambda: "fake-model"
+ui_settings.code_review_llm = FACTORY[0]
+from biomentis.ui_tutor import _render_step_qa
+
+_render_step_qa(st, 1, RUN[0], TUTOR[0], "r1")
+"""
+
+
+def test_tutor_turn_keeps_its_task() -> None:
+    print("\n[17] a tutor turn's review keeps its own task when a new task starts")
+    from types import SimpleNamespace
+
+    from streamlit.testing.v1 import AppTest
+
+    from biomentis import code_review_jobs as jobs
+
+    jobs._clear_for_tests()
+    FACTORY[0] = _factory(_reply())
+    TUTOR[0] = SimpleNamespace(chat=_FakeChat(), current_prompt="task A", kb=None)
+    RUN[0] = {"prompt": "task A"}
+    path = os.path.join(tempfile.mkdtemp(), "stepqa.py")
+    with open(path, "w") as f:
+        f.write(_STEP_QA_HARNESS.format(repo=_REPO))
+    at = AppTest.from_file(path, default_timeout=60).run()
+    at.text_input(key="biomni_tutor_step_ask_input_r1_1").input("plot it?")
+    next(b for b in at.button if b.label == "💬 Ask about this step").click().run()
+    _check("no exception", not at.exception, str(at.exception))
+    turn = RUN[0]["step_qa"][1][0]
+    _check("task stored on the turn", turn.get("task") == "task A", str(turn.get("task")))
+    buttons = _review_buttons(at)
+    _check("button under the turn's plot code", [b.key for b in buttons] == ["cr-tutor-chat-step-r1_1-0_go"], str([b.key for b in buttons]))
+    buttons[0].click().run()
+    with jobs._lock:
+        keys = list(jobs._store)
+    _check("one review queued", len(keys) == 1, str(keys))
+    jobs._wait_for(keys[0])
+    TUTOR[0].current_prompt = "task B"  # the student starts a new task
+    at.run()
+    _check("review still shown after the new task", any(e.label.startswith("Code review") for e in at.expander), str([e.label for e in at.expander]))
+    _check("no button reappears", not _review_buttons(at), str([b.key for b in _review_buttons(at)]))
+    with jobs._lock:
+        _check("no second review queued", list(jobs._store) == keys, str(list(jobs._store)))
+
+
 def run_all() -> int:
     _with_isolated_dirs()
     print("=" * 60)
@@ -484,6 +571,8 @@ def run_all() -> int:
     test_no_button_without_code()
     test_button_on_tutor_plot_code()
     test_button_on_repl_history()
+    test_answer_review_reloaded_after_restart()
+    test_tutor_turn_keeps_its_task()
     print("\n" + "=" * 60)
     print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")
     print("=" * 60)

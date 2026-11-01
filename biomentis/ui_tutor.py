@@ -1714,7 +1714,7 @@ def render_tutor_chat_panel(tutor) -> None:
         for _idx, turn in enumerate(st.session_state.biomni_tutor_chat_history):
             with st.chat_message(turn["role"]):
                 st.markdown(turn["content"])
-                _render_visuals(turn, key=f"chat-panel-{_idx}", task=getattr(tutor, "current_prompt", None) or "")
+                _render_visuals(turn, key=f"chat-panel-{_idx}")
                 if turn.get("citations"):
                     with st.expander(
                         f"Sources ({len(turn['citations'])})", expanded=False
@@ -1815,11 +1815,13 @@ def _chat_search_dirs(tutor) -> list[str]:
     return dirs
 
 
-def _render_visuals(turn: dict, key: str, task: str = "") -> None:
+def _render_visuals(turn: dict, key: str) -> None:
     """Show a stored turn's code, figure and structure. Reads only the dict:
     how an answer is shown never depends on the current plot setting.
 
-    The plot code gets a Code Review button; `task` is the run prompt, if any."""
+    The plot code gets a Code Review button. Its task is the one stored on the
+    turn when it was asked, so starting a new task does not change the
+    review's key (older turns without one use "")."""
     import streamlit as st
 
     code = turn.get("plot_code")
@@ -1829,7 +1831,7 @@ def _render_visuals(turn: dict, key: str, task: str = "") -> None:
         from biomentis.ui_code_review import render_code_review
 
         render_code_review(
-            CodeReviewRequest(code=code, output=turn.get("plot_error") or "", task=task, source="tutor"),
+            CodeReviewRequest(code=code, output=turn.get("plot_error") or "", task=turn.get("task") or "", source="tutor"),
             key=f"cr-tutor-{key}",
             output_dir=st.session_state.get("biomni_output_dir"),
         )
@@ -1929,11 +1931,12 @@ def _handle_chat_turn(tutor, question: str) -> None:
     from biomentis.ui_visuals import current_plot_mode
 
     _t_chat_start = time.monotonic()
+    chat_task = tutor.current_prompt or ""
     try:
         turn = tutor.chat.ask(
             question=question,
             context=step_context,
-            task=tutor.current_prompt or "",
+            task=chat_task,
             transcript=transcript,
             last_answer=last_answer,
             mode="chat",  # KB + LLM hybrid; chat panel is decoupled from tutor
@@ -1974,6 +1977,7 @@ def _handle_chat_turn(tutor, question: str) -> None:
             "confidence": turn.confidence,
             "failed": turn.failed,
             "also_consider": list(turn.also_consider),
+            "task": chat_task,
             **_visuals_dict(turn),
         }
     )
@@ -2015,7 +2019,7 @@ def _render_step_qa(container: Any, step_id: int, run: dict, tutor, run_id: str 
                 for _qi, turn in enumerate(qa_list):
                     st.markdown(f"**Q:** {turn['question']}")
                     st.markdown(f"**A:** {turn['answer']}")
-                    _render_visuals(turn, key=f"chat-step-{_key_suffix}-{_qi}", task=getattr(tutor, "current_prompt", None) or "")
+                    _render_visuals(turn, key=f"chat-step-{_key_suffix}-{_qi}")
                     if turn.get("also_consider"):
                         with st.expander("Also worth knowing", expanded=False):
                             for item in turn["also_consider"]:
@@ -2075,6 +2079,7 @@ def _handle_step_qa(tutor, run: dict, step_id: int, question: str) -> None:
             "rubric_hit": list(turn.rubric_hit),
             "confidence": turn.confidence,
             "failed": turn.failed,
+            "task": run.get("prompt", ""),
             **_visuals_dict(turn),
         }
     )

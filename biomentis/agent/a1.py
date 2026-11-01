@@ -4231,6 +4231,9 @@ Each library is listed with its description to help you understand its functiona
             # Code blocks inside an answer each get a review, below the answer.
             # Answers carry no run id, so the key is the answer's content hash.
             # With self_critic on, every revised answer gets its own buttons.
+            # No output_dir: answers are replayed from run journals after a
+            # restart, so their reviews go to <run_dir>/no-run.reviews.jsonl,
+            # which load_saved_reviews reloads.
             from biomentis.code_review import requests_for_answer, task_for_entry
 
             transcript = st.session_state.get("biomni_transcript") or []
@@ -4238,10 +4241,9 @@ Each library is listed with its description to help you understand its functiona
             if not requests:
                 return
             digest = hashlib.sha1((entry.get("content") or "").encode("utf-8")).hexdigest()[:10]
-            output_dir = st.session_state.get("biomni_output_dir") or getattr(self, "output_dir", None)
             for i, req in enumerate(requests):
                 st.caption(f"Code block {i + 1} of this answer ({req.language})")
-                _code_review(req, f"cr-ans-{digest}-{i}", output_dir=output_dir)
+                _code_review(req, f"cr-ans-{digest}-{i}")
 
         def render_entry(container, entry):
             with container.chat_message(entry.get("role", "assistant")):

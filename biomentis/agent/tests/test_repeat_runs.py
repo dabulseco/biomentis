@@ -453,9 +453,56 @@ def test_failures():
     _check("the report error is kept", batch.report_error == "OSError: disk full", batch.report_error)
 
 
+def test_report_summary():
+    print("\n[9] report: summary, variation vs contradiction, runs without quantities")
+    from biomentis.eval.repeat_report import (
+        DISAGREEMENT_TOLERANCE, VARIATION_MAX, RunOutcome, disagreements, write_report,
+    )
+
+    _check("named constants", DISAGREEMENT_TOLERANCE == 0.05 and VARIATION_MAX == 0.20)
+
+    def outcome(i, status, rounds, claims):
+        return RunOutcome(index=i, run_id=f"run-{i:02d}", final_status=status, rounds_used=rounds,
+                          gate_results=[], final_answer="", telemetry="", claims=claims)
+
+    passed1 = "✅ Passed all checks after 1 round"
+    outcomes = [
+        outcome(1, passed1, 1, [QuantityClaim("total_cost_usd", 1000.0, "USD", "$1,000"),
+                                QuantityClaim("read_length_bp", 250.0, "bp", "250 bp")]),
+        outcome(2, "✅ Passed all checks after 3 rounds", 3,
+                [QuantityClaim("total_cost_usd", 1150.0, "USD", "$1,150"),
+                 QuantityClaim("read_length_bp", 150.0, "bp", "150 bp")]),
+        outcome(3, "⛔ Stopped by user — did not pass", 2, []),
+    ]
+    found = {name: kind for name, _, _, _, kind in disagreements(outcomes)}
+    _check("13% apart: variation", found.get("total_cost_usd") == "variation", str(found))
+    _check("40% apart: contradiction", found.get("read_length_bp") == "contradiction", str(found))
+    out = Path(tempfile.mkdtemp(prefix="repeat-summary-"))
+    text = write_report(PROMPT, RUBRIC, "k=3", outcomes, out).read_text(encoding="utf-8")
+    summary = text.split("## Summary", 1)[1].split("\n## ", 1)[0] if "## Summary" in text else ""
+    _check("a Summary section", bool(summary), text[:600])
+    _check("summary: counts per final status (round counts folded)",
+           "✅ Passed all checks × 2" in summary and "⛔ Stopped by user — did not pass × 1" in summary, summary)
+    _check("summary: rounds min/mean/max", "min 1, mean 2.0, max 3" in summary, summary)
+    _check("summary: quantities per run, empty run flagged",
+           "Run 1 = 2" in summary and "Run 2 = 2" in summary and "Run 3 = 0 (no quantities extracted)" in summary,
+           summary)
+    _check("summary: disagreements by kind", "Disagreements: 2 (1 variation, 1 contradiction)" in summary, summary)
+    dis = text.split("## Disagreements", 1)[1]
+    _check("disagreements are marked", "**variation** `total_cost_usd`" in dis
+           and "**contradiction** `read_length_bp`" in dis, dis)
+    _check("the runs with no quantities are listed", "Runs with no quantities extracted: Run 3." in dis, dis)
+
+    differ = [outcome(1, passed1, 1, [QuantityClaim("cost_a", 5.0, "", "5")]),
+              outcome(2, passed1, 1, [QuantityClaim("cost_b", 9.0, "", "9")])]
+    text = write_report(PROMPT, RUBRIC, "k=2", differ, out).read_text(encoding="utf-8")
+    _check("no name in two runs: says so",
+           "No comparable quantities across runs (names differ per run)." in text, text.split("## Disagreements")[1])
+
+
 def main() -> int:
     for test in (test_batch_and_report, test_cli_pause_prompt, test_cli_disabled, test_cli_reviewer,
-                 test_one_run_at_a_time, test_failures):
+                 test_one_run_at_a_time, test_failures, test_report_summary):
         try:
             test()
         except Exception as exc:  # a crash is a failure, not an abort

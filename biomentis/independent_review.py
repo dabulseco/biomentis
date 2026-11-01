@@ -131,17 +131,50 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + f"\n... [{len(text) - limit} more characters]"
 
 
-def _prints_any(output: str, numbers) -> bool:
-    """Whether `output` shows any of `numbers` as a whole number (not inside a longer one)."""
-    return any(re.search(rf"(?<![\d.]){re.escape(n)}(?!\d)", output) for n in numbers if n)
+# Focus excerpts (numbers the gate questioned) share at most this part of the
+# evidence budget; each excerpt is a window around a number's first match.
+_FOCUS_SHARE = 0.5
+_FOCUS_RADIUS = 300
+# Room for each step's "[step i] CODE/OUTPUT" headers and clip markers.
+_STEP_OVERHEAD_CHARS = 120
+
+
+def _number_re(n: str) -> re.Pattern:
+    """`n` as a whole number, not inside a longer one."""
+    return re.compile(rf"(?<![\d.]){re.escape(n)}(?!\d)")
+
+
+def _focus_matches(output: str, numbers) -> list[re.Match]:
+    """The first match in `output` of each of `numbers`, in order of position."""
+    found = [m for n in sorted(numbers) if n and (m := _number_re(n).search(output))]
+    return sorted(found, key=lambda m: m.start())
+
+
+def _focus_excerpt(output: str, matches: list[re.Match], limit: int) -> str:
+    """Windows around `matches` (merged where they overlap), in at most about `limit` characters.
+
+    The radius shrinks so every number keeps a window when the share is small.
+    """
+    radius = max(20, min(_FOCUS_RADIUS, (limit // max(1, len(matches)) - 10) // 2))
+    spans: list[list[int]] = []
+    for m in matches:
+        start, end = max(0, m.start() - radius), min(len(output), m.end() + radius)
+        if spans and start <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], end)
+        else:
+            spans.append([start, end])
+    return "\n...\n".join(output[a:b].strip() for a, b in spans)
 
 
 def review_inputs(messages: list[BaseMessage], focus_numbers: set[str] = frozenset()) -> dict:
     """The task, first draft, critiques, final answer and evidence of the latest run.
 
-    A step whose output shows any of `focus_numbers` (numbers the gate's
-    checks questioned, as written in the answer) keeps its full output, so the
-    reviewer can judge them; every other step is clipped to fit.
+    For a step whose output shows any of `focus_numbers` (numbers the gate's
+    checks questioned, as written in the answer) the reviewer gets a window
+    around each such number instead of the clipped start, so it can judge
+    them. The windows share at most half the evidence budget, and with focus
+    numbers the evidence never exceeds `_EVIDENCE_TOTAL_CHARS`: printing a
+    questioned number in every step must not overflow the reviewer's context.
     """
     run = current_run(messages)
     task = run[0].content if run and isinstance(run[0].content, str) else ""
@@ -164,16 +197,19 @@ def review_inputs(messages: list[BaseMessage], focus_numbers: set[str] = frozens
         match = re.search(r"<execute>(.*?)</execute>", content, re.DOTALL | re.IGNORECASE)
         if match and isinstance(m, AIMessage):
             code = match.group(1)
-    # Shrink each step's share when a long run would not fit.
-    per_step = max(1, len(steps))
-    scale = min(1.0, _EVIDENCE_TOTAL_CHARS / (per_step * (_STEP_CODE_CHARS + _STEP_OUTPUT_CHARS)))
-    code_cap = max(300, int(_STEP_CODE_CHARS * scale))
-    output_cap = max(500, int(_STEP_OUTPUT_CHARS * scale))
-    evidence = "\n\n".join(
-        f"[step {i}] CODE:\n{_clip(c, code_cap)}\n[step {i}] OUTPUT:\n"
-        + (o.strip() if _prints_any(o, focus_numbers) else _clip(o, output_cap))
-        for i, (c, o) in enumerate(steps, 1)
-    )
+    focus = {i: found for i, (_, o) in enumerate(steps) if (found := _focus_matches(o, focus_numbers or ()))}
+    if not focus:
+        # Shrink each step's share when a long run would not fit.
+        per_step = max(1, len(steps))
+        scale = min(1.0, _EVIDENCE_TOTAL_CHARS / (per_step * (_STEP_CODE_CHARS + _STEP_OUTPUT_CHARS)))
+        code_cap = max(300, int(_STEP_CODE_CHARS * scale))
+        output_cap = max(500, int(_STEP_OUTPUT_CHARS * scale))
+        evidence = "\n\n".join(
+            f"[step {i}] CODE:\n{_clip(c, code_cap)}\n[step {i}] OUTPUT:\n{_clip(o, output_cap)}"
+            for i, (c, o) in enumerate(steps, 1)
+        )
+    else:
+        evidence = _focused_evidence(steps, focus)
     return {
         "task": task,
         "first_draft": answers[0] if answers else "",
@@ -181,6 +217,25 @@ def review_inputs(messages: list[BaseMessage], focus_numbers: set[str] = frozens
         "critiques": critiques,
         "evidence": evidence,
     }
+
+
+def _focused_evidence(steps: list[tuple[str, str]], focus: dict[int, list[re.Match]]) -> str:
+    """Every step, focus steps as number windows, within `_EVIDENCE_TOTAL_CHARS` in all."""
+    share = int(_EVIDENCE_TOTAL_CHARS * _FOCUS_SHARE) // len(focus) - _STEP_OVERHEAD_CHARS
+    excerpts = {i: _focus_excerpt(steps[i][1], matches, max(0, share)) for i, matches in focus.items()}
+    used = sum(len(e) for e in excerpts.values())
+    # What is left is split over every step's code and the other steps' output.
+    slots = len(steps) + (len(steps) - len(focus)) * _STEP_OUTPUT_CHARS / _STEP_CODE_CHARS
+    room = max(0, _EVIDENCE_TOTAL_CHARS - used - len(steps) * _STEP_OVERHEAD_CHARS)
+    code_cap = min(_STEP_CODE_CHARS, int(room / slots))
+    output_cap = min(_STEP_OUTPUT_CHARS, int(code_cap * _STEP_OUTPUT_CHARS / _STEP_CODE_CHARS))
+    parts = []
+    for i, (c, o) in enumerate(steps):
+        shown = f"(excerpts around the questioned numbers)\n{excerpts[i]}" if i in excerpts else _clip(o, output_cap)
+        parts.append(f"[step {i + 1}] CODE:\n{_clip(c, code_cap)}\n[step {i + 1}] OUTPUT:\n{shown}")
+    evidence = "\n\n".join(parts)
+    # The hard cap: the estimates above leave room, this makes it certain.
+    return evidence if len(evidence) <= _EVIDENCE_TOTAL_CHARS else _clip(evidence, _EVIDENCE_TOTAL_CHARS)
 
 
 def build_assumptions_prompt(inputs: dict) -> str:
@@ -492,6 +547,11 @@ def parse_review(text: str) -> Review:
     )
 
 
+def _rubric_id(value) -> str:
+    """A rubric ID as reviewers echo it ("[d1]", " D1 ") in canonical form ("D1")."""
+    return str(value).strip("[] ").upper()
+
+
 def coverage_findings(review: Review, rubric) -> list[Finding]:
     """A blocking `rubric` finding for each rubric item the answer does not deliver.
 
@@ -503,10 +563,10 @@ def coverage_findings(review: Review, rubric) -> list[Finding]:
     """
     reported: dict[str, dict] = {}
     for entry in review.coverage:
-        reported.setdefault(str(entry.get("id", "")).strip(), entry)
+        reported.setdefault(_rubric_id(entry.get("id", "")), entry)
     findings = []
     for item in rubric.items:
-        entry = reported.get(item.id)
+        entry = reported.get(_rubric_id(item.id))
         status = str(entry.get("status", "")).strip().lower() if entry else ""
         quote = str(entry.get("quote", "")).strip() if entry else ""
         note = str(entry.get("issue", "")).strip() if entry else ""
@@ -527,20 +587,58 @@ def coverage_findings(review: Review, rubric) -> list[Finding]:
     return findings
 
 
+def _norm(text) -> str:
+    return " ".join(str(text).lower().split())
+
+
 def review_findings(review: Review) -> list[Finding]:
-    """The reviewer's problems as `review` findings: blocking on "needs rework", else warnings."""
-    if review.error or review.verdict == "accept":
+    """The review as `review` findings: its problems, and the assumptions the sources contradict.
+
+    Problems block on "needs rework" and are warnings otherwise ("accept"
+    has none). Each problem is keyed by its kind and quote, so "accept as is"
+    survives the reviewer rewording it next round; problems on one quote are
+    merged into one finding. A contradicted assumption (`compare_reported` can
+    mark one without the reviewer listing a problem) is always reported: it
+    blocks on "needs rework" or when the reviewer marked a decision resting on
+    it, else it is a warning.
+    """
+    if review.error:
         return []
-    severity = "blocking" if review.verdict == "needs_rework" else "warning"
-    findings = [
-        Finding(check="review", severity=severity, quote=str(p.get("quote", "")).strip(),
-                issue=f"[{p.get('kind', 'problem')}] {p.get('issue', '')}".strip(), fix=str(p.get("fix", "")).strip())
-        for p in review.problems
-    ]
-    if not findings and review.verdict == "needs_rework":
+    rework = review.verdict == "needs_rework"
+    severity = "blocking" if rework else "warning"
+    findings: list[Finding] = []
+    by_key: dict[str, Finding] = {}
+    for p in review.problems if review.verdict != "accept" else []:
+        quote = str(p.get("quote", "")).strip()
+        kind = p.get("kind", "problem")
+        issue = f"[{kind}] {p.get('issue', '')}".strip()
+        key = f"review:{_norm(kind)}:{_norm(quote)}" if quote else ""
+        if key and key in by_key:  # same quote: one finding, one accept box
+            by_key[key].issue += f"; {issue}"
+            continue
+        f = Finding(check="review", severity=severity, quote=quote, issue=issue,
+                    fix=str(p.get("fix", "")).strip(), key=key)
+        findings.append(f)
+        if key:
+            by_key[key] = f
+    if not findings and rework:
         # A rework verdict with no problem listed must still block.
         findings.append(Finding(check="review", severity="blocking", quote="",
                                 issue=f"the reviewer asked for rework: {review.summary or 'no reason given'}"))
+    for a in review.assumptions:
+        if str(a.get("status", "")).lower() != "contradicted":
+            continue
+        decision = str(a.get("decision_relevant", a.get("decision", ""))).strip().lower() in ("true", "yes", "1")
+        name = str(a.get("assumption", "")).strip() or "an assumption"
+        reported = str(a.get("reported", "")).strip()
+        findings.append(Finding(
+            check="review", severity="blocking" if rework or decision else "warning",
+            quote=str(a.get("quote", "")).strip(),
+            issue=(f"[assumption] {name} = {a.get('value', '')} is contradicted by the sources"
+                   + (f" (they report {reported})" if reported else "") + f": {a.get('evidence', '')}").strip(),
+            fix=f"check {name} against the sources cited and use a sourced value",
+            key=f"review:assumption:{_norm(name)}",
+        ))
     return findings
 
 

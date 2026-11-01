@@ -47,8 +47,9 @@ def focus_numbers(findings: list[Finding]) -> set[str]:
     """The numbers quoted by this round's quantity, arithmetic and regression findings.
 
     As written in the answer, plus the same number without thousands
-    separators (code prints 1015, the answer says 1,015). Single digits are
-    left out: they would match nearly every step's output.
+    separators (code prints 1015, the answer says 1,015). Only numbers with
+    a decimal point or at least 3 significant digits count: 12, 24 or 36
+    would match nearly every step's output.
     """
     numbers: set[str] = set()
     for f in findings:
@@ -56,7 +57,7 @@ def focus_numbers(findings: list[Finding]) -> set[str]:
             continue
         for n in _NUMBER_RE.findall(f.quote):
             n = n.rstrip(",")
-            if len(n.replace(",", "").replace(".", "")) < 2:
+            if "." not in n and len(n.replace(",", "").lstrip("0")) < 3:
                 continue
             numbers |= {n, n.replace(",", "")}
     return numbers

@@ -507,6 +507,18 @@ def test_compare_reported() -> None:
     _check("14,793 ng/mg against 100,000-1,000,000 becomes contradicted",
            a["status"] == "contradicted" and "more than 3× outside the reported 1e+05–1e+06 ng/mg" in a["evidence"], str(a))
     _check("and an accept becomes accept with corrections", gemma.verdict == "accept_with_corrections", gemma.verdict)
+    from biomentis.independent_review import review_findings
+
+    found = review_findings(gemma)
+    _check("gate: the contradicted assumption becomes a review finding",
+           len(found) >= 1 and found[0].check == "review" and found[0].severity == "warning"
+           and "harvest HCP" in found[0].issue and "100 mg/L" in found[0].issue and "https://usp.org" in found[0].issue
+           and found[0].key == "review:assumption:harvest hcp", repr(found))
+    gemma.verdict = "needs_rework"
+    _check("gate: it blocks on needs rework",
+           any(f.severity == "blocking" and f.key == "review:assumption:harvest hcp" for f in review_findings(gemma)))
+    flagged = review(dict(hcp, status="contradicted", decision_relevant=True), verdict="accept_with_corrections")
+    _check("gate: it blocks when a decision rests on it", review_findings(flagged)[0].severity == "blocking")
     bound = compare_reported(review(dict(hcp, status="unclear", reported=">50,000 ppm", converted="100 mg/L = 100 ppm")))
     _check("a lower bound counts", bound.assumptions[0]["status"] == "contradicted", str(bound.assumptions))
     close = compare_reported(review(dict(hcp, status="supported", reported="100,000-1,000,000 ppm",
@@ -605,6 +617,10 @@ def test_rubric_coverage() -> None:
     found = coverage_findings(review, rubric)
     _check("wrong: blocking, quoting the answer",
            len(found) == 1 and found[0].severity == "blocking" and found[0].quote == "24+3", repr(found))
+    echoed = _coverage_review([{"id": i, "status": "present", "quote": "q", "issue": ""}
+                               for i in ("[d1]", " D5 ", "c1", "[L2]")])
+    _check("IDs echoed as [d1] or c1 match the rubric", coverage_findings(echoed, rubric) == [],
+           repr(coverage_findings(echoed, rubric)))
     _check("all present: no findings",
            coverage_findings(_coverage_review([present(i) for i in ("D1", "D5", "C1", "L2")]), rubric) == [])
 
@@ -616,6 +632,12 @@ def test_rubric_coverage() -> None:
     _check("accept with corrections: warnings",
            len(minor) == 1 and minor[0].severity == "warning" and minor[0].quote == "33 rpm", repr(minor))
     _check("accept: no review findings", review_findings(_coverage_review([], "accept")) == [])
+    reworded = review_findings(_coverage_review([], "needs_rework", [{**problem, "issue": "still wrong, see P/V"}]))
+    _check("a problem keeps its key when the reviewer rewords it",
+           rework[0].key == reworded[0].key and rework[0].key.startswith("review:"), f"{rework[0].key} {reworded[0].key}")
+    merged = review_findings(_coverage_review([], "needs_rework", [problem, {**problem, "issue": "also the units"}]))
+    _check("two problems on one quote: one finding", len(merged) == 1 and "also the units" in merged[0].issue,
+           repr(merged))
 
     _check("same family: deepseek vs deepseek",
            same_model_family("deepseek-v4.1-flash:1017-cloud", "deepseek-v4.1-flash:cloud") is True)
@@ -636,10 +658,29 @@ def test_rubric_coverage() -> None:
     msgs.append(AIMessage(content="<solution>A = 0.0593</solution>"))
     clipped = review_inputs(msgs)["evidence"]
     focused = review_inputs(msgs, focus_numbers={"0.0593"})["evidence"]
-    _check("without focus the step is clipped", "z" * 3_000 not in clipped)
-    _check("focus_numbers keeps the full output of the step that printed it",
-           "y" * 9_000 + " result 0.0593 " + "z" * 3_000 in focused)
+    _check("without focus the number is clipped away", "0.0593" not in clipped)
+    _check("focus_numbers keeps a window around the number in the step that printed it",
+           "y" * 200 + " result 0.0593 " + "z" * 200 in focused, focused[focused.find("0.0593") - 50:][:120])
+    _check("but not that step's whole output", "z" * 3_000 not in focused)
     _check("other steps stay clipped", "x" * 10_000 not in focused)
+
+    # The reviewer's probe: a questioned number printed on every line of 80
+    # long steps must not take the evidence past its budget.
+    from biomentis.independent_review import _EVIDENCE_TOTAL_CHARS
+
+    probe = [HumanMessage(content="Q")]
+    for i in range(80):
+        lines = [f"row {j}: dose 12.5 mg, mass 36 g" for j in range(800)]
+        if i == 40:
+            lines[400] = "row 400: rate 0.0593 per h"
+        probe += [AIMessage(content=f"<execute>print({i})</execute>"),
+                  AIMessage(content="<observation>" + "\n".join(lines) + "</observation>")]
+    probe.append(AIMessage(content="<solution>rate 0.0593, dose 12.5</solution>"))
+    evidence = review_inputs(probe, focus_numbers={"12.5", "0.0593"})["evidence"]
+    _check("probe: the evidence stays within the budget", len(evidence) <= _EVIDENCE_TOTAL_CHARS + 200,
+           str(len(evidence)))
+    _check("probe: a window with 0.0593 is still there", "rate 0.0593 per h" in evidence)
+    _check("probe: every step is still shown", "[step 80] OUTPUT:" in evidence)
 
     from biomentis.gate import Finding
     from biomentis.gate.runner import focus_numbers
@@ -648,7 +689,8 @@ def test_rubric_coverage() -> None:
                           Finding("arithmetic", "blocking", "24+3 = 28", "x"),
                           Finding("figure", "blocking", "Figure 77", "x")])
     _check("focus numbers: from quantity/arithmetic quotes, as written and without commas",
-           {"0.0593", "1,015", "1015", "24", "28"} <= nums and "3" not in nums and "77" not in nums, str(nums))
+           {"0.0593", "1,015", "1015"} <= nums and "77" not in nums, str(nums))
+    _check("focus numbers: no short integers (24, 28, 3)", not {"24", "28", "3"} & nums, str(nums))
 
 
 class _Raises:

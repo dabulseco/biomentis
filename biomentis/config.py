@@ -192,6 +192,19 @@ class BiomentisConfig:
 
 
 # Global default config instance (optional, for convenience)
+# Load `.env` before building `default_config`. `biomentis.agent.a1` also calls
+# `load_dotenv`, but only after it has imported this module — so values that
+# exist only in `.env` (e.g. NCBI_EMAIL) were missing from `default_config`, and
+# the sidebar's NCBI email field came up empty. Same `override=False` semantics:
+# an exported shell variable still wins.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    if os.path.exists(".env"):
+        _load_dotenv(".env", override=False)
+except ImportError:
+    pass
+
 default_config = BiomentisConfig()
 
 

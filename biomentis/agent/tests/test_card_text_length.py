@@ -14,6 +14,11 @@ What these tests pin down:
   3.  A field with no sentence break falls back to a word boundary + "…"
   4.  A typical 3-sentence scientific "what" (~750 chars) is kept whole
   5.  Short text is untouched; prompt-side `_truncate` still marks its cuts
+  6.  "Also worth knowing" (tutor chat `also_consider`) names concepts only:
+      both prompts forbid numbers/calculations and error-frequency claims, and
+      no longer ask for "common pitfall/misconception" (session of
+      2026-11-01: "5.84/105.84 = 0.98 molal as many students compute")
+  7.  Its items get room for two sentences and are cut at a sentence
 
 Run with:
     python -m biomentis.agent.tests.test_card_text_length
@@ -100,6 +105,35 @@ def test_short_and_prompt_side() -> None:
     _check("prompt _truncate still marks", _MARKER in _truncate("x" * 500, 200))
 
 
+def test_also_consider_prompts() -> None:
+    print("\n[6] 'Also worth knowing' names concepts, no calculations")
+    from biomentis.agent.tutor import chat
+
+    for name, prompt in (("tutor", chat._SYSTEM_PROMPT), ("chat", chat._SYSTEM_PROMPT_CHAT)):
+        _check(f"{name}: forbids numbers/calculations", "No numbers, calculations" in prompt)
+        _check(f"{name}: calculations go in the answer", 'belongs in "answer"' in prompt)
+        _check(f"{name}: no error-frequency claims", "how often students make a mistake" in prompt)
+        _check(f"{name}: items are named, not worked out", "NAMED but not worked out" in prompt)
+        _check(f"{name}: no 'common pitfall/misconception' prompt", "misconception" not in prompt)
+
+
+def test_also_consider_clipping() -> None:
+    print("\n[7] 'Also worth knowing' items: two sentences fit, cut at a sentence")
+    from biomentis.agent.tutor.chat import _MAX_ALSO_CONSIDER_CHARS, TutorChat
+
+    two = ("Molality is defined per kilogram of solvent, not of solution. "
+           "Mixing the two up shifts every van 't Hoff factor you extract from the data, "
+           "so it is worth checking which mass your denominator uses.")
+    out = TutorChat._coerce_also_consider([{"point": "Molality's denominator", "why": two}])
+    _check("two-sentence why kept whole", out and out[0]["why"] == two, repr(out))
+    long = "This sentence is padding for the cap. " * 30
+    out = TutorChat._coerce_also_consider([{"point": long, "why": long}])
+    for field in ("point", "why"):
+        v = out[0][field]
+        _check(f"{field} within cap", len(v) <= _MAX_ALSO_CONSIDER_CHARS, str(len(v)))
+        _check(f"{field} ends on a sentence", v.endswith("cap."), repr(v[-30:]))
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Card text length tests")
@@ -109,6 +143,8 @@ def run_all() -> int:
     test_word_boundary_fallback()
     test_typical_scientific_what_kept_whole()
     test_short_and_prompt_side()
+    test_also_consider_prompts()
+    test_also_consider_clipping()
 
     print("\n" + "=" * 60)
     print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")

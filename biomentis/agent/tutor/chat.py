@@ -31,7 +31,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from biomentis.agent.tutor.instruction import _extract_json
+from biomentis.agent.tutor.instruction import _clip_display, _extract_json
 from biomentis.plots import SELF_CONTAINED_PLOT_RULE
 
 
@@ -42,7 +42,9 @@ _MAX_CARDS_IN_CONTEXT = 3
 _MAX_CITATION_SNIPPET = 200
 _MAX_QUESTION_CHARS = 1000
 _MAX_ALSO_CONSIDER = 3
-_MAX_ALSO_CONSIDER_CHARS = 200
+# Room for a "point" or "why" of one or two sentences. Over the cap, text is
+# cut at a sentence boundary (`_clip_display`), never mid-word.
+_MAX_ALSO_CONSIDER_CHARS = 400
 _ANSWER_ATTEMPTS = 2            # one retry when the reply has no usable answer
 _MAX_STRUCTURE_INFO_CHARS = 1500  # header metadata shown back to the LLM
 # Keys a model sometimes uses for the answer instead of "answer".
@@ -105,7 +107,7 @@ Return a single JSON object with EXACTLY these keys (no other keys, no prose, no
   "answer": "<your answer, plain text or simple markdown>",
   "follow_up": "<one follow-up question, or empty string if none>",
   "citations": [{"source": "<EXACT source string from KB_SNIPPETS>", "page": <int or null>, "snippet": "<≤200 char quote>"}],
-  "also_consider": [{"point": "<a related concept, unstated assumption, or pitfall the question didn't cover>", "why": "<one short sentence, why it matters>"}],
+  "also_consider": [{"point": "<a related concept, unstated assumption, or pitfall worth watching for, NAMED but not worked out>", "why": "<one or two sentences: why it matters>"}],
   "plot_code": "<self-contained matplotlib code, or empty string>",
   "structure": "<PDB ID, SMILES, or KB/upload file name, or empty string>"
 }
@@ -116,7 +118,7 @@ RULES:
 3. Reference RECENT_STEPS when the question is about a step the agent just did ("you just ran BLAST — the result was…") — CURRENT STEP is the one the student is paused on right now; earlier ones are history.
 4. HISTORY is provided for continuity. Don't repeat yourself.
 5. Keep the answer short. The student is in the middle of a workflow, not reading an essay.
-6. ALSO_CONSIDER (KB-scoped) — after answering, list 0-3 gaps a thorough tutor would flag, but ONLY if you can ground them in KB_SNIPPETS content the student hasn't already been told. If nothing KB-groundable applies, return "also_consider": []. Do not use general knowledge here — that's what "chat" mode is for.
+6. ALSO_CONSIDER (KB-scoped) — after answering, list 0-3 gaps a thorough tutor would flag, but ONLY if you can ground them in KB_SNIPPETS content the student hasn't already been told. If nothing KB-groundable applies, return "also_consider": []. Do not use general knowledge here — that's what "chat" mode is for. Each item NAMES a concept to watch for and says why it matters — the student pursues the details. No numbers, calculations, worked examples, or formulas with values in these items: any calculation belongs in "answer", written out step by step. Do not claim how often students make a mistake or how large an error typically is.
 7. @@VIS@@
 8. Output ONLY the JSON. No markdown fences, no commentary, no apology.
 """
@@ -137,14 +139,14 @@ You will be given:
 
 Your job: answer the question accurately and concisely. Be brief (2-4 short paragraphs or a short bulleted list). When the KB covers the question, lead with KB content. When the KB only partially covers it (or is empty), use your general knowledge to fill gaps — but be clear about which is which. Always end with ONE follow-up question.
 
-After the direct answer, also do a brief gap-analysis: think about what the student would benefit from knowing that the question itself didn't ask for — an unstated assumption, a closely related concept, a common pitfall/misconception, or a better approach if one exists. This is what separates a thorough answer from a literal one.
+After the direct answer, also do a brief gap-analysis: think about what the student would benefit from knowing that the question itself didn't ask for — an unstated assumption, a closely related concept, a pitfall worth watching for, or a better approach if one exists. This is what separates a thorough answer from a literal one.
 
 Return a single JSON object with EXACTLY these keys (no other keys, no prose, no markdown fences):
 {
   "answer": "<your answer, plain text or simple markdown>",
   "follow_up": "<one follow-up question, or empty string if none>",
   "citations": [{"source": "<EXACT source string from KB_SNIPPETS>", "page": <int or null>, "snippet": "<≤200 char quote>"}],
-  "also_consider": [{"point": "<a related concept, unstated assumption, edge case, or pitfall the question didn't cover>", "why": "<one short sentence, why it matters>"}],
+  "also_consider": [{"point": "<a related concept, unstated assumption, edge case, or pitfall worth watching for, NAMED but not worked out>", "why": "<one or two sentences: why it matters>"}],
   "plot_code": "<self-contained matplotlib code, or empty string>",
   "structure": "<PDB ID, SMILES, or KB/upload file name, or empty string>"
 }
@@ -158,7 +160,7 @@ RULES:
 6. Reference RECENT_TRANSCRIPT and AGENT_FINAL_ANSWER when the student asks about a finished run ("what databases did you use?", "summarize the result"). These are the agent's actual output, so you can answer confidently.
 7. HISTORY is provided for continuity. Don't repeat yourself.
 8. Keep the answer short. The student is in the middle of a workflow, not reading an essay.
-9. ALSO_CONSIDER — list 0-3 items, each ONE short sentence plus a one-sentence "why". Be selective: only include something a domain expert would actually think worth flagging. If the question is simple and complete as asked, return "also_consider": [] — don't pad for the sake of it. This is separate from, and in addition to, the single required "follow_up" question.
+9. ALSO_CONSIDER — list 0-3 items, each a short "point" plus a "why" of one or two sentences. Each item NAMES a concept to watch for and says why it matters — the student pursues the details. No numbers, calculations, worked examples, or formulas with values in these items: any calculation belongs in "answer", written out step by step. Do not claim how often students make a mistake or how large an error typically is. Be selective: only include something a domain expert would actually think worth flagging. If the question is simple and complete as asked, return "also_consider": [] — don't pad for the sake of it. This is separate from, and in addition to, the single required "follow_up" question.
 10. @@VIS@@
 11. Output ONLY the JSON. No markdown fences, no commentary, no apology.
 """
@@ -655,9 +657,9 @@ class TutorChat:
                 continue
             if not isinstance(point, str) or not point.strip():
                 continue
-            entry = {"point": point.strip()[:_MAX_ALSO_CONSIDER_CHARS]}
+            entry = {"point": _clip_display(point, _MAX_ALSO_CONSIDER_CHARS)}
             if isinstance(why, str) and why.strip():
-                entry["why"] = why.strip()[:_MAX_ALSO_CONSIDER_CHARS]
+                entry["why"] = _clip_display(why, _MAX_ALSO_CONSIDER_CHARS)
             out.append(entry)
             if len(out) >= _MAX_ALSO_CONSIDER:
                 break

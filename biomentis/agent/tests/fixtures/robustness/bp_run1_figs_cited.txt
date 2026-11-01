@@ -1,0 +1,3 @@
+Model check at 373 K (Pitzer equation, Fig 14).
+Run 0 removes an unbounded term (Fig 15).
+Fig 16 — Rebuilt cost case: $414 outlay dominated by thermometers (53 %), $77 reagents, $9.62 per group per phase, $11.55 recurring.

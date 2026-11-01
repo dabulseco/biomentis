@@ -1,0 +1,2 @@
+2 solution trials per group (within-group) × 4 groups (between-group, one solute each) → 8 values per solute at class level, 32 total
+Eight values per solute at class level is adequate: the question is whether two bars differ by 0.44 °C when each has a ±0.05 °C scatter, and n = 8 settles that decisively.

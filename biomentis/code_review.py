@@ -38,7 +38,7 @@ Be specific: quote the line, say what is wrong, and give the correct value. Do n
 
 Earlier steps: the agent runs its Python steps in one shared namespace, so the script may use names defined in earlier steps. When EARLIER CODE is given, use it to tell where each name comes from. Every name defined in earlier steps that the script uses must be defined in the corrected script.
 
-Corrected script: always return corrected_code, even when the verdict is "ok" (then it is the original made self-contained). It must run on its own with standard libraries, in the same language as the original script. Replace agent-only helpers with standard libraries, or keep them with a clear comment that they need the app. Python must be compatible with Python 3.10+ (no 3.12-only syntax, such as reusing the same quote character inside an f-string). Do not add a header comment; one is added for you.
+Corrected script: always return corrected_code, even when the verdict is "ok" (then it is the original made self-contained). It must run on its own with standard scientific Python packages (numpy, scipy, pandas, matplotlib), or standard tools for R/Bash, in the same language as the original script. Replace agent-only helpers with those, or keep them with a clear comment that they need the app. Python must be compatible with Python 3.10+ (no 3.12-only syntax, such as reusing the same quote character inside an f-string). Do not add a header comment; one is added for you.
 
 Return ONLY a JSON object, no markdown fences:
 {
@@ -128,7 +128,8 @@ def _numbered(code: str) -> str:
 
 
 def build_review_messages(req: CodeReviewRequest) -> list[BaseMessage]:
-    code = _clip(req.code, MAX_CODE_CHARS)
+    # Number the original lines first, then clip, so labels match the block the student sees.
+    numbered = _clip(_numbered(req.code), MAX_CODE_CHARS)
     parts = [f"LANGUAGE: {req.language}"]
     if req.task.strip():
         parts.append(f"TASK:\n{req.task.strip()}")
@@ -136,7 +137,7 @@ def build_review_messages(req: CodeReviewRequest) -> list[BaseMessage]:
         parts.append(f"WHAT THIS STEP WAS FOR:\n{req.purpose.strip()}")
     if req.earlier_code.strip():
         parts.append(f"EARLIER CODE (earlier steps of the same run):\n{_clip(req.earlier_code, MAX_EARLIER_CHARS)}")
-    parts.append(f"SCRIPT (line-numbered):\n{_numbered(code)}")
+    parts.append(f"SCRIPT (line-numbered):\n{numbered}")
     if req.output.strip():
         parts.append(f"OUTPUT of the script:\n{_clip(req.output, MAX_OUTPUT_CHARS)}")
     return [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content="\n\n".join(parts))]

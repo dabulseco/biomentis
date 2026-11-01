@@ -158,6 +158,19 @@ def test_prompt_checklist_order():
     idx = [s.find(k) for k in ("BUGS", "MISMATCHES", "UNITS AND CONSTANTS", "SCIENCE", "PORTABILITY")]
     _check("checklist order", all(i >= 0 for i in idx) and idx == sorted(idx), str(idx))
     _check("earlier steps and always", "earlier steps" in s and "always" in s)
+    _check("standard scientific Python", "standard scientific Python" in s)
+
+
+def test_line_numbers_match_original():
+    msgs = build_review_messages(CodeReviewRequest(code="\n\nimport os\nprint(1)"))
+    user = msgs[1].content
+    _check("leading blanks: label 3 on import", any(l.strip() == "3: import os" for l in user.split("\n")), user)
+    big = "\n".join(f"v{i} = {i}" for i in range(1, 6001))
+    user = build_review_messages(CodeReviewRequest(code=big))[1].content
+    lines = user.split("\n")
+    _check("oversize: last line keeps number", lines[-1].strip() == "6000: v6000 = 6000" or any(l.strip() == "6000: v6000 = 6000" for l in lines[-3:]), str(lines[-3:]))
+    marker = [l for l in lines if "characters omitted" in l]
+    _check("oversize: marker unnumbered", len(marker) == 1 and marker[0].strip().startswith("..."), str(marker))
 
 
 def test_roundtrip_and_list_content():

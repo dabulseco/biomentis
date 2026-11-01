@@ -20,10 +20,10 @@ from threading import Lock
 from typing import Any, Callable
 
 from biomentis.code_review import CodeReview, CodeReviewRequest, review_code, review_key
-from biomentis.run_journal import default_run_dir
+from biomentis.run_journal import REVIEWS_SUFFIX, default_run_dir
 
 MAX_WORKERS = 2
-SIDECAR_SUFFIX = ".reviews.jsonl"
+SIDECAR_SUFFIX = REVIEWS_SUFFIX
 OUTPUT_SIDECAR = "code_reviews.jsonl"
 NO_RUN_SIDECAR = "no-run" + SIDECAR_SUFFIX
 

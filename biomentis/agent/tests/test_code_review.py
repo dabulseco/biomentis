@@ -271,6 +271,23 @@ def test_sidecar_written_and_reloaded():
     _check("block lookup after reload", jobs.review_for_block("r1", 2) is not None)
 
 
+def test_list_runs_skips_review_sidecars():
+    print("\n[recovery] review sidecars are not listed as runs")
+    from biomentis import run_journal
+    from biomentis.ui_core import UIEvent
+
+    with tempfile.TemporaryDirectory() as tmp:
+        journal = run_journal.RunJournal("a task", tmp)
+        journal.append(UIEvent(type="code", content="x = 1", language="python"))
+        journal.finish("complete")
+        for name in (f"{journal.run_id}.reviews.jsonl", "no-run.reviews.jsonl"):
+            with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                f.write(json.dumps({"key": "k", "run_id": journal.run_id, "block_index": 0}) + "\n")
+        runs = run_journal.list_runs(tmp)
+        _check("only the real run listed", [r["run_id"] for r in runs] == [journal.run_id], str([r["path"] for r in runs]))
+        _check("a sidecar never eats the limit", [r["run_id"] for r in run_journal.list_runs(tmp, limit=1)] == [journal.run_id])
+
+
 def test_review_for_block():
     _jobs_reset()
     k1 = jobs.submit_review(_req(run_id="r1", block_index=0), "m1", _factory([], _reply()))

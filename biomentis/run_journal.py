@@ -282,13 +282,20 @@ def load_run(path: str | os.PathLike[str]) -> dict[str, Any]:
     }
 
 
+# Suffix of the code-review sidecar beside a journal (see `biomentis.code_review_jobs`).
+REVIEWS_SUFFIX = ".reviews.jsonl"
+
+
 def list_runs(run_dir: str | os.PathLike[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
     """Summarize the most recent journals, newest first."""
     directory = Path(run_dir or default_run_dir())
     if not directory.is_dir():
         return []
 
-    paths = sorted(directory.glob("*.jsonl"), reverse=True)[:limit]
+    # Code-review sidecars (`<run_id>.reviews.jsonl`) live beside the journals
+    # but are not runs.
+    journals = (p for p in directory.glob("*.jsonl") if not p.name.endswith(REVIEWS_SUFFIX))
+    paths = sorted(journals, reverse=True)[:limit]
     summaries = []
     for path in paths:
         run = load_run(path)

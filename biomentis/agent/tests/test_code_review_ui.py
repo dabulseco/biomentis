@@ -551,6 +551,69 @@ def test_tutor_turn_keeps_its_task() -> None:
         _check("no second review queued", list(jobs._store) == keys, str(list(jobs._store)))
 
 
+class _FakeLLM_App:
+    """Stands in for a chat model; any call would mean the smoke touched a model."""
+
+    def invoke(self, *a, **k):
+        raise AssertionError("the app smoke must not call a model")
+
+
+class _FakeAgent:
+    """Just enough of A1 for streamlit_app.py to render one idle page."""
+
+    def __init__(self, *a, **k):
+        self.path = "./data"
+        self.llm = _FakeLLM_App()
+        self.review_llm = None
+        self.review_model_name = ""
+
+    def set_model(self, *a, **k):
+        pass
+
+    def set_temperatures(self, *a, **k):
+        return False
+
+    def configure(self, *a, **k):
+        pass
+
+    def launch_streamlit_demo(self, *a, **k):
+        import streamlit as st
+
+        st.write("fake agent page")
+
+
+def test_app_renders_with_code_review_model_setting() -> None:
+    """Smoke: streamlit_app.py renders headlessly (agent + Ollama faked) and
+    shows the "Code review model" setting."""
+    from unittest import mock
+
+    from streamlit.testing.v1 import AppTest
+
+    import biomentis.agent as agent_pkg
+    import biomentis.ollama_utils as ollama_utils
+
+    saved_env = {k: os.environ.pop(k, None) for k in ("BIOMNI_LLM", "BIOMNI_SOURCE")}
+    try:
+        with mock.patch.object(agent_pkg, "A1", _FakeAgent), mock.patch.object(
+            ollama_utils, "list_ollama_models", lambda *a, **k: ["fake-review:1b", "fake-other:2b"]
+        ), mock.patch("biomentis.code_review_jobs.load_saved_reviews", lambda: 0):
+            at = AppTest.from_file(os.path.join(_REPO, "streamlit_app.py"), default_timeout=60)
+            at.run()
+    finally:
+        for k, v in saved_env.items():
+            if v is not None:
+                os.environ[k] = v
+    _check("app smoke: no exception", not at.exception, str([e.value for e in at.exception]))
+    labels = [sb.label for sb in at.selectbox]
+    _check("app smoke: shows Code review model setting", "Code review model" in labels, str(labels))
+    picker = [sb for sb in at.selectbox if sb.label == "Code review model"]
+    _check(
+        "app smoke: picker lists the faked Ollama models",
+        bool(picker) and "fake-review:1b" in list(picker[0].options),
+        str([list(sb.options) for sb in picker]),
+    )
+
+
 def run_all() -> int:
     _with_isolated_dirs()
     print("=" * 60)
@@ -573,6 +636,7 @@ def run_all() -> int:
     test_button_on_repl_history()
     test_answer_review_reloaded_after_restart()
     test_tutor_turn_keeps_its_task()
+    test_app_renders_with_code_review_model_setting()
     print("\n" + "=" * 60)
     print(f"Results: {len(_PASSED)} passed, {len(_FAILED)} failed")
     print("=" * 60)

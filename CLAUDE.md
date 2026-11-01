@@ -62,6 +62,8 @@ $P -m biomentis.agent.tests.test_run_quality       # evidence check before an an
 $P -m biomentis.agent.tests.test_independent_review # second-model review, one correction round, temperatures
 $P -m biomentis.agent.tests.test_web_search         # web search through Ollama's API, page text reuse, scraper fallback
 $P -m biomentis.agent.tests.test_output_folder      # agent's files saved in the session's output folder (Downloads), export into it
+$P -m biomentis.agent.tests.test_code_review       # code review core, jobs + sidecars, context, setting, export
+$P -m biomentis.agent.tests.test_code_review_ui    # Code Review button + report panel wherever code is shown, app smoke
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

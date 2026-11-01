@@ -1,7 +1,7 @@
 # On-demand Code Review — design
 
 Date: 2026-11-01
-Status: draft for approval (model comparison done)
+Status: implemented (live click-through in the real app left to the owner)
 
 ## Why
 

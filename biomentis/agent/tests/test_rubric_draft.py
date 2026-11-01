@@ -137,6 +137,15 @@ def test_replies() -> None:
     r = draft_rubric(BP_PROMPT, _FakeLLM([wrapped]))
     _check("a fenced reply with thinking parses", [i.id for i in r.items] == ["D1", "D2", "C1", "L1"], str(r))
 
+    chatty = _FakeLLM([DRAFTED + "\nLet me know if you need changes.\n"])
+    r = draft_rubric(BP_PROMPT, chatty)
+    _check("trailing prose after the last lesson is dropped",
+           [i.id for i in r.items] == ["D1", "D2", "C1", "L1"] and len(chatty.rubric_requests) == 1
+           and r.items[-1].text.endswith("not identity"), str(r))
+    fenced = _FakeLLM(["```\n" + DRAFTED + "```\nHope this helps.\n"])
+    r = draft_rubric(BP_PROMPT, fenced)
+    _check("a closing fence ends the rubric", len(r.items) == 4 and len(fenced.rubric_requests) == 1, str(r))
+
     llm = _FakeLLM(["I think the rubric is about boiling.", DRAFTED])
     r = draft_rubric(BP_PROMPT, llm)
     _check("an unreadable reply is asked once more", len(llm.rubric_requests) == 2 and r.source == "agent-drafted",
@@ -205,9 +214,9 @@ def test_graph() -> None:
            bool(seen["at_critique"]) and seen["at_critique"][0] is rubric, "")
     _check("every gate got it", len(seen["at_gate"]) == 2 and all(r is rubric for r in seen["at_gate"]),
            str(seen["at_gate"]))
-    leaked = [m for req in llm.requests for m in req
-              if isinstance(m, HumanMessage) and "[D1]" in str(m.content)]
-    _check("the rubric is never sent to the model", leaked == [], str(leaked[:1]))
+    first_humans = [m for m in llm.requests[0] if isinstance(m, HumanMessage)] if llm.requests else []
+    _check("the draft_rubric node appends no message: the first generate sees only the user prompt",
+           len(first_humans) == 1 and "[D1]" not in str(first_humans[0].content), str(first_humans))
     _check("the answer is kept", "24+3 = 27" in final, final)
 
     path = Path(out) / f"rubric-{rubric.prompt_sha[:8]}.md" if rubric else None

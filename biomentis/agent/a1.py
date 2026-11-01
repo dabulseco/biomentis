@@ -133,7 +133,7 @@ from biomentis.gate import GateResult
 from biomentis.gate.control import RoundControl
 from biomentis.gate.rounds import final_label, next_action
 from biomentis.gate.rubric import Rubric, resolve_rubric, save_rubric
-from biomentis.gate.runner import gate_feedback, run_gate
+from biomentis.gate.runner import critique_prompt, gate_feedback, run_gate
 
 # The status of a gate-on run that ended without an answer to check.
 NO_FINAL_ANSWER_STATUS = "⚠️ No final answer"
@@ -2617,11 +2617,14 @@ Each library is listed with its description to help you understand its functiona
             return state
 
         def critique(state: AgentState) -> AgentState:
-            """Send the gate's findings back, with the self-critique in a planned round."""
+            """Send the gate's findings back, with a critic that works from the findings and rubric."""
             result = self.run_gate_results[-1]
-            text = gate_feedback(result)
-            if result.round < planned_rounds:
-                text += "\n\nMore feedback for improvement:\n" + self_critique_feedback(state["messages"])
+            prompt = critique_prompt(getattr(self, "user_task", ""), self.run_rubric, result,
+                                     getattr(self, "_gate_prev_claims", None))
+            # Same guard as `generate`: this call re-sends the whole run history.
+            critic_messages, _ = self._fit_request(state["messages"] + [HumanMessage(content=prompt)])
+            reply = _invoke_llm_with_retry(self.creative_llm, critic_messages).content
+            text = gate_feedback(result) + "\n\nMore feedback for improvement:\n" + str(reply)
             state["messages"].append(HumanMessage(content=text))
             self.critic_count += 1
             state["next_step"] = "generate"

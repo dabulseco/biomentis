@@ -176,7 +176,19 @@ def _rubric_from_reply(text: str, source: str, sha: str) -> Rubric | None:
     start = text.find("## Deliverables")
     if start < 0:
         return None
-    body = "\n".join(ln for ln in text[start:].splitlines() if not ln.strip().startswith("```"))
+    kept: list[str] = []
+    in_lessons = False
+    for ln in text[start:].splitlines():
+        if ln.strip().startswith("```"):
+            if in_lessons:  # a closing fence ends the rubric
+                break
+            continue
+        if ln.strip() == "## Core lessons":
+            in_lessons = True
+        elif in_lessons and ln.strip() and not _ITEM_RE.match(ln.rstrip()):
+            break  # trailing prose after the last lesson
+        kept.append(ln)
+    body = "\n".join(kept)
     try:
         return parse_rubric_markdown(body, source=source, prompt_sha=sha)
     except ValueError:  # duplicate IDs: unreadable, ask again

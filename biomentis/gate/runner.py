@@ -165,3 +165,50 @@ def gate_feedback(result: GateResult) -> str:
         "answer again inside <solution></solution>, keeping the parts that were right.",
     ]
     return "\n".join(lines)
+
+
+CRITIQUE_PROMPT_TEMPLATE = """Here is what the user requested:
+{task}
+
+Examine the previous executions, reasoning and solutions, then write feedback for the next draft.
+Work in this order.
+
+1. Fix every blocking finding. These were found by the completion checks on the latest answer:
+{findings}
+
+2. Check each rubric item. For every item, say whether the latest answer meets it and what is missing:
+{rubric}
+
+3. Then look for missing work: anything the task asks for that the answer still lacks, and design
+choices or limits that no source consulted in this run supports.
+
+PASSED QUANTITIES (these were checked and produced no finding):
+{passed_quantities}
+
+Do not change any value listed under PASSED QUANTITIES unless a code step in this round shows it is wrong; if you change one, recompute it in <execute></execute> first.
+
+Be specific and constructive. No question asked, just feedback."""
+
+
+def _has_finding(claim, findings: list[Finding]) -> bool:
+    return any((claim.quote and claim.quote in f.quote) or (claim.name and claim.name in f.issue)
+               for f in findings)
+
+
+def critique_prompt(task: str, rubric, result: GateResult, claims) -> str:
+    """The critic's prompt: findings first, then the rubric, with the verified values pinned."""
+    from biomentis.gate.rubric import format_rubric_markdown
+
+    blocking = result.blocking
+    warnings = [f for f in result.findings if f.severity == "warning"]
+    lines = [_describe(f) for f in blocking]
+    if warnings:
+        lines += ["Warnings:"] + [_describe(f) for f in warnings]
+    passed = [f"- {c.name} = {c.value:g} {c.unit}".rstrip()
+              for c in (claims or []) if not _has_finding(c, result.findings)]
+    return CRITIQUE_PROMPT_TEMPLATE.format(
+        task=task,
+        rubric=format_rubric_markdown(rubric).strip() if rubric is not None else "(no rubric for this run)",
+        findings="\n".join(lines) if lines else "(none)",
+        passed_quantities="\n".join(passed) if passed else "(none)",
+    )

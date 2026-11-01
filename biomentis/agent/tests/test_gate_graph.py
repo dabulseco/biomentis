@@ -140,7 +140,7 @@ def test_fix_after_one_round(trace_dir: str) -> None:
 def test_pause_then_stop() -> None:
     print("\n(b) the error stays: pause before round 4, Stop ends the run")
     llm = _Scripted(_EVIDENCE_STEPS + [_WRONG] * 4)
-    critic = _Scripted(["Check the sum."])
+    critic = _Scripted(["Check the sum."] * 3)
     agent = _agent(llm, critic, planned=1)
     done = threading.Event()
     box: dict = {}
@@ -169,7 +169,7 @@ def test_pause_then_stop() -> None:
     _check("the run ended after Stop", not worker.is_alive() and "error" not in box, repr(box.get("error")))
     _check("status: stopped by user", agent.final_status == "⛔ Stopped by user — did not pass", agent.final_status)
     _check("no model call after the pause", len(llm.requests) == 6, str(len(llm.requests)))
-    _check("the critic ran only in the planned round", len(critic.requests) == 1, str(len(critic.requests)))
+    _check("the critic ran in each of the three critique rounds", len(critic.requests) == 3, str(len(critic.requests)))
     _check("no further pause requested", agent.round_control.pending is None, str(agent.round_control.pending))
 
 

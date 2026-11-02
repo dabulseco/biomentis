@@ -1,0 +1,1 @@
+Sample data table (one group, 4 trials; barometer 748 mmHg)

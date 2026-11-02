@@ -96,6 +96,14 @@ class BiomentisConfig:
     # Same precedence as the Anthropic key; see `resolve_ollama_key`.
     ollama_key: str | None = None
 
+    # Completion gate (biomentis/gate): a research answer is checked before it
+    # is final, and sent back for automatic rounds, then the user decides.
+    completion_gate: bool = True
+    # The repeat-run R&D tool (one prompt run K times, results compared).
+    repeat_runs: bool = True
+    # Default reviewer model when no Critic model is chosen; "" = none.
+    review_model: str = ""
+
     def __post_init__(self):
         """Load any environment variable overrides if they exist."""
         # Check for environment variable overrides (optional)
@@ -120,6 +128,12 @@ class BiomentisConfig:
             self.api_key = os.getenv("BIOMNI_CUSTOM_API_KEY")
         if os.getenv("BIOMNI_SOURCE"):
             self.source = os.getenv("BIOMNI_SOURCE")
+        if os.getenv("BIOMNI_COMPLETION_GATE"):
+            self.completion_gate = os.getenv("BIOMNI_COMPLETION_GATE").lower() == "true"
+        if os.getenv("BIOMNI_REPEAT_RUNS"):
+            self.repeat_runs = os.getenv("BIOMNI_REPEAT_RUNS").lower() == "true"
+        if os.getenv("BIOMNI_REVIEW_MODEL"):
+            self.review_model = os.getenv("BIOMNI_REVIEW_MODEL")
 
         # Protocols.io access token (prefer specific env vars)
         env_token = os.getenv("PROTOCOLS_IO_ACCESS_TOKEN") or os.getenv("BIOMNI_PROTOCOLS_IO_ACCESS_TOKEN")
@@ -188,6 +202,9 @@ class BiomentisConfig:
             "api_key": self.api_key,
             "source": self.source,
             "ncbi_email": self.ncbi_email,
+            "completion_gate": self.completion_gate,
+            "repeat_runs": self.repeat_runs,
+            "review_model": self.review_model,
         }
 
 

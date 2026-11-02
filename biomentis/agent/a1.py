@@ -3,7 +3,6 @@ import inspect
 import os
 import re
 import time
-import uuid
 from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
@@ -128,15 +127,25 @@ from biomentis.independent_review import (
     require_sources,
     review_inputs,
 )
-from biomentis.run_quality import MAX_EVIDENCE_ASKS, evidence_nudge, missing_evidence, run_evidence
+from biomentis.run_quality import MAX_EVIDENCE_ASKS, current_run, evidence_nudge, missing_evidence, run_evidence
+from biomentis.gate import GateResult
+from biomentis.gate.control import RoundControl
+from biomentis.gate.rounds import final_label, next_action
+from biomentis.gate.rubric import Rubric, resolve_rubric, save_rubric
+from biomentis.gate.runner import critique_prompt, gate_feedback, run_gate
+
+# The status of a gate-on run that ended without an answer to check.
+NO_FINAL_ANSWER_STATUS = "⚠️ No final answer"
 from biomentis.run_worker import background_runs_enabled, clear_run, get_run, start_run
 from biomentis.ui_core import (
     ExportEntry,
+    add_transcript_entry,
     export_kind,
     format_duration,
     get_llm_display_name,
     list_available_providers,
     export_run,
+    stopped_events,
     stream_agent_events,
     transcript_entry_for_event,
     ui_event_to_export_entry,
@@ -592,6 +601,19 @@ class A1:
         # The conversation's output folder (see `biomentis.workspace`); code
         # steps run in its files/. None (scripts, tests) runs them in place.
         self.output_dir = None
+        # Whether a completion-gate pause can wait for the user. Only a caller
+        # that runs the agent on its own thread and can answer the pause sets
+        # it, per run (the UI's background path, RepeatBatch). Otherwise a
+        # round-4 pause stops the run and a context pause wraps up.
+        self.pause_allowed = False
+        # The completion gate's rubric settings (see `draft_rubric` in the
+        # graph): a rubric every run uses as is (the repeat-run batch sets
+        # it), and the teacher's uploaded rubric text. Neither is reset per
+        # run; `run_rubric`, the rubric the current run is checked against,
+        # is (see `reset_gate`).
+        self.preset_rubric: Rubric | None = None
+        self.rubric_upload: str | None = None
+        self.run_rubric: Rubric | None = None
 
         # Step-level tracing. Cheap (a few JSON lines per step, no extra LLM
         # calls), so it defaults on -- the failures worth studying are the
@@ -684,10 +706,116 @@ class A1:
         except Exception as exc:
             print(f"[independent_review] could not save the reviewer's reply: {exc}")
 
+    def reviewer_name(self) -> str:
+        """The review model's name, as shown with its reviews."""
+        return getattr(self, "review_model_name", "") or get_llm_display_name(self.review_llm)
+
+    def run_review(self, messages: list[BaseMessage], rubric: Rubric | None = None,
+                   focus_numbers: set[str] = frozenset()) -> Review:
+        """One independent review of the run's latest answer by `self.review_llm`.
+
+        See biomentis.independent_review. The reviewer first names the answer's
+        key assumptions, which are web-searched; then it reviews, with one retry
+        on an unusable reply. The raw replies are saved and the review is added
+        to `run_reviews`. A failed call or a reply still unusable after the
+        retry gives a Review with `error` set; this never raises for it. With a
+        `rubric` the reviewer also reports its coverage; `focus_numbers` keep
+        the full output of the steps that printed them.
+        """
+        reviewer_llm = self.review_llm
+        reviewer = self.reviewer_name()
+        inputs = review_inputs(messages, focus_numbers)
+        print(f"independent review {self.review_count + 1} by {reviewer}...")
+        # Phase 1: the reviewer names the answer's key assumptions, and each is
+        # web-searched. Reviewers judged on consistency alone: on a 2026-10-28
+        # CHO run every model tested accepted a harvest HCP input ~70x below
+        # published values, which one search would have shown.
+        raw_replies: list[str] = []
+        assumption_checks = ""
+        try:
+            reply_text = _reply_text(
+                _invoke_llm_with_retry(
+                    reviewer_llm,
+                    [SystemMessage(content=ASSUMPTIONS_SYSTEM_PROMPT), HumanMessage(content=build_assumptions_prompt(inputs))],
+                )
+            )
+            raw_replies.append(reply_text)
+            assumptions = parse_assumptions(reply_text)
+            if assumptions:
+                print(f"independent review: checking {len(assumptions)} assumptions by web search")
+                assumption_checks = check_assumptions(assumptions, search=getattr(self, "review_search", None))
+        except Exception as exc:  # the review goes on without the checks
+            print(f"independent review: assumption check failed ({type(exc).__name__}: {exc})")
+        prompt = build_review_prompt(inputs, assumption_checks, rubric)
+        # One retry when the reply can't be read: in a 2026-10-28 run,
+        # gemma4:31b-cloud's reply was "not valid JSON", and the same
+        # request answered properly when sent again.
+        review_messages = [SystemMessage(content=REVIEW_SYSTEM_PROMPT), HumanMessage(content=prompt)]
+        review = Review(error="no reply")
+        for _attempt in range(2):
+            try:
+                reply_text = _reply_text(_invoke_llm_with_retry(reviewer_llm, review_messages))
+            except Exception as exc:  # a failed review must not cost the answer
+                review = Review(error=f"the review call failed ({type(exc).__name__}: {exc})")
+                break
+            raw_replies.append(reply_text)
+            review = compare_reported(require_sources(parse_review(reply_text), assumption_checks))
+            if not review.error:
+                break
+            print(f"independent review: {review.error}; asking once more")
+            review_messages = review_messages + [
+                AIMessage(content=reply_text or "(empty reply)"),
+                HumanMessage(content=REVIEW_RETRY_MESSAGE),
+            ]
+        self.review_count += 1
+        self._save_review_replies(raw_replies)
+        self.run_reviews.append(
+            {"review": review, "reviewer": reviewer, "after_correction": self.review_count > 1}
+        )
+        print(f"independent review: {review.verdict or review.error}")
+        return review
+
     def reset_review(self) -> None:
         """Start a run with no independent reviews done."""
         self.review_count = 0
         self.run_reviews: list[dict] = []
+
+    def reset_gate(self) -> None:
+        """Start a run with no completion gate run, no pause asked and no status.
+
+        `round_control` is created once and kept: the UI holds a reference to
+        it, so a run's pause is answered on the same object.
+        """
+        if getattr(self, "round_control", None) is None:
+            self.round_control = RoundControl()
+        self.round_control.reset()
+        self.run_gate_results: list[GateResult] = []
+        self._gate_prev_claims = None
+        self._gate_stopped = False
+        self._context_pause_asked = False
+        self.final_status = ""
+        self.run_rubric = None
+        self.rubric_error = ""
+
+    def set_rubric_upload(self, text: str | None) -> None:
+        """The teacher's rubric for the next runs (any format), or None for none."""
+        self.rubric_upload = text if text and text.strip() else None
+
+    def _await_user(self, round_number: int, findings: list, reason: str) -> str:
+        """Pause for the user's Continue or Stop; return the choice.
+
+        With `pause_allowed` False (the default: a plain `go()`, or the UI
+        running inline, where nobody can answer while the thread is blocked)
+        the run never hangs: a round pause stops it (it is never labelled as
+        passed without passing), and a context pause continues, so the run
+        wraps up with what it has, as it did before the gate.
+        """
+        if not getattr(self, "pause_allowed", False):
+            choice = "continue" if reason == "context" else "stop"
+            print(f"completion gate: nobody can answer a pause here; {reason} pause resolved as {choice}")
+            return choice
+        self.round_control.request(round_number=round_number, findings=findings, reason=reason)
+        return self.round_control.wait()
 
     def add_tool(self, api):
         """Add a new tool to the agent's tool registry and make it available for retrieval.
@@ -1761,7 +1889,14 @@ Each library is listed with its description to help you understand its functiona
 
         return formatted_prompt
 
-    def configure(self, self_critic=False, test_time_scale_round=0, critic_priorities=None, evidence_gate=False):
+    def configure(
+        self,
+        self_critic=False,
+        test_time_scale_round=0,
+        critic_priorities=None,
+        evidence_gate=False,
+        completion_gate: bool | None = None,
+    ):
         """Configure the agent with the initial system prompt and workflow.
 
         Args:
@@ -1776,10 +1911,25 @@ Each library is listed with its description to help you understand its functiona
             evidence_gate: Send a final answer back, at most MAX_EVIDENCE_ASKS
                 times, until the run has consulted a literature source, made a
                 calculation in code and drawn a figure (see run_quality).
+                Ignored when the completion gate is on: its evidence check
+                replaces this one.
+            completion_gate: Check each final answer (biomentis.gate) and send
+                it back for rounds of revision: the planned rounds
+                (`test_time_scale_round` with self_critic on, else none)
+                always run, failed checks get up to AUTO_ROUND_LIMIT rounds,
+                then the run pauses before each round for the user's
+                Continue or Stop. Default: `default_config.completion_gate`.
+                False builds the old graph (self-critic, independent review).
         """
         # Store self_critic for later use
         self.self_critic = self_critic
         self.evidence_gate = evidence_gate
+        if completion_gate is None:
+            completion_gate = default_config.completion_gate
+        self.completion_gate = bool(completion_gate)
+        # Planned revision rounds for the gate: the "Self-critique rounds".
+        planned_rounds = test_time_scale_round if self_critic else 0
+        self.planned_rounds = planned_rounds
         # `go`/`go_stream` reset this per call, but callers that drive the
         # graph directly (e.g. the Streamlit UI's stream_agent_events,
         # which invokes `self.app.stream` without going through either
@@ -1790,6 +1940,7 @@ Each library is listed with its description to help you understand its functiona
         # same "one self-critic pass per task" semantics as `go`/`go_stream`.
         self.critic_count = 0
         self.reset_review()
+        self.reset_gate()
 
         # Get data lake content
         data_lake_path = self.path + "/data_lake"
@@ -1903,6 +2054,17 @@ Each library is listed with its description to help you understand its functiona
             if _is_claude(self.llm):
                 messages = _observations_as_user_turns(messages)
             messages, context_fit = self._fit_request(messages)
+            # With the completion gate, a nearly full context is the user's
+            # call, once per run: Continue wraps up as below (the request
+            # already ends with WRAP_UP_INSTRUCTION), Stop ends the run here.
+            if self.completion_gate and context_fit.must_wrap_up and not self._context_pause_asked:
+                self._context_pause_asked = True
+                print("context budget: the context window is nearly full; waiting for Continue or Stop")
+                if self._await_user(len(self.run_gate_results), [], "context") == "stop":
+                    print("stopped by the user at the context limit")
+                    self._gate_stopped = True
+                    state["next_step"] = "finalize"
+                    return state
             trace_t0 = time.time()
             response = _invoke_llm_with_retry(self.llm, messages, stop_at_first_tag=True)
             trace_latency = time.time() - trace_t0
@@ -2020,9 +2182,15 @@ Each library is listed with its description to help you understand its functiona
             # With the evidence check on, a final answer from a run that never
             # consulted a source, calculated or plotted goes back for those
             # first. Not when the context is nearly full: then the wrap-up
-            # instruction has already asked for the answer now.
+            # instruction has already asked for the answer now. Not with the
+            # completion gate either: its evidence check replaces this one.
             missing = []
-            if answer_match and getattr(self, "evidence_gate", False) and not getattr(self, "_context_wrap_ups", 0):
+            if (
+                answer_match
+                and not self.completion_gate
+                and getattr(self, "evidence_gate", False)
+                and not getattr(self, "_context_wrap_ups", 0)
+            ):
                 evidence = run_evidence(state["messages"])
                 if evidence.evidence_asks < MAX_EVIDENCE_ASKS:
                     missing = missing_evidence(evidence, answer=answer_match.group(1))
@@ -2317,11 +2485,9 @@ Each library is listed with its description to help you understand its functiona
             else:
                 raise ValueError(f"Unexpected next_step: {next_step}")
 
-        def execute_self_critic(state: AgentState) -> AgentState:
-            if self.critic_count < test_time_scale_round:
-                # Generate feedback based on message history
-                messages = state["messages"]
-                feedback_prompt = f"""
+        def self_critique_feedback(messages: list[BaseMessage]) -> str:
+            """The self-critic's feedback on the run so far (one LLM call)."""
+            feedback_prompt = f"""
                 Here is a reminder of what is the user requested: {getattr(self, "user_task", "")}
                 Examine the previous executions, reasoning, and solutions.
                 Critic harshly on what could be improved?
@@ -2334,20 +2500,25 @@ Each library is listed with its description to help you understand its functiona
                 Name design choices or limits that no source consulted in this run supports.
                 No question asked, just feedbacks.
                 """
-                # Divergent by design ("think hard what are missing"), so this is
-                # the one call in the loop that runs on the hot client. The
-                # generate/execute nodes above stay cold.
-                # Same guard as `generate`: this call re-sends the entire
-                # run history, so it is the largest request the graph makes.
-                critic_messages, _ = self._fit_request(
-                    messages + [HumanMessage(content=feedback_prompt)]
-                )
-                feedback = _invoke_llm_with_retry(self.creative_llm, critic_messages)
+            # Divergent by design ("think hard what are missing"), so this is
+            # the one call in the loop that runs on the hot client. The
+            # generate/execute nodes above stay cold.
+            # Same guard as `generate`: this call re-sends the entire
+            # run history, so it is the largest request the graph makes.
+            critic_messages, _ = self._fit_request(
+                messages + [HumanMessage(content=feedback_prompt)]
+            )
+            return _invoke_llm_with_retry(self.creative_llm, critic_messages).content
+
+        def execute_self_critic(state: AgentState) -> AgentState:
+            if self.critic_count < test_time_scale_round:
+                # Generate feedback based on message history
+                feedback = self_critique_feedback(state["messages"])
 
                 # Add feedback as a new message
                 state["messages"].append(
                     HumanMessage(
-                        content=f"Wait... this is not enough to solve the task. Here are some feedbacks for improvement:\n{feedback.content}"
+                        content=f"Wait... this is not enough to solve the task. Here are some feedbacks for improvement:\n{feedback}"
                     )
                 )
                 self.critic_count += 1
@@ -2373,60 +2544,123 @@ Each library is listed with its description to help you understand its functiona
                 return state
             if not isinstance(last, str) or not re.search(r"<solution>.*?</solution>", last, re.DOTALL | re.IGNORECASE):
                 return state
-            reviewer = getattr(self, "review_model_name", "") or get_llm_display_name(reviewer_llm)
-            inputs = review_inputs(state["messages"])
-            print(f"independent review {self.review_count + 1} by {reviewer}...")
-            # Phase 1: the reviewer names the answer's key assumptions, and each is
-            # web-searched. Reviewers judged on consistency alone: on a 2026-10-28
-            # CHO run every model tested accepted a harvest HCP input ~70x below
-            # published values, which one search would have shown.
-            raw_replies: list[str] = []
-            assumption_checks = ""
-            try:
-                reply_text = _reply_text(
-                    _invoke_llm_with_retry(
-                        reviewer_llm,
-                        [SystemMessage(content=ASSUMPTIONS_SYSTEM_PROMPT), HumanMessage(content=build_assumptions_prompt(inputs))],
-                    )
-                )
-                raw_replies.append(reply_text)
-                assumptions = parse_assumptions(reply_text)
-                if assumptions:
-                    print(f"independent review: checking {len(assumptions)} assumptions by web search")
-                    assumption_checks = check_assumptions(assumptions, search=getattr(self, "review_search", None))
-            except Exception as exc:  # the review goes on without the checks
-                print(f"independent review: assumption check failed ({type(exc).__name__}: {exc})")
-            prompt = build_review_prompt(inputs, assumption_checks)
-            # One retry when the reply can't be read: in a 2026-10-28 run,
-            # gemma4:31b-cloud's reply was "not valid JSON", and the same
-            # request answered properly when sent again.
-            review_messages = [SystemMessage(content=REVIEW_SYSTEM_PROMPT), HumanMessage(content=prompt)]
-            review = Review(error="no reply")
-            for _attempt in range(2):
-                try:
-                    reply_text = _reply_text(_invoke_llm_with_retry(reviewer_llm, review_messages))
-                except Exception as exc:  # a failed review must not cost the answer
-                    review = Review(error=f"the review call failed ({type(exc).__name__}: {exc})")
-                    break
-                raw_replies.append(reply_text)
-                review = compare_reported(require_sources(parse_review(reply_text), assumption_checks))
-                if not review.error:
-                    break
-                print(f"independent review: {review.error}; asking once more")
-                review_messages = review_messages + [
-                    AIMessage(content=reply_text or "(empty reply)"),
-                    HumanMessage(content=REVIEW_RETRY_MESSAGE),
-                ]
-            self.review_count += 1
-            self._save_review_replies(raw_replies)
-            self.run_reviews.append(
-                {"review": review, "reviewer": reviewer, "after_correction": self.review_count > 1}
-            )
-            print(f"independent review: {review.verdict or review.error}")
+            reviewer = self.reviewer_name()
+            review = self.run_review(state["messages"])
             # One correction round, and not when the context is already full.
             if self.review_count == 1 and review.needs_rework and not getattr(self, "_context_wrap_ups", 0):
                 state["messages"].append(HumanMessage(content=feedback_for_agent(review, reviewer)))
                 state["next_step"] = "generate"
+            return state
+
+        # --- The completion gate (biomentis.gate) ----------------------------
+        # generate (on a <solution>) → gate → critique | await_decision | finalize.
+        # Round 0 is the first answer's gate; `round_done` is the round of the
+        # latest result, so the gate count minus one.
+
+        def draft_rubric(state: AgentState) -> AgentState:
+            """Fix the run's rubric before the first answer: preset, uploaded, converted or drafted.
+
+            It is frozen for the run and saved to the output folder. Nothing is
+            added to the message history: the model sees the rubric only
+            through the gate's feedback. A failure costs the rubric, never the
+            run; the gate then runs without one.
+            """
+            self.run_rubric = None
+            self.rubric_error = ""
+            try:
+                if self.preset_rubric is not None:
+                    rubric = self.preset_rubric
+                else:
+                    run = current_run(state["messages"])
+                    first = next((m for m in run if isinstance(m, HumanMessage)), None)
+                    prompt = getattr(self, "user_task", "") or (first.content if first is not None else "")
+                    llm = getattr(self, "gate_llm", None) or self.llm
+                    rubric = resolve_rubric(str(prompt), self.rubric_upload, llm)
+            except Exception as exc:  # the run goes on without a rubric
+                self.rubric_error = f"{type(exc).__name__}: {exc}"
+                print(f"[gate] rubric failed ({self.rubric_error}); the gate runs without one")
+                return state
+            self.run_rubric = rubric
+            n = len(rubric.items)
+            print(f"completion gate: rubric {rubric.source}, {n} item{'s' if n != 1 else ''}")
+            if getattr(self, "output_dir", None):
+                try:
+                    save_rubric(rubric, Path(self.output_dir))
+                except Exception as exc:  # a file that can't be written must not cost the run
+                    print(f"[gate] could not save the rubric: {exc}")
+            return state
+
+        def routing_function_gate(state: AgentState) -> Literal["execute", "generate", "gate", "finalize"]:
+            next_step = state.get("next_step")
+            if next_step == "finalize":
+                return "finalize"
+            if next_step == "end":
+                # Only a real answer is checked; an aborted run is labelled and ends.
+                last = state["messages"][-1].content if state["messages"] else ""
+                if isinstance(last, str) and re.search(r"<solution>.*?</solution>", last, re.DOTALL | re.IGNORECASE):
+                    return "gate"
+                return "finalize"
+            return routing_function(state)
+
+        def gate(state: AgentState) -> AgentState:
+            round_done = len(self.run_gate_results)
+            result = run_gate(self, state["messages"], round_done, rubric=self.run_rubric)
+            self.run_gate_results.append(result)
+            try:
+                self.tracer.record_gate(
+                    round=result.round,
+                    passed=result.passed,
+                    reviewer_state=result.reviewer_state,
+                    blocking=[f.check for f in result.blocking],
+                    warnings=sum(1 for f in result.findings if f.severity == "warning"),
+                )
+            except Exception as exc:  # telemetry must never break a run
+                print(f"[step_trace] could not record gate: {exc}")
+            action = next_action(round_done, planned_rounds, result)
+            print(
+                f"completion gate, round {round_done}: {len(result.blocking)} blocking, "
+                f"reviewer {result.reviewer_state} → {action}"
+            )
+            state["next_step"] = "finalize" if action == "end" else action
+            return state
+
+        def critique(state: AgentState) -> AgentState:
+            """Send the gate's findings back, with a critic that works from the findings and rubric."""
+            result = self.run_gate_results[-1]
+            prompt = critique_prompt(getattr(self, "user_task", ""), self.run_rubric, result,
+                                     getattr(self, "_gate_prev_claims", None))
+            # Same guard as `generate`: this call re-sends the whole run history.
+            critic_messages, _ = self._fit_request(state["messages"] + [HumanMessage(content=prompt)])
+            reply = _invoke_llm_with_retry(self.creative_llm, critic_messages).content
+            text = gate_feedback(result) + "\n\nMore feedback for improvement:\n" + str(reply)
+            state["messages"].append(HumanMessage(content=text))
+            self.critic_count += 1
+            state["next_step"] = "generate"
+            return state
+
+        def await_decision(state: AgentState) -> AgentState:
+            """Past the automatic rounds: wait, with no timeout, for Continue or Stop."""
+            result = self.run_gate_results[-1]
+            print(f"completion gate: round {result.round + 1} needs the user's decision")
+            if self._await_user(result.round + 1, result.blocking, "round") == "stop":
+                self._gate_stopped = True
+                state["next_step"] = "finalize"
+                return state
+            # Findings accepted as is no longer block; if none are left, the run is done.
+            result.accepted = set(self.round_control.accepted)
+            done = next_action(result.round, planned_rounds, result) == "end"
+            state["next_step"] = "finalize" if done else "critique"
+            return state
+
+        def finalize(state: AgentState) -> AgentState:
+            """Every gate-on run ends here, so every one ends with a status label."""
+            if not self.run_gate_results and not self._gate_stopped:
+                self.final_status = NO_FINAL_ANSWER_STATUS
+            else:
+                result = self.run_gate_results[-1] if self.run_gate_results else GateResult(0, [], "off")
+                self.final_status = final_label(result, self._gate_stopped, result.round)
+            print(f"completion gate: {self.final_status}")
+            state["next_step"] = "end"
             return state
 
         # Create the workflow
@@ -2436,7 +2670,40 @@ Each library is listed with its description to help you understand its functiona
         workflow.add_node("generate", generate)
         workflow.add_node("execute", execute)
 
-        if self_critic:
+        if self.completion_gate:
+            for name, node in (
+                ("draft_rubric", draft_rubric),
+                ("gate", gate),
+                ("critique", critique),
+                ("await_decision", await_decision),
+                ("finalize", finalize),
+            ):
+                workflow.add_node(name, node)
+            workflow.add_edge(START, "draft_rubric")
+            workflow.add_edge("draft_rubric", "generate")
+            workflow.add_conditional_edges(
+                "generate",
+                routing_function_gate,
+                path_map={
+                    "execute": "execute",
+                    "generate": "generate",
+                    "gate": "gate",
+                    "finalize": "finalize",
+                },
+            )
+            workflow.add_conditional_edges(
+                "gate",
+                lambda state: state["next_step"],
+                path_map={"critique": "critique", "await_decision": "await_decision", "finalize": "finalize"},
+            )
+            workflow.add_edge("critique", "generate")
+            workflow.add_conditional_edges(
+                "await_decision",
+                lambda state: state["next_step"],
+                path_map={"critique": "critique", "finalize": "finalize"},
+            )
+            workflow.add_edge("finalize", END)
+        elif self_critic:
             workflow.add_node("self_critic", execute_self_critic)
             # Add conditional edges
             workflow.add_conditional_edges(
@@ -2461,21 +2728,25 @@ Each library is listed with its description to help you understand its functiona
                 path_map={"execute": "execute", "generate": "generate", "end": "independent_review"},
             )
         # Every run that ends passes the reviewer, which only acts on a real
-        # answer and only when a review model is set.
-        workflow.add_node("independent_review", independent_review)
-        workflow.add_conditional_edges(
-            "independent_review",
-            lambda state: "generate" if state.get("next_step") == "generate" else "end",
-            path_map={"generate": "generate", "end": END},
-        )
+        # answer and only when a review model is set. (With the completion
+        # gate, the reviewer runs inside the gate instead.)
+        if not self.completion_gate:
+            workflow.add_node("independent_review", independent_review)
+            workflow.add_conditional_edges(
+                "independent_review",
+                lambda state: "generate" if state.get("next_step") == "generate" else "end",
+                path_map={"generate": "generate", "end": END},
+            )
         # Back to generate, unless the repeated-step guard ended the run. Not
-        # via self_critic: its feedback would only restart the loop.
+        # via self_critic: its feedback would only restart the loop. With the
+        # gate, an ended run still gets its status label in finalize.
         workflow.add_conditional_edges(
             "execute",
             lambda state: "end" if state.get("next_step") == "end" else "generate",
-            path_map={"generate": "generate", "end": END},
+            path_map={"generate": "generate", "end": "finalize" if self.completion_gate else END},
         )
-        workflow.add_edge(START, "generate")
+        if not self.completion_gate:
+            workflow.add_edge(START, "generate")
 
         # Compile the workflow
         self.app = workflow.compile()
@@ -2677,6 +2948,7 @@ Each library is listed with its description to help you understand its functiona
         self._context_wrap_ups = 0
         self._reset_step_guard()
         self.reset_review()
+        self.reset_gate()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
@@ -2734,6 +3006,7 @@ Each library is listed with its description to help you understand its functiona
         self._context_wrap_ups = 0
         self._reset_step_guard()
         self.reset_review()
+        self.reset_gate()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
@@ -3931,9 +4204,11 @@ Each library is listed with its description to help you understand its functiona
         # in a module-level dict in `biomentis.run_worker` keyed by this id.
         # Session state is the right home for the key itself: it is per-browser
         # -session and survives every rerun.
-        if "biomni_session_key" not in st.session_state:
-            st.session_state.biomni_session_key = uuid.uuid4().hex
-        _session_key = st.session_state.biomni_session_key
+        # The key is also kept in the page URL (`?s=`, see biomentis.ui_session),
+        # so a reload, or a reconnect after the session expired, re-attaches.
+        from biomentis.ui_session import session_key
+
+        _session_key = session_key()
         # `biomni_run_cursor` is how many of this run's events are already in
         # the transcript. It is what makes re-attaching after a stray click
         # exact: the worker keeps every event it ever produced, and the cursor
@@ -4012,6 +4287,27 @@ Each library is listed with its description to help you understand its functiona
         # thread is running whether or not the flag survived the last rerun.
         if _runner is not None and _runner.is_alive():
             st.session_state.biomni_run_active = True
+        # Single user: a run paused for a decision whose tab is gone (closed,
+        # or opened without its `?s=`) can be taken over here.
+        if _runner is None:
+            try:
+                from biomentis.run_worker import get_run as _get, live_run_sessions
+                from biomentis.ui_session import TAKE_OVER_LABEL, adopt, orphaned
+
+                for _key in live_run_sessions():
+                    _other = _get(_key)
+                    _ctl = getattr(_other, "round_control", None) if _other is not None else None
+                    if _key != _session_key and _ctl is not None and _ctl.pending is not None and orphaned(_key):
+                        st.warning(
+                            "A run from a browser tab that is no longer open is paused and waiting for a "
+                            "decision.",
+                            icon=":material/pause_circle:",
+                        )
+                        st.button(TAKE_OVER_LABEL, key="biomni_take_over_run", icon=":material/login:",
+                                  on_click=adopt, args=(_key,))
+                        break
+            except Exception as e:  # never cost the page
+                print(f"take-over check failed: {type(e).__name__}: {e}")
         _in_run = bool(st.session_state.get("biomni_run_active"))
 
         # Run status, rendered ABOVE the tabs and therefore outside both of
@@ -4028,11 +4324,18 @@ Each library is listed with its description to help you understand its functiona
                 # kills it. Say so: the old behavior trained users to sit on
                 # their hands for twenty minutes, and the whole point of the
                 # worker is that they no longer have to.
-                st.caption(
-                    f"⏳ Running · {format_duration(_elapsed)} · "
-                    f"output landing in **{_TAB_INNER_LABEL}** · "
-                    "runs in the background — clicking around won't stop it"
-                )
+                _control = getattr(_runner, "round_control", None)
+                if _control is not None and _control.pending is not None:
+                    st.caption(
+                        f"⏸ Paused · {format_duration(_elapsed)} · "
+                        f"waiting for your decision in **{_TAB_MAIN_LABEL}**"
+                    )
+                else:
+                    st.caption(
+                        f"⏳ Running · {format_duration(_elapsed)} · "
+                        f"output landing in **{_TAB_INNER_LABEL}** · "
+                        "runs in the background — clicking around won't stop it"
+                    )
                 if st.button(
                     "⏹ Stop run",
                     key="biomni_stop_run",
@@ -4264,6 +4567,17 @@ Each library is listed with its description to help you understand its functiona
                     if entry.get("content"):
                         with st.expander("💬 Tutor Q&A", expanded=False):
                             st.markdown(entry["content"])
+                elif entry.get("kind") == "rubric":
+                    with st.expander("Show the rubric", expanded=False):
+                        st.markdown(entry.get("content", ""))
+                elif entry.get("kind") == "final_status":
+                    status = entry.get("content", "")
+                    if status.startswith("✅"):
+                        st.success(status)
+                    elif status.startswith("⛔"):
+                        st.error(status)
+                    else:
+                        st.warning(status)
                 elif entry.get("content"):
                     st.markdown(entry["content"])
 
@@ -4315,6 +4629,17 @@ Each library is listed with its description to help you understand its functiona
         # alongside the prompt; `clear_on_submit=True` resets both the text
         # area and the uploader after a send.
         st.session_state.setdefault("biomni_prompt_draft", "")
+        # A repeat-run batch (sidebar R&D tool) shares the process state a
+        # run's code steps use, so the two never overlap: Send waits for it.
+        # The state is per process, so a batch in any session counts.
+        try:
+            from biomentis.ui_repeat import active_batch_session
+
+            _batch_session = active_batch_session()
+        except Exception as e:
+            print(f"repeat-run batch check failed, Send left enabled: {type(e).__name__}: {e}")
+            _batch_session = None
+        _batch_busy = _batch_session is not None
         with st.form(key="biomni_prompt_form", clear_on_submit=True):
             uploaded_files = st.file_uploader(
                 "Attach files (optional)",
@@ -4343,8 +4668,14 @@ Each library is listed with its description to help you understand its functiona
             # would be both one rerun late and illegal (the tabs widget is
             # already instantiated by then).
             submitted = st.form_submit_button(
-                "Send", use_container_width=False, on_click=_focus_executor_for_new_run
+                "Send", use_container_width=False, on_click=_focus_executor_for_new_run, disabled=_batch_busy
             )
+            if _batch_busy:
+                st.caption(
+                    "A repeat-run batch is running"
+                    + ("" if _batch_session == _session_key else " in another session")
+                    + "; Send is available again when it has finished."
+                )
         prompt = prompt_text.strip() if submitted else ""
         st.session_state.biomni_prompt_draft = "" if submitted else prompt_text
 
@@ -4404,6 +4735,10 @@ Each library is listed with its description to help you understand its functiona
         # driving the same agent object and the same LangGraph thread id.
         # Before background runs this was impossible (the script was blocked);
         # now it has to be refused explicitly.
+        if _starting and _batch_busy:
+            st.session_state.biomni_prompt_draft = prompt
+            _starting = False
+
         if _starting and _runner is not None and _runner.is_alive():
             st.warning(
                 "A run is already in progress — it is still going in the "
@@ -4464,6 +4799,13 @@ Each library is listed with its description to help you understand its functiona
                 (i for i, e in enumerate(st.session_state.biomni_transcript) if e.get("role") == "user"),
                 default=-1,
             )
+            if not _starting and _runner is not None and st.session_state.biomni_run_cursor == 0 and _last_user < 0:
+                # Re-attached from a new session (reload, reconnect, take over):
+                # its transcript is empty, so start it with the run's prompt.
+                st.session_state.biomni_transcript.append(
+                    {"panel": "main", "role": "user", "content": _runner.prompt}
+                )
+                _last_user = len(st.session_state.biomni_transcript) - 1
             code_execution_entries = [
                 e for e in st.session_state.biomni_transcript[_last_user + 1 :] if e.get("kind") == "code"
             ]
@@ -4498,16 +4840,24 @@ Each library is listed with its description to help you understand its functiona
                 )
                 self.current_run_id = _journal.run_id
                 st.session_state.biomni_run_journal = _journal.path
+                # Inline, a paused run would block the script thread with no
+                # way to answer it, so a run that needs a decision stops.
+                self.pause_allowed = background_runs_enabled()
                 if background_runs_enabled():
                     # The stream is built on the worker thread, not here: the
                     # tutor's `_create_run` parks the live generator in session
                     # state, and creating it on the thread that will drive it
                     # keeps creation and consumption together.
+                    # The agent's pause control goes on the runner, so the
+                    # Stop run button also ends a run paused for a decision.
                     _runner = start_run(
                         _session_key,
                         effective_prompt,
                         lambda: _stream(self, effective_prompt, files, history_messages, thread_id),
                         journal=_journal,
+                        round_control=getattr(self, "round_control", None),
+                        # Stop run mid-step: the gate's "Stopped by user" status.
+                        on_cancel=lambda: stopped_events(self),
                     )
                 else:
                     # Opt-out path (`BIOMENTIS_BACKGROUND_RUNS=0`): drive the
@@ -4518,7 +4868,19 @@ Each library is listed with its description to help you understand its functiona
                     )
 
             _cursor = st.session_state.biomni_run_cursor
-            _events = _runner.events_from(_cursor) if _runner is not None else _inline_stream
+            # A run paused for the user's decision produces no events until
+            # they answer, so stop draining once caught up and show the pause
+            # panel below instead: the script then ends, and the click on
+            # Continue or Stop is what reruns it. No timeout ends the wait.
+            _control = getattr(_runner, "round_control", None) if _runner is not None else None
+
+            def _paused() -> bool:
+                return _control is not None and _control.pending is not None
+
+            _events = (
+                _runner.events_from(_cursor, idle=_paused) if _runner is not None else _inline_stream
+            )
+            _redraw = False
             # A run that raises must not leave `biomni_run_active` set:
             # the flag drives the run banner, and a stuck True claims a
             # run is in flight forever. Deliberately an `except` and not
@@ -4586,8 +4948,13 @@ Each library is listed with its description to help you understand its functiona
                         st.session_state.biomni_run_started_at = None
 
                     if entry is not None:
-                        st.session_state.biomni_transcript.append(entry)
-                        _live_step_tracker.render(entry, render_entry, main_col)
+                        # A final status goes above the answer already on
+                        # screen; with a worker, redraw the page to show it
+                        # there (inline, a rerun would lose the run).
+                        if add_transcript_entry(st.session_state.biomni_transcript, entry) and _runner is not None:
+                            _redraw = True
+                        else:
+                            _live_step_tracker.render(entry, render_entry, main_col)
 
                     # Advance the cursor per event, not per rendered entry:
                     # some events produce none, and the cursor indexes the
@@ -4597,6 +4964,8 @@ Each library is listed with its description to help you understand its functiona
                     # is still in the journal.
                     _cursor += 1
                     st.session_state.biomni_run_cursor = _cursor
+                    if _redraw:
+                        st.rerun()
             except Exception:
                 st.session_state.biomni_run_active = False
                 st.session_state.biomni_run_started_at = None
@@ -4610,6 +4979,16 @@ Each library is listed with its description to help you understand its functiona
                 st.session_state.biomni_run_active = False
                 st.session_state.biomni_run_started_at = None
                 st.error(f"Run failed: {type(_runner.error).__name__}: {_runner.error}")
+
+            if _runner is not None and _runner.is_alive() and _paused():
+                if _starting:
+                    # The banner above was drawn before this run existed;
+                    # redraw once so it says "Paused" and offers Stop run.
+                    st.rerun()
+                from biomentis.ui_gate import render_round_pause
+
+                with main_col:
+                    render_round_pause(_control)
 
             if _runner is not None and _runner.done:
                 if _runner.cancelled:

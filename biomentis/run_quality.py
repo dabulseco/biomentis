@@ -51,6 +51,9 @@ CRITIC_FEEDBACK_PREFIX = "Wait... this is not enough to solve the task."
 # The independent reviewer's findings, sent back to the agent, start with this
 # (see biomentis.independent_review).
 REVIEW_FEEDBACK_PREFIX = "An independent reviewer checked your final answer"
+# The completion gate's findings, sent back to the agent, start with this
+# (see biomentis.gate.runner.gate_feedback). Each counts as a critique round.
+GATE_FEEDBACK_PREFIX = "The completion checks found problems"
 
 MAX_EVIDENCE_ASKS = 2
 EVIDENCE_NUDGE_PREFIX = "Before this can be the final answer, the run still needs:"
@@ -78,6 +81,15 @@ _ERROR_RE = re.compile(r"^\s*(Error\b|Traceback|.*\bError querying\b)", re.IGNOR
 
 
 @dataclass
+class FigureRecord:
+    """One drawn figure: the step that drew it, its summary line and that step's code."""
+
+    step: int          # message index (within the current run) of the observation
+    title_line: str    # "Figure '<title>': x = ..."
+    code: str          # the step's code
+
+
+@dataclass
 class RunEvidence:
     """Counts for one run, from its message history."""
 
@@ -97,6 +109,11 @@ class RunEvidence:
     figure_ref_asks: int = 0
     # Each drawn figure's summary line: "Figure '<title>': x = <label> [...], y = ..."
     figure_titles: list[str] = field(default_factory=list)
+    # The same figures with the step and code that drew them.
+    figure_records: list[FigureRecord] = field(default_factory=list)
+    # Message index (within the current run) of the candidate <solution> before
+    # the final one, or -1 when there is no earlier candidate.
+    last_solution_index: int = -1
     # Printed tables from calculation steps that drew no figure, each as
     # (heading, size), latest version of each, in run order. Size is rows
     # times numbers per row, so a wide series outranks a list of conversions.
@@ -112,6 +129,7 @@ def _is_loop_message(content: str) -> bool:
         or content.startswith(EVIDENCE_NUDGE_PREFIX)
         or content.startswith(CRITIC_FEEDBACK_PREFIX)
         or content.startswith(REVIEW_FEEDBACK_PREFIX)
+        or content.startswith(GATE_FEEDBACK_PREFIX)
         or content.lstrip().startswith("<observation>")
     )
 
@@ -132,7 +150,8 @@ def run_evidence(messages: list[BaseMessage]) -> RunEvidence:
     """Count what the latest run in `messages` did."""
     ev = RunEvidence()
     pending_code: str | None = None
-    for m in current_run(messages):
+    solutions: list[int] = []
+    for idx, m in enumerate(current_run(messages)):
         content = m.content if isinstance(m.content, str) else ""
         if isinstance(m, HumanMessage):
             if content == PARSE_ERROR_NUDGE:
@@ -143,7 +162,7 @@ def run_evidence(messages: list[BaseMessage]) -> RunEvidence:
                 ev.evidence_asks += 1
                 ev.unplotted_asks += UNPLOTTED_MARK in content
                 ev.figure_ref_asks += FIGURE_REFS_MARK in content
-            elif content.startswith(CRITIC_FEEDBACK_PREFIX):
+            elif content.startswith(CRITIC_FEEDBACK_PREFIX) or content.startswith(GATE_FEEDBACK_PREFIX):
                 ev.critique_rounds += 1
             elif content.startswith(REVIEW_FEEDBACK_PREFIX):
                 ev.review_corrections += 1
@@ -157,7 +176,9 @@ def run_evidence(messages: list[BaseMessage]) -> RunEvidence:
             ev.failed_steps += failed
             ev.truncated_outputs += body.lstrip().startswith("The output is too long")
             ev.figures += body.count("Plot captured.")
-            ev.figure_titles += _FIGURE_LINE_RE.findall(body)
+            lines = _FIGURE_LINE_RE.findall(body)
+            ev.figure_titles += lines
+            ev.figure_records += [FigureRecord(idx, ln, pending_code or "") for ln in lines]
             if pending_code is not None and not failed:
                 used = {t for t in LITERATURE_TOOLS if f"{t}(" in pending_code}
                 ev.literature_tools |= used
@@ -174,6 +195,10 @@ def run_evidence(messages: list[BaseMessage]) -> RunEvidence:
         if match:
             ev.code_steps += 1
             pending_code = match.group(1)
+        elif "<solution>" in content.lower():
+            solutions.append(idx)
+    if len(solutions) >= 2:
+        ev.last_solution_index = solutions[-2]
     return ev
 
 
@@ -362,13 +387,18 @@ def evidence_nudge(missing: list[str], ev: RunEvidence | None = None, answer: st
     )
 
 
-def format_quality_summary(ev: RunEvidence, settings: str = "", unsaved_figure_steps: int = 0) -> str:
+def format_quality_summary(
+    ev: RunEvidence, settings: str = "", unsaved_figure_steps: int = 0, gate: dict | None = None
+) -> str:
     """One line on how the answer was made, plus lines on what was missing.
 
     `settings` (model, temperatures, reviewer) is shown as its own line, so
     runs can be compared for reproducibility. `unsaved_figure_steps` counts
     steps whose figure was drawn but never saved, so it is in neither the
     transcript nor its export (the app's own fault, not the model's).
+    `gate` (see `ui_core.gate_summary`) adds the completion gate's status,
+    the findings that still block (when it did not pass), rounds, the
+    findings accepted as is and the rubric source.
     """
 
     def n(count: int, word: str) -> str:
@@ -400,6 +430,16 @@ def format_quality_summary(ev: RunEvidence, settings: str = "", unsaved_figure_s
     lines = ["**How this answer was made:** " + " · ".join(parts)]
     if settings:
         lines.append(f"**Settings:** {settings}")
+    if gate:
+        lines.append(f"**Status:** {gate['status']}")
+        lines.append(f"**Rounds:** used {gate['rounds_used']} of planned {gate['rounds_planned']}")
+        if gate.get("failures"):
+            lines.append("**Did not pass:**\n" + gate["failures"])
+        accepted = f"**Accepted as is:** {n(gate['accepted'], 'finding')}"
+        if gate.get("accepted_findings"):
+            accepted += "\n" + gate["accepted_findings"]
+        lines.append(accepted)
+        lines.append(f"**Rubric:** {gate['rubric']}")
     if issues:
         lines.append("**Along the way:** " + "; ".join(issues))
     if unsaved_figure_steps:

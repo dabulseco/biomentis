@@ -19,8 +19,18 @@ import streamlit as st
 
 from biomentis.agent import A1
 from biomentis.agent.tutor import TutorEngine
+from biomentis.agent_setup import (
+    SAME_FAMILY_WARNING,
+    build_reviewer,
+    configure_agent,
+    repeat_settings,
+    settings_from_state,
+)
 from biomentis.config import default_config
+from biomentis.independent_review import same_model_family
+from biomentis.run_worker import background_runs_enabled
 from biomentis.ui_core import list_available_providers
+from biomentis.ui_repeat import render_repeat_runs
 from biomentis.ui_repl import render_repl_panel
 from biomentis.ui_settings import render_anthropic_key_field, render_ncbi_email_field, render_ollama_key_field
 from biomentis.ui_tutor import (
@@ -111,13 +121,20 @@ with st.sidebar:
 
     # How hard the agent works before an answer is accepted. Read below when
     # the agent is configured, so a change applies from the next run.
+    # With it off, the run keeps the older evidence nudge (see below).
     st.toggle(
-        "Require evidence before answering",
-        value=True,
-        key="biomentis_evidence_gate",
-        help="Sends the first answer back (at most twice) until the run has consulted a "
-        "literature source, computed its numbers in code and made a figure.",
+        "Completion checks",
+        value=default_config.completion_gate,
+        key="biomentis_completion_gate",
+        help="Checks every answer (arithmetic, figures, sources, labels, consistency and, "
+        "if a reviewer is set, rubric coverage). Up to 3 revision rounds run automatically; "
+        "from round 4 the run pauses for you to continue or stop.",
     )
+    if not background_runs_enabled():
+        st.warning(
+            "Background runs are off (BIOMENTIS_BACKGROUND_RUNS=0): a run that needs your "
+            "decision at round 4 will stop instead of pausing."
+        )
     # Temperatures, for reproducibility. 0 is the most repeatable (the model
     # always takes its most likely next token); higher values vary more from
     # run to run. Read below when the agent is configured.
@@ -148,6 +165,16 @@ with st.sidebar:
         help="Reviews of the answer by the agent's model before it is final. Each round can "
         "send the agent back to recompute numbers or find sources. 0 turns review off.",
     )
+    # Read before each run, when the agent is configured below.
+    st.file_uploader(
+        "Rubric (optional)",
+        type=["md", "txt", "yaml", "yml"],
+        key="biomentis_rubric_upload",
+        help="What the answer must deliver, respect and teach. A rubric in the standard format "
+        "(## Deliverables / ## Constraints / ## Core lessons, items like - [D1] ...) is used as is; "
+        "any other text is converted. With none, the agent drafts one from the prompt. The rubric is "
+        "fixed for the run and is used only with the completion checks on.",
+    )
 
     # NCBI contact email. Rendered here (early, before the agent is built)
     # so `Bio.Entrez.email` is in place before any Entrez-touching code runs
@@ -173,19 +200,25 @@ with st.sidebar:
 
 
 # --- Agent (rebuilt when the model changes) -----------------------------
+def _new_agent(source: str, model: str) -> A1:
+    """A fresh agent on the selected model (the interactive one, and each repeat run's)."""
+    agent = A1(
+        path="./data",
+        use_tool_retriever=False,
+        expected_data_lake_files=[],
+    )
+    # Override the LLM with the user-selected one. set_model (not a bare
+    # `agent.llm = ...`) keeps the agent's temperature and stop sequences.
+    agent.set_model(model, source=source)
+    return agent
+
+
 def _get_or_build_agent(source: str, model: str) -> A1:
     cache_key = f"{source}::{model}"
     if st.session_state.get("biomni_agent_key") != cache_key:
         # First build, or model changed — (re)instantiate.
-        agent = A1(
-            path="./data",
-            use_tool_retriever=False,
-            expected_data_lake_files=[],
-        )
-        # Override the LLM with the user-selected one. set_model (not a bare
-        # `agent.llm = ...`) keeps the agent's temperature and stop sequences.
         try:
-            agent.set_model(model, source=source)
+            agent = _new_agent(source, model)
         except Exception as e:
             st.error(f"Failed to load model `{source}: {model}`: {e}")
             st.stop()
@@ -233,33 +266,79 @@ tutor.load_priorities(user_id)
 # sidebar's "Self-critique rounds"; the critic also checks that each number
 # was computed in code. evidence_gate sends an answer back until the run has
 # a source, a calculation and a figure (see biomentis/run_quality.py).
-#
+
+
+def _reviewer(tutor: TutorEngine) -> tuple:
+    """(review_llm, review_model_name) from the sidebar: the Critic, else the default reviewer, else none.
+
+    The independent reviewer is the Critic model picked under Tutor →
+    Self-improvement; with the Critic off ("stub"), the BIOMNI_REVIEW_MODEL
+    default if one is set, else there is no review.
+    """
+    critic = tutor.critic
+    if critic is not None and critic.model_name != "stub" and critic.llm is not None:
+        return critic.llm, critic.model_name
+    if default_config.review_model:
+        # Built once per model name and kept in the session; a model that
+        # can't be built means no reviewer (warned about below).
+        _default_name = default_config.review_model
+        if st.session_state.get("biomentis_default_reviewer_name") != _default_name:
+            (
+                st.session_state.biomentis_default_reviewer,
+                st.session_state.biomentis_default_reviewer_error,
+            ) = build_reviewer(_default_name)
+            st.session_state.biomentis_default_reviewer_name = _default_name
+        if st.session_state.biomentis_default_reviewer is not None:
+            return st.session_state.biomentis_default_reviewer, _default_name
+    return None, ""
+
+
+def _agent_settings(tutor: TutorEngine) -> dict:
+    """The sidebar's agent settings, read now (on the script thread)."""
+    review_llm, review_model_name = _reviewer(tutor)
+    return settings_from_state(st.session_state, review_llm, review_model_name, list(tutor.active_priorities))
+
+
+_configure_agent = configure_agent
+
+
 # Skipped while a run is in flight. `configure()` rebuilds the system prompt
 # and recompiles the LangGraph app, and since runs moved onto a background
 # thread (see biomentis/run_worker.py) a rerun can now land in the middle of
 # one — which would mutate the agent out from under the worker driving it.
 # Between turns there is nothing to disturb, which is when it matters anyway.
+_settings = _agent_settings(tutor)
 if not st.session_state.get("biomni_run_active"):
     # Temperatures from the sidebar; the tutor follows the rebuilt client.
-    if agent.set_temperatures(
-        st.session_state.get("biomentis_temperature", default_config.temperature),
-        st.session_state.get("biomentis_creative_temperature", default_config.creative_temperature),
-    ):
+    if _configure_agent(agent, _settings):
         tutor.set_llm(agent.llm)
-    # The independent reviewer is the Critic model picked under Tutor →
-    # Self-improvement; with the Critic off ("stub") there is no review.
-    _critic = tutor.critic
-    _reviewing = _critic is not None and _critic.model_name != "stub" and _critic.llm is not None
-    agent.review_llm = _critic.llm if _reviewing else None
-    agent.review_model_name = _critic.model_name if _reviewing else ""
-    # A deselected segmented control reads None; treat it as the default.
-    _critique_rounds = st.session_state.get("biomentis_critique_rounds")
-    _critique_rounds = 2 if _critique_rounds is None else _critique_rounds
-    agent.configure(
-        self_critic=_critique_rounds > 0,
-        test_time_scale_round=_critique_rounds,
-        critic_priorities=list(tutor.active_priorities),
-        evidence_gate=st.session_state.get("biomentis_evidence_gate", True),
+
+# Reviewer warnings, also while a run is in flight (the reviewer is fixed then).
+if st.session_state.get("biomentis_default_reviewer_error") and getattr(agent, "review_llm", None) is None:
+    st.sidebar.warning(
+        f"Default reviewer `{st.session_state.get('biomentis_default_reviewer_name', '')}` could not be loaded "
+        f"({st.session_state.biomentis_default_reviewer_error}); answers are not independently reviewed."
+    )
+if getattr(agent, "review_llm", None) is not None and same_model_family(
+    selected_model, getattr(agent, "review_model_name", "")
+):
+    st.sidebar.warning(SAME_FAMILY_WARNING)
+
+
+# Repeat-run tool (R&D): the same prompt K times with one rubric, compared.
+# Each run gets a fresh agent configured like the interactive one, from the
+# settings read now; BIOMNI_REPEAT_RUNS=false removes the tool.
+def _make_repeat_agent(source: str = selected_source, model: str = selected_model, s: dict = _settings) -> A1:
+    repeat_agent = _new_agent(source, model)
+    _configure_agent(repeat_agent, repeat_settings(s))  # repeat runs always use the completion gate
+    return repeat_agent  # RepeatBatch allows each run to pause
+
+
+with st.sidebar:
+    render_repeat_runs(
+        _make_repeat_agent,
+        _settings["rubric_upload"],
+        f"rounds={_settings['rounds']}, completion gate on",
     )
 
 # Sidebar order: Model picker (above) → REPL (existing) → Tutor (new).

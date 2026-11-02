@@ -155,7 +155,7 @@ def _agent(llm, evidence_gate: bool):
 
     agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
     agent.llm = llm
-    agent.configure(evidence_gate=evidence_gate)
+    agent.configure(evidence_gate=evidence_gate, completion_gate=False)
     return agent
 
 

@@ -734,6 +734,23 @@ class StepTrace:
         self._write(record)
         return record
 
+    def record_gate(
+        self, *, round: int, passed: bool, reviewer_state: str, blocking: list[str], warnings: int
+    ) -> dict[str, Any]:
+        """Record one completion gate: its round, verdict and the checks that blocked it."""
+        if not self.enabled or self._path is None:
+            return {}
+        record = {
+            "type": "gate",
+            "round": round,
+            "passed": passed,
+            "reviewer_state": reviewer_state,
+            "blocking": list(blocking),
+            "warnings": warnings,
+        }
+        self._write(record)
+        return record
+
     # -- internals ---------------------------------------------------------
 
     def _bump(self, key: str) -> None:
@@ -785,6 +802,7 @@ def build_report(records: list[dict[str, Any]]) -> dict[str, Any]:
     ends = [r for r in records if r["type"] == "run_end"]
     execs = [r for r in records if r["type"] == "execute"]
     gens = [r for r in records if r["type"] == "generate"]
+    gates = [r for r in records if r["type"] == "gate"]
 
     status_counts: dict[str, int] = {}
     class_stats: dict[str, dict[str, Any]] = {}
@@ -862,6 +880,12 @@ def build_report(records: list[dict[str, Any]]) -> dict[str, Any]:
         "llm_retries": len(retried_llm),
         "mean_retrieval_precision": (round(sum(precisions) / len(precisions), 3) if precisions else None),
         "unused_retrieved_tools": _tally(tool for e in ends for tool in (e.get("tools_retrieved_unused") or [])),
+        "gates": len(gates),
+        "gates_failed": sum(1 for g in gates if not g.get("passed")),
+        # Each failed gate counts once per check that blocked it.
+        "gate_failures": _tally(
+            check for g in gates if not g.get("passed") for check in sorted(set(g.get("blocking") or []))
+        ),
     }
 
 
@@ -923,6 +947,13 @@ def format_report(report: dict[str, Any]) -> str:
             add("  most often retrieved but never used:")
             for tool, count in unused:
                 add(f"    {tool} ({count} runs)")
+        add("")
+
+    if report.get("gates"):
+        add("-- completion gate " + "-" * 58)
+        add(f"  gates run: {report['gates']}  (failed: {report['gates_failed']})")
+        for check, count in report["gate_failures"].items():
+            add(f"  failed on {check:<20} {count}")
         add("")
 
     failing_tools = [(t, s) for t, s in report["tool_stats"].items() if s["failures"]]

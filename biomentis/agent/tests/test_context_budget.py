@@ -365,11 +365,12 @@ def test_both_llm_call_sites_are_guarded() -> None:
 
     invocations = src.count("_invoke_llm_with_retry(")
     # One definition; calls in `generate`, in its continuation of a cut-off
-    # answer, in `execute_self_critic`, and two in `independent_review` (the
+    # answer, in `execute_self_critic`, in the gate's `critique` node (fitted
+    # through `_fit_request` like the old critic), and two in `independent_review` (the
     # assumptions request and the review, which send bounded digests to a
     # different model, so they are not fitted to the agent's window: see
     # biomentis.independent_review).
-    _check("still five call sites", invocations == 6, f"{invocations} occurrences")
+    _check("still five call sites", invocations == 7, f"{invocations} occurrences")
     _check("a continued answer fits its request too", "continue_messages, _ = self._fit_request(" in src)
     _check("generate fits its request", "messages, context_fit = self._fit_request(messages)" in src)
     _check("the self-critic fits its request too", "critic_messages, _ = self._fit_request(" in src)
@@ -411,7 +412,7 @@ def test_end_to_end_a_run_that_would_have_died() -> None:
     try:
         agent = A1(path="./data", use_tool_retriever=False, expected_data_lake_files=[], trace=False)
         agent.llm = _Stubborn()
-        agent.configure()
+        agent.configure(completion_gate=False)
         log, final = agent.go("a very long research task")
     finally:
         if previous is None:

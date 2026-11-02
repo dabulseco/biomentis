@@ -25,6 +25,7 @@ import streamlit as st
 from biomentis.tool.support_tools import run_python_repl
 
 _HISTORY_LIMIT = 20
+BATCH_BUSY_CAPTION = "Disabled while a repeat-run batch is running: its runs use this namespace."
 
 
 def _ensure_repl_state() -> None:
@@ -73,6 +74,14 @@ def render_repl_panel(agent) -> None:
                agent just referenced").
     """
     _ensure_repl_state()
+    # A repeat-run batch's runs use this namespace (each gets its own copy in
+    # turn), so the REPL must not touch it while one is active.
+    try:
+        from biomentis.ui_repeat import active_batch_session
+
+        batch_busy = active_batch_session() is not None
+    except Exception:
+        batch_busy = False
 
     with st.sidebar:
         st.markdown("---")
@@ -81,12 +90,15 @@ def render_repl_panel(agent) -> None:
             "Runs the same Python the agent uses. Variables you define here "
             "are visible to the agent on its next turn, and vice versa."
         )
+        if batch_busy:
+            st.caption(BATCH_BUSY_CAPTION)
 
         # --- Auto-run toggle ----------------------------------------------
         st.session_state.biomni_repl_auto_run = st.toggle(
             "Auto-run when agent finishes",
             value=st.session_state.biomni_repl_auto_run,
             help="When on, the most recent agent code block runs in this REPL as soon as the turn completes.",
+            disabled=batch_busy,
         )
 
         # --- Last-agent-code shortcut -------------------------------------
@@ -97,6 +109,7 @@ def render_repl_panel(agent) -> None:
                 f"▶ Run last agent code ({len(last_code.splitlines())} lines)",
                 use_container_width=True,
                 key="biomni_repl_run_last",
+                disabled=batch_busy,
             ):
                 st.session_state.biomni_repl_input = last_code
                 output = _execute_code(last_code)
@@ -115,12 +128,13 @@ def render_repl_panel(agent) -> None:
             key="biomni_repl_input_widget",
             label_visibility="collapsed",
             placeholder="# Type or paste Python here. Use the button above to load the agent's last code.",
+            disabled=batch_busy,
         )
 
         # --- Action row ----------------------------------------------------
         col_run, col_copy, col_clear = st.columns([1, 1, 1])
         with col_run:
-            run_clicked = st.button("▶ Run", use_container_width=True, key="biomni_repl_run")
+            run_clicked = st.button("▶ Run", use_container_width=True, key="biomni_repl_run", disabled=batch_busy)
         with col_copy:
             if st.session_state.biomni_repl_input:
                 # st.code is what gives the built-in copy-to-clipboard button;
@@ -129,7 +143,7 @@ def render_repl_panel(agent) -> None:
                 with st.popover("📋 Copy"):
                     st.code(st.session_state.biomni_repl_input, language="python")
         with col_clear:
-            if st.button("🧹 Clear", use_container_width=True, key="biomni_repl_clear"):
+            if st.button("🧹 Clear", use_container_width=True, key="biomni_repl_clear", disabled=batch_busy):
                 # Wipe the persistent namespace by re-importing the module so
                 # the dict gets re-initialized.
                 import importlib
@@ -169,7 +183,7 @@ def render_repl_panel(agent) -> None:
 
     # --- Auto-run hook (runs even when not rendering the panel,
     # so toggling the switch takes effect on the next agent turn) ----------
-    if st.session_state.biomni_repl_auto_run and last is not None:
+    if st.session_state.biomni_repl_auto_run and last is not None and not batch_busy:
         last_code, last_lang, last_id = last
         if st.session_state.biomni_repl_last_seen_code_id != last_id:
             output = _execute_code(last_code)

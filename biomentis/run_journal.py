@@ -314,7 +314,7 @@ def entries_for_run(run: dict[str, Any]) -> list[dict[str, Any]]:
     Uses the same mapping the live UI uses, so a restored run renders
     identically to the run that produced it.
     """
-    from biomentis.ui_core import transcript_entry_for_event
+    from biomentis.ui_core import add_transcript_entry, transcript_entry_for_event
 
     entries: list[dict[str, Any]] = []
     code_entries: list[dict[str, Any]] = []
@@ -323,7 +323,7 @@ def entries_for_run(run: dict[str, Any]) -> list[dict[str, Any]]:
     for record in run.get("events", []):
         entry = transcript_entry_for_event(event_from_record(record), code_entries)
         if entry is not None:
-            entries.append(entry)
+            add_transcript_entry(entries, entry)  # a final status goes above the answer
     return entries
 
 

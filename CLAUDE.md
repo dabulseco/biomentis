@@ -47,6 +47,7 @@ $P -m biomentis.agent.tests.test_structure_artifacts  # structure artifact regis
 $P -m biomentis.agent.tests.test_structure_info  # structure metadata (no coordinates as text) + viewer models
 $P -m biomentis.agent.tests.test_runaway_generation # parse-error retry cap, Ollama turn cutoff, turns in thinking or tool-call syntax, cut-off answers continued, "not yet" answers sent back
 $P -m biomentis.agent.tests.test_kb_context         # knowledge base → agent + Clear KB confirm
+$P -m biomentis.agent.tests.test_scaffold         # question support: policy, tiers, release rules, leak check
 $P -m biomentis.agent.tests.test_tutor_card_cache   # failed cards/empty chat answers retried + loop messages not shown as steps
 $P -m biomentis.agent.tests.test_card_text_length   # card text cut at a sentence, never "truncated for prompt size"; "Also worth knowing" names concepts, no calculations
 $P -m biomentis.agent.tests.test_kb_structures      # PDB/SDF/SMILES in the KB: metadata only + View

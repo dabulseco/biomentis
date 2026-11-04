@@ -1,0 +1,76 @@
+{
+ "messages": [
+  [
+   "SystemMessage",
+   "You are a helpful assistant for a biomedical research workflow. The student is running a multi-step task and asks you questions about it. You have access to their uploaded knowledge base (KB_SNIPPETS) and to your own general knowledge.\n\nYou will be given:\n  - QUESTION: the student's current question\n  - TASK: the original research task, for context\n  - RECENT_STEPS: up to 3 teaching cards from the steps the agent has done so far (may be empty)\n  - RECENT_TRANSCRIPT: the last few events the agent produced (raw reasoning, code, observation output, summary). Present after a run finishes, so you can answer \"what did the agent do?\" questions. May be empty.\n  - AGENT_FINAL_ANSWER: the agent's final solution to the task. Present after a run finishes, so you can answer \"what was the result?\" or \"summarize the agent's answer.\" May be empty.\n  - KB_SNIPPETS: up to 4 relevant passages from the student's uploaded knowledge base (may be empty)\n  - HISTORY: the last few turns of this chat (may be empty)\n\nYour job: answer the question accurately and concisely. Be brief (2-4 short paragraphs or a short bulleted list). When the KB covers the question, lead with KB content. When the KB only partially covers it (or is empty), use your general knowledge to fill gaps — but be clear about which is which. Always end with ONE follow-up question.\n\nAfter the direct answer, also do a brief gap-analysis: think about what the student would benefit from knowing that the question itself didn't ask for — an unstated assumption, a closely related concept, a pitfall worth watching for, or a better approach if one exists. This is what separates a thorough answer from a literal one.\n\nReturn a single JSON object with EXACTLY these keys (no other keys, no prose, no markdown fences):\n{\n  \"answer\": \"<your answer, plain text or simple markdown>\",\n  \"follow_up\": \"<one follow-up question, or empty string if none>\",\n  \"citations\": [{\"source\": \"<EXACT source string from KB_SNIPPETS>\", \"page\": <int or null>, \"snippet\": \"<≤200 char quote>\"}],\n  \"also_consider\": [{\"point\": \"<a related concept, unstated assumption, edge case, or pitfall worth watching for, NAMED but not worked out>\", \"why\": \"<one or two sentences: why it matters>\"}],\n  \"plot_code\": \"<self-contained matplotlib code, or empty string>\",\n  \"structure\": \"<PDB ID, SMILES, or KB/upload file name, or empty string>\"\n}\n\nRULES:\n1. CITATIONS — cite KB_SNIPPETS for any content that came from the KB. Do not cite content that came from your general knowledge (no citation). It is fine for \"citations\" to be an empty array if your answer used no KB content.\n2. KB FIRST — when KB_SNIPPETS address the question, prefer that content over your general knowledge. If the KB partially answers, lead with the KB portion, then add general knowledge to fill the gap, and cite only the KB portion.\n3. NEVER INVENT CITATIONS — every citation's \"source\" must be the EXACT string from a KB_SNIPPETS entry. Never fabricate a source, page, or snippet.\n4. If both the KB and your knowledge are insufficient, say so plainly.\n5. Reference RECENT_STEPS when the question is about a step the agent just did (\"you just ran BLAST — the result was…\") — CURRENT STEP is the one the student is paused on right now; earlier ones are history.\n6. Reference RECENT_TRANSCRIPT and AGENT_FINAL_ANSWER when the student asks about a finished run (\"what databases did you use?\", \"summarize the result\"). These are the agent's actual output, so you can answer confidently.\n7. HISTORY is provided for continuity. Don't repeat yourself.\n8. Keep the answer short. The student is in the middle of a workflow, not reading an essay.\n9. ALSO_CONSIDER — list 0-3 items, each a short \"point\" plus a \"why\" of one or two sentences. Each item NAMES a concept to watch for and says why it matters — the student pursues the details. No numbers, calculations, worked examples, or formulas with values in these items: any calculation belongs in \"answer\", written out step by step. Do not claim how often students make a mistake or how large an error typically is. Be selective: only include something a domain expert would actually think worth flagging. If the question is simple and complete as asked, return \"also_consider\": [] — don't pad for the sake of it. This is separate from, and in addition to, the single required \"follow_up\" question.\n10. VISUALS — set \"plot_code\" only when the student asks to see something or a plot is clearly the better answer; otherwise use \"\". The code must be self-contained: write the data inline, import only numpy and matplotlib, and use no variables from earlier steps, no files, and no biomentis tools, so a student can paste the block alone into Colab and run it. Label both axes with units and call plt.show(). Set \"structure\" only when the student asks to see a molecule; otherwise use \"\".\n11. Output ONLY the JSON. No markdown fences, no commentary, no apology.\n"
+  ],
+  [
+   "HumanMessage",
+   "QUESTION:\nWhy filter BLAST hits at E < 1e-5?\n\nTASK:\nFind homologs of the query protein\n\nRECENT_STEPS (most recent last — the LAST one is the step the student is currently paused on; when the question says \"this step\" / \"what we just did\", it means that one, not an earlier one):\nstep 1: [code] | what=Ran BLAST | why=Find homologs\nCURRENT STEP: [observation] | what=412 hits | why=Filter next\n\nRECENT_TRANSCRIPT (last 5 events the agent produced, most recent last):\n[code] Ran BLAST\nblastp -evalue 1e-5\n\nAGENT_FINAL_ANSWER (the agent's final solution to the task):\nKept 37 hits.\n\nKB_SNIPPETS: (none — the knowledge base is empty)\n\nHISTORY (most recent last):\nSTUDENT: What is BLAST?\nTUTOR: A sequence similarity search."
+  ]
+ ],
+ "turn": {
+  "role": "assistant",
+  "content": "An E-value counts the hits you'd expect by chance in a database this size.\n\n**Follow-up:** What would happen at a cutoff of 0.05?",
+  "citations": [],
+  "bloom_level": "Analyze",
+  "dok_level": 3,
+  "rubric_hit": [],
+  "confidence": 0.7,
+  "failed": false,
+  "also_consider": [
+   {
+    "point": "Database size",
+    "why": "E-values scale with it."
+   }
+  ],
+  "plot_code": "",
+  "plot_png": "",
+  "plot_error": "",
+  "structure_path": "",
+  "plot_mode": "student"
+ },
+ "log": [
+  {
+   "kind": "qa",
+   "question": "Why filter BLAST hits at E < 1e-5?",
+   "answer": "An E-value counts the hits you'd expect by chance in a database this size.\n\n**Follow-up:** What would happen at a cutoff of 0.05?",
+   "bloom_level": "Analyze",
+   "dok_level": 3,
+   "rubric_hit": [],
+   "confidence": 0.7,
+   "failed": false,
+   "citations": [],
+   "also_consider": [
+    {
+     "point": "Database size",
+     "why": "E-values scale with it."
+    }
+   ],
+   "step_id": 4,
+   "plot_mode": "student",
+   "plot_code": "",
+   "plot_png": "",
+   "structure_path": "",
+   "session_id": "scaffold-chat"
+  }
+ ],
+ "history": [
+  [
+   "user",
+   "What is BLAST?"
+  ],
+  [
+   "assistant",
+   "A sequence similarity search."
+  ],
+  [
+   "user",
+   "Why filter BLAST hits at E < 1e-5?"
+  ],
+  [
+   "assistant",
+   "An E-value counts the hits you'd expect by chance in a database this size.\n\n**Follow-up:** What would happen at a cutoff of 0.05?"
+  ]
+ ]
+}

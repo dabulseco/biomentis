@@ -15,6 +15,7 @@ What these tests pin down:
   8.  The released answer text (today's text at "off")
   9.  The leak check, which skips key points too short to check
  10.  A fallback text for every move
+ 11.  The rung call: retries, leak regeneration, fallback, fail open
 
 Run with:
     python -m biomentis.agent.tests.test_scaffold
@@ -351,6 +352,86 @@ def test_fallbacks() -> None:
            "the agent's last step" in fallback_rung("orient", step_id=None))
 
 
+# --- 11: the rung call ----------------------------------------------------
+
+
+class _SeqLLM:
+    """Returns the queued replies in order and records each call's messages."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.calls: list[list] = []
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.calls.append(list(messages))
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return AIMessage(content=reply if isinstance(reply, str) else __import__("json").dumps(reply))
+
+
+def _rung(llm, thread=None, move="predict", reply=""):
+    from biomentis.agent.tutor.scaffold import next_rung
+
+    thread = thread or _thread(key_points=["expected number of chance hits"])
+    return next_rung(llm, thread, move, task="Find homologs", cards=[{"what": "Ran BLAST"}], latest_reply=reply)
+
+
+def test_rung_call() -> None:
+    print("\n[11] the rung call")
+    from biomentis.agent.tutor.scaffold import FALLBACK_RUNGS, RungFailed
+
+    good = {"verdict": "none", "message": "What would you expect with 250 million sequences?"}
+    llm = _SeqLLM(good)
+    verdict, message, leak_retry = _rung(llm)
+    _check("a good reply comes back", (verdict, message, leak_retry) == ("none", good["message"], False),
+           repr((verdict, message, leak_retry)))
+    system = llm.calls[0][0].content
+    user = llm.calls[0][-1].content
+    _check("the prompt says never to state the answer", "never state" in system.lower())
+    _check("the prompt defines the move", "MOVE: predict" in user and "predict an outcome" in user.lower(), user[:400])
+    _check("the prompt carries the held-back answer", "E-values count expected chance hits." in user)
+    _check("the prompt says which step this is", "1 of 2" in user, user[:400])
+
+    llm = _SeqLLM("not json", good)
+    _check("an unparseable reply is retried", _rung(llm)[1] == good["message"] and len(llm.calls) == 2)
+    llm = _SeqLLM({"verdict": "none", "message": "  "}, good)
+    _check("an empty message is retried", _rung(llm)[1] == good["message"])
+
+    try:
+        _rung(_SeqLLM("nope", RuntimeError("down")))
+        _check("two failures raise RungFailed", False, "no exception")
+    except RungFailed:
+        _check("two failures raise RungFailed", True)
+
+    leak = {"verdict": "none", "message": "It's the expected number of chance hits, see?"}
+    llm = _SeqLLM(leak, good)
+    verdict, message, leak_retry = _rung(llm)
+    _check("a leak is regenerated once", message == good["message"] and leak_retry, repr((message, leak_retry)))
+    _check("the regeneration names what leaked",
+           "expected number of chance hits" in llm.calls[1][-1].content, llm.calls[1][-1].content)
+
+    llm = _SeqLLM(leak, leak)
+    _, message, leak_retry = _rung(llm)
+    _check("a second leak falls back to the fixed text",
+           message == FALLBACK_RUNGS["predict"] and leak_retry, repr(message))
+    llm = _SeqLLM(leak, "garbage")
+    _check("a failed regeneration also falls back", _rung(llm)[1] == FALLBACK_RUNGS["predict"])
+
+    t = _thread(key_points=[])
+    _add_rung(t, "predict")
+    llm = _SeqLLM({"verdict": "partial", "message": "Right, and now why that many?"})
+    verdict, _, _ = _rung(llm, thread=t, move="hint", reply="lots of false hits")
+    _check("a verdict on a reply comes back", verdict == "partial", verdict)
+    _check("the reply is in the prompt", "lots of false hits" in llm.calls[0][-1].content)
+    llm = _SeqLLM({"verdict": "brilliant", "message": "Go on."})
+    _check("an unknown verdict is none", _rung(llm, thread=t, move="hint", reply="x")[0] == "none")
+    llm = _SeqLLM({"verdict": "correct", "message": "Hm?"})
+    _check("rung 1 has no reply to judge, so its verdict is none", _rung(llm)[0] == "none")
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Question support (scaffold) tests")
@@ -367,6 +448,7 @@ def run_all() -> int:
         test_compose_released,
         test_leak_check,
         test_fallbacks,
+        test_rung_call,
     ):
         try:
             test()

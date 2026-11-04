@@ -176,10 +176,10 @@ def decide(level: str, profile: QuestionProfile | None, question_tier: str) -> S
     always answered, definitions are answered except under "challenge", and
     so is an outright "just tell me" below "challenge".
     """
-    if profile is None:
-        return _direct("profile_failed")
     if level not in _TABLE_LEVELS:
         return _direct("level_off")
+    if profile is None:
+        return _direct("profile_failed")
     if profile.type in ("logistics", "agent_action"):
         return _direct(f"type_{profile.type}")
     if profile.type == "definition" and level != "challenge":
@@ -274,6 +274,8 @@ class ScaffoldThread:
     hints_requested: int = 0
     started_at: float = field(default_factory=time.time)
     released: str | None = None
+    # The research task, for the rung calls after a rerun.
+    task: str = ""
 
     def next_move(self) -> str | None:
         """The plan's next unused move, or None once the steps are spent."""
@@ -392,3 +394,143 @@ def fallback_rung(move: str, step_id: int | None) -> str:
     """The fixed step for `move`, pointing at the step the question is about."""
     where = f"step {step_id}" if step_id is not None else "the agent's last step"
     return FALLBACK_RUNGS.get(move, FALLBACK_RUNGS["orient"]).format(where=where)
+
+
+# --- The rung call ----------------------------------------------------------
+
+# Spec §7.4. Shown to the model with the move it is asked to make.
+MOVE_DEFINITIONS = {
+    "orient": "Point to where the answer lives (the step, value or knowledge-base source) and ask what it suggests.",
+    "predict": "Ask the student to predict an outcome before you reveal anything.",
+    "hint": "Name the concept that matters, without applying it.",
+    "partial": "Work through the first half and ask the student to finish.",
+    "probe": "Question an assumption in the student's question or reasoning.",
+    "contrast": "Offer two cases and ask what differs between them.",
+    "find_flaw": "Show a subtly wrong version of the reasoning and ask what is wrong with it.",
+    "extend": "Ask how the answer would change under a different condition.",
+}
+VERDICTS = ("correct", "partial", "off_track", "gave_up", "new_question", "none")
+
+_RUNG_PROMPT = """You are a patient tutor in a biomedical research workflow. A student asked a question. You already know the full answer (HELD_BACK_ANSWER), but instead of giving it, you are guiding the student toward it one short step at a time so they think it through themselves.
+
+You will be given:
+  - QUESTION: the student's question
+  - TASK: the research task the agent is working on
+  - RECENT_STEPS: what the agent has done recently (may be empty)
+  - HELD_BACK_ANSWER and KEY_POINTS: the answer and the conclusions the student should reach. Never state these, or anything that gives them away.
+  - MOVE: the kind of step to take now, with its definition
+  - RUNG: which step this is, out of how many at most
+  - THREAD: the earlier steps and the student's replies (may be empty)
+  - LATEST_REPLY: the student's reply to your last step (empty on the first step)
+
+Return a single JSON object with EXACTLY these keys (no prose, no markdown fences):
+{"verdict": "<correct | partial | off_track | gave_up | new_question | none>", "message": "<your next step>"}
+
+RULES:
+1. VERDICT judges LATEST_REPLY against the KEY_POINTS: "correct" if it reaches them in substance (wording doesn't matter), "partial" if it is on the way, "off_track" if it is not, "gave_up" if the student is asking to be told or is plainly frustrated, "new_question" if it is a different question rather than an answer. Use "none" when LATEST_REPLY is empty.
+2. MESSAGE makes the MOVE. Give the student exactly ONE thing to do: predict, look at a specific step or value, finish a sentence, or compare two cases.
+3. If the reply is partly right, say what is right first, then build on it. Never answer with a bare "no" or "wrong".
+4. Never state the HELD_BACK_ANSWER or any KEY_POINT, and don't hint so heavily that the student only has to copy it.
+5. Keep it to 2-4 sentences. Be warm and direct, not effusive.
+6. Output ONLY the JSON.
+"""
+
+
+class RungFailed(Exception):
+    """The rung call failed twice; the caller releases the answer (fail open)."""
+
+
+def _format_cards(cards: list[dict]) -> str:
+    lines = []
+    for i, c in enumerate(cards or [], 1):
+        bits = [f"{k}={c[k]}" for k in ("event_type", "what", "why", "impact") if c.get(k)]
+        if bits:
+            lines.append(f"step {i}: " + " | ".join(bits))
+    return "\n".join(lines) or "(none)"
+
+
+def _rung_user_prompt(thread: ScaffoldThread, move: str, task: str, cards: list[dict], latest_reply: str) -> str:
+    ans = thread.answer
+    history = []
+    for r in thread.rungs:
+        history.append(f"TUTOR ({r.get('move')}): {r.get('message', '')}")
+        if r.get("reply"):
+            history.append(f"STUDENT: {r['reply']}")
+    return "\n\n".join(
+        [
+            f"QUESTION:\n{thread.question}",
+            f"TASK:\n{task or '(none)'}",
+            f"RECENT_STEPS:\n{_format_cards(cards)}",
+            f"HELD_BACK_ANSWER (never state it):\n{ans.get('answer_body', '')}",
+            "KEY_POINTS (never state them):\n" + ("\n".join(f"- {p}" for p in ans.get("key_points") or []) or "(none)"),
+            f"MOVE: {move}\n{MOVE_DEFINITIONS.get(move, '')}",
+            f"RUNG: {len(thread.rungs) + 1} of {min(len(thread.plan.moves), MAX_RUNGS)}",
+            "THREAD:\n" + ("\n".join(history) or "(none)"),
+            f"LATEST_REPLY:\n{latest_reply or '(empty)'}",
+        ]
+    )
+
+
+def _parse_rung(text: str) -> tuple[str, str] | None:
+    from biomentis.agent.tutor.instruction import _extract_json
+
+    data = _extract_json(text or "")
+    if not isinstance(data, dict):
+        return None
+    message = str(data.get("message", "") or "").strip()
+    if not message:
+        return None
+    verdict = str(data.get("verdict", "") or "").strip().lower()
+    return (verdict if verdict in VERDICTS else "none"), message
+
+
+def next_rung(
+    llm, thread: ScaffoldThread, move: str, *, task: str = "", cards: list[dict] | None = None,
+    latest_reply: str = "",
+) -> tuple[str, str, bool]:
+    """The next guided step: (verdict on the latest reply, message, leak_retry).
+
+    An invalid reply (a failed call, no JSON, no message) is retried once;
+    two in a row raise `RungFailed`. A message that states a key point is
+    regenerated once with what it gave away; if that leaks too, or fails,
+    the move's fixed fallback text is used instead.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    messages = [
+        SystemMessage(content=_RUNG_PROMPT),
+        HumanMessage(content=_rung_user_prompt(thread, move, task, cards or [], latest_reply)),
+    ]
+
+    def call(msgs) -> tuple[str, tuple[str, str] | None]:
+        try:
+            text = getattr(llm.invoke(msgs), "content", "") or ""
+        except Exception as e:
+            print(f"tutor: rung call failed: {e!r}")
+            return "", None
+        return text, _parse_rung(text)
+
+    text, parsed = call(messages)
+    if parsed is None:
+        text, parsed = call(messages)
+    if parsed is None:
+        raise RungFailed(f"no usable rung for move {move!r}")
+    verdict, message = parsed
+    if not latest_reply:
+        verdict = "none"
+
+    key_points = thread.answer.get("key_points") or []
+    point = leaked_point(message, key_points)
+    if point is None:
+        return verdict, message, False
+    retry = messages + [
+        AIMessage(content=text),
+        HumanMessage(
+            content=f'Your last draft gave away a key point: "{point}". Rewrite the message so the '
+            "student has to reach it themselves. Return the same JSON."
+        ),
+    ]
+    _, again = call(retry)
+    if again is not None and leaked_point(again[1], key_points) is None:
+        return verdict, again[1], True
+    return verdict, fallback_rung(move, thread.step_id), True

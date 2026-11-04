@@ -8,15 +8,52 @@ agent runs exactly as it did before this layer existed.
 from __future__ import annotations
 
 import os
+import time
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from biomentis.agent.tutor import memory as critic_memory
-from biomentis.agent.tutor.chat import TutorChat
+from biomentis.agent.tutor import scaffold
+from biomentis.agent.tutor.chat import ChatTurn, TutorChat
 from biomentis.agent.tutor.critic import Critic, CritiqueCard
 from biomentis.agent.tutor.instruction import ALL_MODES, InstructionGenerator, normalize_modes
 from biomentis.agent.tutor.kb import KnowledgeBase
 from biomentis.agent.tutor.log import SessionLogger
 from biomentis.agent.tutor.rubric import Rubric
+
+
+def turn_ui_dict(turn: ChatTurn) -> dict:
+    """A tutor answer as the chat panel stores and renders it."""
+    return {
+        "role": "assistant",
+        "content": turn.content,
+        "citations": list(turn.citations),
+        "bloom_level": turn.bloom_level,
+        "dok_level": turn.dok_level,
+        "rubric_hit": list(turn.rubric_hit),
+        "confidence": turn.confidence,
+        "failed": turn.failed,
+        "also_consider": list(turn.also_consider),
+        "plot_code": turn.plot_code,
+        "plot_png": turn.plot_png,
+        "plot_error": turn.plot_error,
+        "structure_path": turn.structure_path,
+        "plot_mode": turn.plot_mode,
+    }
+
+
+@dataclass
+class ScaffoldStep:
+    """Where a guided exchange stands after one action.
+
+    `released_turn` is None while the thread is open, and the answer (as
+    `turn_ui_dict`) once it is released. `reask` is the student's new
+    question when they moved on mid-exchange; the caller handles it next.
+    """
+
+    thread: scaffold.ScaffoldThread
+    released_turn: dict | None = None
+    reask: str | None = None
 
 
 class TutorEngine:
@@ -103,6 +140,13 @@ class TutorEngine:
         self.last_run_prompt: str = ""
         self.last_run_answer: str = ""
 
+        # Question support (scaffold.py): how much the chat guides before it
+        # answers, and who decides. Teacher control locks at the first
+        # question, or from the start when preset from the environment.
+        self.scaffold_level: str = scaffold.scaffold_level_default()
+        self.scaffold_control, self.scaffold_locked = scaffold.scaffold_control_default()
+        self.scaffold_questions_asked: int = 0
+
     def is_enabled(self) -> bool:
         return self.enabled
 
@@ -130,6 +174,157 @@ class TutorEngine:
         """True when at least one instructional lens is on, i.e. cards
         will actually carry teaching content."""
         return bool(self.modes)
+
+    # --- question support --------------------------------------------------
+
+    def set_scaffold(self, level: str | None = None, control: str | None = None) -> bool:
+        """Change the question-support level or who controls it.
+
+        Returns False, changing nothing, once teacher control has locked.
+        Unknown values are ignored; each effective change is logged.
+        """
+        if self.scaffold_locked:
+            return False
+        changed: dict[str, str] = {}
+        if level in scaffold.LEVELS and level != self.scaffold_level:
+            self.scaffold_level = changed["level"] = level
+        if control in scaffold.CONTROLS and control != self.scaffold_control:
+            self.scaffold_control = changed["control"] = control
+        if changed:
+            self._log({"kind": "scaffold_setting", **changed})
+        self._maybe_lock_scaffold()
+        return True
+
+    def _maybe_lock_scaffold(self) -> None:
+        if self.scaffold_control == "teacher" and self.scaffold_questions_asked > 0:
+            self.scaffold_locked = True
+
+    def start_question(
+        self, question: str, *, surface: str, step_id: int | None = None, ask_kwargs: dict | None = None
+    ) -> ScaffoldStep:
+        """Answer a student's question, or open a guided exchange toward it.
+
+        The full answer is written first in either case; when the policy
+        guides, it is held back on the thread and the first step returned.
+        """
+        self.scaffold_questions_asked += 1
+        self._maybe_lock_scaffold()
+        ask_kwargs = dict(ask_kwargs or {})
+        level = self.scaffold_level
+        turn = self.chat.ask(question, step_id=step_id, scaffold_level=level, record=False, **ask_kwargs)
+
+        profile = scaffold.QuestionProfile.parse(turn.question_profile) if turn.question_profile else None
+        question_tier = scaffold.tier(profile) if profile is not None else ""
+        plan = scaffold.decide(level, profile, question_tier)
+        thread = scaffold.ScaffoldThread(
+            question=question,
+            surface=surface,
+            step_id=step_id,
+            level=level,
+            control=self.scaffold_control,
+            profile=turn.question_profile,
+            tier=question_tier,
+            plan=plan,
+            answer=asdict(turn),
+            task=ask_kwargs.get("task", "") or "",
+        )
+        if plan.direct or turn.recorded:
+            return self._release(thread, "direct")
+        try:
+            verdict, message, leak_retry = self._next_rung(thread, plan.moves[0], "")
+        except scaffold.RungFailed:
+            return self._release(thread, "error")
+        thread.rungs.append(_rung(plan.moves[0], message, leak_retry))
+        return ScaffoldStep(thread=thread)
+
+    def reply(self, thread, text: str) -> ScaffoldStep:
+        """The student's reply to the latest step: the next step, or the answer.
+
+        After the last step there is no move left, but the reply is still
+        judged (with the last move), so a correct one is "earned".
+        """
+        thread = _as_thread(thread)
+        move = thread.next_move()
+        try:
+            verdict, message, leak_retry = self._next_rung(thread, move or thread.plan.moves[-1], text)
+        except scaffold.RungFailed:
+            thread.rungs[-1].update(reply=text, verdict="none")
+            return self._release(thread, "error")
+        reason = thread.release_reason_for(verdict, text)
+        if reason == "abandoned":
+            return self._release(thread, reason, reask=text)
+        thread.rungs[-1].update(reply=text, verdict=verdict)
+        if reason:
+            return self._release(thread, reason)
+        thread.rungs.append(_rung(move, message, leak_retry))
+        return ScaffoldStep(thread=thread)
+
+    def hint(self, thread) -> ScaffoldStep:
+        """The next step without a reply; the answer once no steps remain."""
+        thread = _as_thread(thread)
+        thread.hints_requested += 1
+        move = thread.next_move()
+        if move is None:
+            return self._release(thread, "exhausted")
+        try:
+            _, message, leak_retry = self._next_rung(thread, move, "")
+        except scaffold.RungFailed:
+            return self._release(thread, "error")
+        thread.rungs.append(_rung(move, message, leak_retry))
+        return ScaffoldStep(thread=thread)
+
+    def reveal(self, thread) -> ScaffoldStep:
+        """"Show me the answer"."""
+        return self._release(_as_thread(thread), "button")
+
+    def _next_rung(self, thread, move: str, latest_reply: str):
+        return scaffold.next_rung(
+            self.chat.llm,
+            thread,
+            move,
+            task=thread.task,
+            cards=self.chat._recent_cards[-3:],
+            latest_reply=latest_reply,
+        )
+
+    def _release(self, thread, reason: str, reask: str | None = None) -> ScaffoldStep:
+        """Release the held-back answer: compose it, record it, log the thread.
+
+        At level "off" the Q&A is recorded exactly as before question
+        support existed: no thread in the record, no scaffold record.
+        """
+        thread.released = reason
+        off = thread.level == "off"
+        turn = ChatTurn(**thread.answer)
+        if not turn.recorded:  # a soft failure was recorded by `ask` already
+            turn.content = scaffold.compose_released(thread) or turn.content
+            self.chat.record(thread.question, turn, thread.step_id, None if off else thread)
+        if not off:
+            self._log(
+                {
+                    "kind": "scaffold",
+                    "surface": thread.surface,
+                    "step_id": thread.step_id,
+                    "question": thread.question,
+                    "level": thread.level,
+                    "control": thread.control,
+                    "profile": thread.profile,
+                    "tier": thread.tier,
+                    "plan": list(thread.plan.moves),
+                    "plan_reason": thread.plan.reason,
+                    "rungs": thread.rungs,
+                    "released": reason,
+                    "hints_requested": thread.hints_requested,
+                    "seconds_to_release": round(time.time() - thread.started_at, 1),
+                }
+            )
+        return ScaffoldStep(thread=thread, released_turn=turn_ui_dict(turn), reask=reask)
+
+    def _log(self, record: dict) -> None:
+        try:
+            self.logger.log(record)
+        except Exception as e:  # logging must never break the chat
+            print(f"tutor: failed to log {record.get('kind')}: {e!r}")
 
     def record_run(
         self,
@@ -286,3 +481,12 @@ class TutorEngine:
                 pass
 
         return card
+
+
+def _rung(move: str, message: str, leak_retry: bool) -> dict:
+    return {"move": move, "message": message, "reply": "", "verdict": "none", "leak_retry": leak_retry}
+
+
+def _as_thread(thread) -> scaffold.ScaffoldThread:
+    """Threads come back from session state as plain dicts."""
+    return thread if isinstance(thread, scaffold.ScaffoldThread) else scaffold.ScaffoldThread.from_dict(thread)

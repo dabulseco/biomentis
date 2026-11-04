@@ -86,6 +86,19 @@ class ChatTurn:
     plot_error: str = ""
     structure_path: str = ""
     plot_mode: str = "show"
+    # The answer and its follow-up question, before `content` joins them;
+    # question support (scaffold.py) recomposes the released text from these.
+    answer_body: str = ""
+    follow_up: str = ""
+    # Asked for only above scaffold level "off": what kind of question it was
+    # (a `QuestionProfile` as a dict, {} when unusable), the conclusions the
+    # student should reach, and, under "challenge", a stretch question.
+    question_profile: dict = field(default_factory=dict)
+    key_points: list[str] = field(default_factory=list)
+    stretch_question: str = ""
+    # True once the Q&A is logged and in `history`. `ask(record=False)`
+    # leaves it False so a held-back answer is recorded only on release.
+    recorded: bool = False
 
 
 # --- Prompt --------------------------------------------------------------
@@ -175,6 +188,37 @@ _VISUALS_RULE = (
 )
 _SYSTEM_PROMPT = _SYSTEM_PROMPT.replace("@@VIS@@", _VISUALS_RULE)
 _SYSTEM_PROMPT_CHAT = _SYSTEM_PROMPT_CHAT.replace("@@VIS@@", _VISUALS_RULE)
+
+# Appended above scaffold level "off". The answer call also classifies the
+# question, so a question answered directly costs no extra call.
+_SCAFFOLD_ADDENDUM = """
+
+QUESTION SUPPORT — in addition to the keys above, include these keys in the same JSON object:
+  "question_profile": {"type": "<logistics | definition | agent_action | procedural | conceptual | evaluative>", "bloom": "<Remember | Understand | Apply | Analyze | Evaluate | Create>", "dok": <1-4>, "specific": <true if the question names a step, value, tool or result>, "shows_reasoning": <true if the student offers their own hypothesis or explanation>, "wants_direct": <true if the student explicitly asks to just be told, or says it is urgent>},
+  "key_points": ["<1-3 short phrases, each a conclusion the student should reach to understand the answer>"]@@STRETCH@@
+Question types: logistics = how to use the app or where something is; definition = what a term means; agent_action = what the agent did or produced; procedural = how to do something; conceptual = why something works or is done; evaluative = whether something is right, good enough or trustworthy.
+The tutor may guide the student toward your answer step by step before showing it. Write the answer exactly as you otherwise would.
+"""
+_STRETCH_KEY = """,
+  "stretch_question": "<only for a very sophisticated question (the student reasons on their own, and it asks them to evaluate or create, or needs extended thinking): one question that goes beyond what was asked; otherwise an empty string>\""""
+_MAX_KEY_POINTS = 3
+_MAX_KEY_POINT_CHARS = 200
+
+
+def _scaffold_addendum(level: str) -> str:
+    """The question-support keys to request at `level`; "" at "off"."""
+    from biomentis.agent.tutor.scaffold import LEVELS
+
+    if level not in LEVELS or level == "off":
+        return ""
+    return _SCAFFOLD_ADDENDUM.replace("@@STRETCH@@", _STRETCH_KEY if level == "challenge" else "")
+
+
+def _coerce_key_points(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    points = [p.strip()[:_MAX_KEY_POINT_CHARS] for p in value if isinstance(p, str) and p.strip()]
+    return points[:_MAX_KEY_POINTS]
 
 
 def _build_user_prompt(
@@ -338,6 +382,8 @@ class TutorChat:
         step_id: int | None = None,
         plot_mode: str = "show",
         search_dirs: list[str] | None = None,
+        scaffold_level: str = "off",
+        record: bool = True,
     ) -> ChatTurn:
         """Ask the tutor a question.
 
@@ -367,6 +413,14 @@ class TutorChat:
                 asking, if any. Recorded on the logged `qa` record so the
                 session log can tell which step a question was asked
                 during; purely for logging, doesn't affect the answer.
+            scaffold_level: The question-support level (see scaffold.py).
+                Above "off", the same call also returns the question's
+                profile, its key points and, under "challenge", a stretch
+                question. At "off" the call is exactly what it was before.
+            record: When False, the Q&A is neither logged nor added to
+                `history`; the caller holds the answer back and calls
+                `record` once it is released. A soft failure is always
+                recorded at once (`turn.recorded` says which happened).
 
         Returns:
             A `ChatTurn` with the answer, citations, and (if classifiable)
@@ -434,7 +488,7 @@ class TutorChat:
         # "chat" mode is KB + LLM hybrid.
         system_prompt = (
             _SYSTEM_PROMPT_CHAT if mode == _ASK_MODE_CHAT else _SYSTEM_PROMPT
-        )
+        ) + _scaffold_addendum(scaffold_level)
         # The reply is retried once when the call fails, isn't JSON, or has
         # no answer text; each failed attempt is printed with the raw reply.
         messages = [
@@ -468,6 +522,7 @@ class TutorChat:
         # 5. Coerce answer, follow_up, citations.
         answer = str(data.get("answer", "") or "").strip()
         follow_up = str(data.get("follow_up", "") or "").strip()
+        answer_body = answer
         if follow_up and answer:
             answer = f"{answer}\n\n**Follow-up:** {follow_up}"
 
@@ -505,7 +560,9 @@ class TutorChat:
         if structure_path:
             revised = self._revise_for_structure(messages, text, structure.strip(), structure_path)
             if revised:
-                answer = revised
+                # The rewrite is the whole reply, follow-up included.
+                answer = answer_body = revised
+                follow_up = ""
 
         # 6. Classify.
         cls = self.rubric.classify_qa(
@@ -519,6 +576,22 @@ class TutorChat:
                 ]
             ),
         )
+
+        # 6b. Question support: what kind of question this was, and what the
+        # student should conclude. Only requested above level "off".
+        question_profile: dict = {}
+        key_points: list[str] = []
+        stretch_question = ""
+        if _scaffold_addendum(scaffold_level):
+            from dataclasses import asdict
+
+            from biomentis.agent.tutor.scaffold import QuestionProfile
+
+            profile = QuestionProfile.parse(data.get("question_profile"))
+            question_profile = asdict(profile) if profile is not None else {}
+            key_points = _coerce_key_points(data.get("key_points"))
+            if scaffold_level == "challenge":
+                stretch_question = str(data.get("stretch_question", "") or "").strip()
 
         turn = ChatTurn(
             role="assistant",
@@ -535,37 +608,60 @@ class TutorChat:
             plot_error=plot_error,
             structure_path=structure_path,
             plot_mode=plot_mode,
+            answer_body=answer_body,
+            follow_up=follow_up,
+            question_profile=question_profile,
+            key_points=key_points,
+            stretch_question=stretch_question,
         )
 
-        # 7. Log.
+        # 7-8. Log and append to history, unless the caller holds the
+        # answer back (question support records it on release).
+        if record:
+            self.record(question, turn, step_id)
+        return turn
+
+    def record(self, question: str, turn: ChatTurn, step_id: int | None = None, thread=None) -> None:
+        """Log a Q&A and add it to `history`.
+
+        `ask` calls this itself unless asked not to. Question support calls
+        it when a held-back answer is released, passing the guided exchange
+        (`thread`, a `ScaffoldThread`): it goes into the log record, and the
+        student's replies into the history, so later questions see the
+        exchange as it happened.
+        """
+        record = {
+            "kind": "qa",
+            "question": question,
+            "answer": turn.content,
+            "bloom_level": turn.bloom_level,
+            "dok_level": turn.dok_level,
+            "rubric_hit": list(turn.rubric_hit),
+            "confidence": turn.confidence,
+            "failed": turn.failed,
+            "citations": turn.citations,
+            "also_consider": turn.also_consider,
+            "step_id": step_id,
+            "plot_mode": turn.plot_mode,
+            "plot_code": turn.plot_code,
+            "plot_png": turn.plot_png,
+            "structure_path": turn.structure_path,
+        }
+        user_content = question
+        if thread is not None:
+            record["scaffold"] = thread.to_dict()
+            replies = [r["reply"] for r in thread.rungs if r.get("reply")]
+            if replies:
+                user_content += "\n\n(Guided steps; the student replied: " + " | ".join(replies) + ")"
         if self.logger is not None:
             try:
-                self.logger.log(
-                    {
-                        "kind": "qa",
-                        "question": question,
-                        "answer": answer,
-                        "bloom_level": cls.bloom_level,
-                        "dok_level": cls.dok_level,
-                        "rubric_hit": list(cls.rubric_hit),
-                        "confidence": cls.confidence,
-                        "failed": cls.failed,
-                        "citations": citations,
-                        "also_consider": also_consider,
-                        "step_id": step_id,
-                        "plot_mode": plot_mode,
-                        "plot_code": plot_code,
-                        "plot_png": plot_png,
-                        "structure_path": structure_path,
-                    }
-                )
+                self.logger.log(record)
             except Exception as e:
                 print(f"tutor: failed to log Q&A: {e!r}")
 
-        # 8. Append to history.
-        self.history.append(ChatTurn(role="user", content=question))
+        self.history.append(ChatTurn(role="user", content=user_content))
         self.history.append(turn)
-        return turn
+        turn.recorded = True
 
     # --- internals --------------------------------------------------------
 
@@ -675,6 +771,7 @@ class TutorChat:
                 f"You asked: \"{question[:200]}\" — rephrase or try again.)_"
             ),
             failed=True,
+            recorded=True,
         )
         self.history.append(ChatTurn(role="user", content=question))
         self.history.append(turn)

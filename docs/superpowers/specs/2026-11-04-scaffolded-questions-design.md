@@ -277,9 +277,9 @@ A tutor that fails must fail *open*: the student gets the answer, never a stuck 
 |---|---|
 | `biomentis/agent/tutor/scaffold.py` (new) | `QuestionProfile`, `tier()`, `decide()` → `ScaffoldPlan`, `ScaffoldThread` (state: question, plan, rung, held-back `ChatTurn`, replies, verdicts, released reason), `next_rung()` (rung call + leak check), `is_give_up()`, `_RUNG_PROMPT`, fallback texts |
 | `biomentis/agent/tutor/chat.py` | `ask(..., scaffold_level="off")`: when not off, adds `question_profile` and `key_points` to the requested JSON and sets them on `ChatTurn` (new fields `question_profile: dict`, `key_points: list[str]`) |
-| `biomentis/agent/tutor/engine.py` | `TutorEngine.scaffold_level`, `scaffold_control`; `start_thread(turn)` / `reply(thread, text)` / `hint(thread)` / `reveal(thread)` |
+| `biomentis/agent/tutor/engine.py` | `TutorEngine.scaffold_level`, `scaffold_control`; `start_question(question, surface=..., ask_kwargs=...)` / `reply(thread, text)` / `hint(thread)` / `reveal(thread)` |
 | `biomentis/ui_tutor.py` | Sidebar "Question support" control + lock; chat panel and step Q&A render open threads (caption, 💡 Hint, Show me the answer), route input to `reply` while a thread is open; released threads append the held-back turn exactly as `_handle_chat_turn` does today |
-| `biomentis/config.py` | `BIOMENTIS_SCAFFOLD_LEVEL`, `BIOMENTIS_SCAFFOLD_CONTROL` |
+| `biomentis/agent/tutor/scaffold.py` | `BIOMENTIS_SCAFFOLD_LEVEL`, `BIOMENTIS_SCAFFOLD_CONTROL`, read by `scaffold_level_default()` / `scaffold_control_default()` (module-level helpers, following `plots.plot_mode_default` and `BIOMENTIS_PLOT_MODE`, rather than `config.py`) |
 | `docs/tutor.md` | A section on question support for teachers |
 
 The open thread lives in `st.session_state`:

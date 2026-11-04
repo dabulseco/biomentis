@@ -381,7 +381,7 @@ def _rung(llm, thread=None, move="predict", reply=""):
 
 def test_rung_call() -> None:
     print("\n[11] the rung call")
-    from biomentis.agent.tutor.scaffold import FALLBACK_RUNGS, RungFailed
+    from biomentis.agent.tutor.scaffold import FALLBACK_RUNGS, RungFailed, fallback_rung
 
     good = {"verdict": "none", "message": "What would you expect with 250 million sequences?"}
     llm = _SeqLLM(good)
@@ -399,6 +399,12 @@ def test_rung_call() -> None:
     _check("an unparseable reply is retried", _rung(llm)[1] == good["message"] and len(llm.calls) == 2)
     llm = _SeqLLM({"verdict": "none", "message": "  "}, good)
     _check("an empty message is retried", _rung(llm)[1] == good["message"])
+    # A verdict that releases the answer needs no next step: an empty
+    # message is fine there (else a new question mid-thread was lost).
+    for verdict in ("new_question", "correct", "gave_up"):
+        llm = _SeqLLM({"verdict": verdict, "message": ""})
+        _check(f"{verdict} needs no message", _rung(llm, reply="something")[:2] == (verdict, "")
+               and len(llm.calls) == 1, repr(llm.calls[1:]))
 
     try:
         _rung(_SeqLLM("nope", RuntimeError("down")))
@@ -430,6 +436,27 @@ def test_rung_call() -> None:
     _check("an unknown verdict is none", _rung(llm, thread=t, move="hint", reply="x")[0] == "none")
     llm = _SeqLLM({"verdict": "correct", "message": "Hm?"})
     _check("rung 1 has no reply to judge, so its verdict is none", _rung(llm)[0] == "none")
+
+    # A hint (no reply after an earlier step): seen live, a model echoed the
+    # previous step word for word instead of making the new move.
+    earlier = "Could you clarify what happens to the number of hits at 1e-10?"
+    t = _thread(moves=("probe", "find_flaw", "extend"), key_points=[])
+    t.rungs.append({"move": "probe", "message": earlier, "reply": "", "verdict": "none", "leak_retry": False})
+    fresh = {"verdict": "none", "message": "Here is a flawed version: a stricter cutoff keeps more hits. What's wrong?"}
+    llm = _SeqLLM(fresh)
+    _rung(llm, thread=t, move="find_flaw")
+    user = llm.calls[0][-1].content
+    _check("a hint is named in the prompt", "asked for a hint" in user, user[-400:])
+    _check("the prompt says not to repeat a step", "repeat" in llm.calls[0][0].content.lower())
+
+    llm = _SeqLLM({"verdict": "none", "message": earlier}, fresh)
+    verdict, message, retried = _rung(llm, thread=t, move="find_flaw")
+    _check("a repeated step is regenerated once", message == fresh["message"] and retried, repr(message))
+    _check("the regeneration says it repeated", "repeat" in llm.calls[1][-1].content.lower(),
+           llm.calls[1][-1].content)
+    llm = _SeqLLM({"verdict": "none", "message": f"  {earlier.upper()} "}, {"verdict": "none", "message": earlier})
+    _check("a repeat twice falls back to the move's fixed text",
+           _rung(llm, thread=t, move="find_flaw")[1] == fallback_rung("find_flaw", None))
 
 
 def run_all() -> int:

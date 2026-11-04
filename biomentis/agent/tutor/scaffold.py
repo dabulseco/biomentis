@@ -432,7 +432,8 @@ RULES:
 3. If the reply is partly right, say what is right first, then build on it. Never answer with a bare "no" or "wrong".
 4. Never state the HELD_BACK_ANSWER or any KEY_POINT, and don't hint so heavily that the student only has to copy it.
 5. Keep it to 2-4 sentences. Be warm and direct, not effusive.
-6. Output ONLY the JSON.
+6. Never repeat an earlier TUTOR step from THREAD. Each step makes its own MOVE, so when the student asks for a hint, take the new MOVE rather than restating the last step.
+7. Output ONLY the JSON.
 """
 
 
@@ -447,6 +448,13 @@ def _format_cards(cards: list[dict]) -> str:
         if bits:
             lines.append(f"step {i}: " + " | ".join(bits))
     return "\n".join(lines) or "(none)"
+
+
+# LATEST_REPLY without a reply: the first step, or a hint after an earlier one.
+_NO_REPLY = {
+    False: "(empty)",
+    True: "(empty: the student asked for a hint instead of replying, so take the next MOVE)",
+}
 
 
 def _rung_user_prompt(thread: ScaffoldThread, move: str, task: str, cards: list[dict], latest_reply: str) -> str:
@@ -466,22 +474,28 @@ def _rung_user_prompt(thread: ScaffoldThread, move: str, task: str, cards: list[
             f"MOVE: {move}\n{MOVE_DEFINITIONS.get(move, '')}",
             f"RUNG: {len(thread.rungs) + 1} of {min(len(thread.plan.moves), MAX_RUNGS)}",
             "THREAD:\n" + ("\n".join(history) or "(none)"),
-            f"LATEST_REPLY:\n{latest_reply or '(empty)'}",
+            f"LATEST_REPLY:\n{latest_reply or _NO_REPLY[bool(thread.rungs)]}",
         ]
     )
 
 
-def _parse_rung(text: str) -> tuple[str, str] | None:
+# Verdicts that end the thread: the answer is released, so no next step is
+# needed and an empty message is fine.
+_RELEASING_VERDICTS = ("correct", "gave_up", "new_question")
+
+
+def _parse_rung(text: str, latest_reply: str = "") -> tuple[str, str] | None:
     from biomentis.agent.tutor.instruction import _extract_json
 
     data = _extract_json(text or "")
     if not isinstance(data, dict):
         return None
     message = str(data.get("message", "") or "").strip()
-    if not message:
-        return None
     verdict = str(data.get("verdict", "") or "").strip().lower()
-    return (verdict if verdict in VERDICTS else "none"), message
+    verdict = verdict if verdict in VERDICTS and latest_reply else "none"
+    if not message and verdict not in _RELEASING_VERDICTS:
+        return None
+    return verdict, message
 
 
 def next_rung(
@@ -490,10 +504,12 @@ def next_rung(
 ) -> tuple[str, str, bool]:
     """The next guided step: (verdict on the latest reply, message, leak_retry).
 
-    An invalid reply (a failed call, no JSON, no message) is retried once;
-    two in a row raise `RungFailed`. A message that states a key point is
-    regenerated once with what it gave away; if that leaks too, or fails,
-    the move's fixed fallback text is used instead.
+    An invalid reply (a failed call, no JSON, no message where a next step
+    is needed) is retried once;
+    two in a row raise `RungFailed`. A message that states a key point, or
+    repeats an earlier step, is regenerated once with what was wrong; if
+    that fails the check too, or the call fails, the move's fixed fallback
+    text is used instead. `leak_retry` is True whenever that happened.
     """
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -508,7 +524,7 @@ def next_rung(
         except Exception as e:
             print(f"tutor: rung call failed: {e!r}")
             return "", None
-        return text, _parse_rung(text)
+        return text, _parse_rung(text, latest_reply)
 
     text, parsed = call(messages)
     if parsed is None:
@@ -516,21 +532,31 @@ def next_rung(
     if parsed is None:
         raise RungFailed(f"no usable rung for move {move!r}")
     verdict, message = parsed
-    if not latest_reply:
-        verdict = "none"
+    if not message:  # a verdict that releases the answer: no step to check
+        return verdict, message, False
 
     key_points = thread.answer.get("key_points") or []
-    point = leaked_point(message, key_points)
-    if point is None:
+    earlier = {_normalize(r.get("message", "")) for r in thread.rungs}
+
+    def problem(draft: str) -> str | None:
+        point = leaked_point(draft, key_points)
+        if point is not None:
+            return (
+                f'Your last draft gave away a key point: "{point}". Rewrite the message so the '
+                "student has to reach it themselves. Return the same JSON."
+            )
+        if _normalize(draft) in earlier:
+            return (
+                f"Your last draft repeats an earlier step. Write a new step that makes the MOVE "
+                f"({move}). Return the same JSON."
+            )
+        return None
+
+    issue = problem(message)
+    if issue is None:
         return verdict, message, False
-    retry = messages + [
-        AIMessage(content=text),
-        HumanMessage(
-            content=f'Your last draft gave away a key point: "{point}". Rewrite the message so the '
-            "student has to reach it themselves. Return the same JSON."
-        ),
-    ]
+    retry = messages + [AIMessage(content=text), HumanMessage(content=issue)]
     _, again = call(retry)
-    if again is not None and leaked_point(again[1], key_points) is None:
+    if again is not None and again[1] and problem(again[1]) is None:
         return verdict, again[1], True
     return verdict, fallback_rung(move, thread.step_id), True

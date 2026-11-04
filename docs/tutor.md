@@ -125,6 +125,96 @@ lens you just enabled.
 
 ---
 
+## Question support
+
+When a student asks the tutor chat a question worth thinking about, the
+tutor can guide them toward the answer in a few short steps instead of
+answering at once. This applies to both chat surfaces, **Ask about this
+task** and **Ask about this step**, and nowhere else: the agent's own
+answer, the transcript and the teaching cards are never held back. A
+student who scrolls up to find and understand the answer there is doing
+useful work too.
+
+### Levels
+
+| Level | What the student gets |
+|---|---|
+| **Answer directly** | Today's chat: the answer at once. |
+| **A nudge first** | One short step (orient, predict or probe), then the answer. |
+| **Guide me** (default) | Up to two steps, scaled to the question. |
+| **Challenge me** | Up to three steps, harder ones for sophisticated questions, and a stretch question after the answer for the most sophisticated. |
+
+Whatever the level, these are always answered directly:
+- questions about the app or the run ("where is the export button?");
+- requests for the agent to do something.
+
+Definitions ("what is an E-value?") are also answered directly, except
+under **Challenge me**, where they get one prediction step first. A student
+who says they want the answer straight is answered directly below
+**Challenge me**; under it they get a single step with the way out
+highlighted.
+
+The tutor reads each question's type and sophistication (Bloom level,
+depth, whether it shows the student's own reasoning) from the same call
+that writes the answer. A more sophisticated question gets harder steps:
+probing the student's reasoning, finding a flaw, extending the idea. A
+question that only recalls a fact gets an orienting step. There are never
+more than three steps.
+
+### Never stuck
+
+Every guided step shows **💡 Hint** (the next step) and **Show me the
+answer**. The answer is also released when:
+- the student's reply gets it right; the answer opens with "✓ That's the
+  core of it.";
+- the student says they give up ("idk", "just tell me", "?");
+- the student sends two very short replies in a row that miss;
+- the steps run out;
+- the student asks something else, which is then answered as a new
+  question;
+- a step can't be written (the model fails twice).
+
+The steps never state the answer. Each one is checked against the
+answer's key points and rewritten if it gives one away.
+
+### Who sets it
+
+The sidebar's **Question support set by** switch is **Students** by
+default, which lets students pick any level, **Answer directly** included.
+Every change is logged.
+
+Set it to **Teacher** at the start of a session and choose the level. The
+setting locks when the first question is asked, the controls disappear, and
+the sidebar shows "Question support: **Guide me**, set by your teacher".
+The lock lasts for the rest of the session.
+
+To preset a class, set these before launching the app:
+
+```bash
+export BIOMENTIS_SCAFFOLD_LEVEL=standard   # off | light | standard | challenge
+export BIOMENTIS_SCAFFOLD_CONTROL=teacher  # students | teacher
+```
+
+With `BIOMENTIS_SCAFFOLD_CONTROL=teacher` the level is locked from the
+first page load. An unset or unknown level means **Guide me**; an unset or
+unknown control means students choose.
+
+### What gets logged
+
+Each guided exchange writes a `scaffold` record when its answer is
+released, next to the usual `qa` record (see [Log schema](#log-schema)).
+It records:
+- the steps and the student's replies;
+- the tutor's verdict on each reply;
+- why the answer was released;
+- how many hints were asked for;
+- the time from question to answer.
+
+At **Answer directly** the log is exactly what it was before question
+support existed.
+
+---
+
 ## Knowledge base
 
 ### Supported file types
@@ -294,6 +384,48 @@ the Critic digest read unchanged.
   "session_id": "abc12345"
 }
 ```
+
+A guided exchange's `qa` record also carries the whole exchange under
+`"scaffold"`, written when the answer is released.
+
+### `scaffold` — one guided exchange (question support)
+
+```json
+{
+  "kind": "scaffold",
+  "surface": "chat",
+  "step_id": null,
+  "question": "Why filter BLAST hits at E < 1e-5?",
+  "level": "standard",
+  "control": "students",
+  "profile": {"type": "conceptual", "bloom": "Apply", "dok": 2, "specific": true,
+              "shows_reasoning": false, "wants_direct": false},
+  "tier": "developing",
+  "plan": ["predict", "hint"],
+  "plan_reason": "table",
+  "rungs": [{"move": "predict", "message": "What would you expect by chance in a database this size?",
+             "reply": "more random hits", "verdict": "partial", "leak_retry": false}],
+  "released": "button",
+  "hints_requested": 0,
+  "seconds_to_release": 41.2,
+  "ts": "2026-11-04T10:11:21",
+  "session_id": "abc12345"
+}
+```
+
+`surface` is `chat` (Ask about this task) or `step` (Ask about this step).
+`released` is one of:
+- `direct`: no steps;
+- `earned`: a correct reply;
+- `button`: Show me the answer;
+- `exhausted`: the steps ran out;
+- `frustration`: the student gave up, or sent two short replies that
+  missed;
+- `abandoned`: the student asked something else;
+- `error`: a step couldn't be written.
+
+A `scaffold_setting` record (`level` and/or `control`) is written on each
+change to the sidebar setting.
 
 ### `event_seen` — pre-card log (lightweight, for stream analytics)
 

@@ -964,6 +964,7 @@ def render_tutor_sidebar(tutor) -> None:
         from biomentis.ui_visuals import render_plot_mode_control
 
         render_plot_mode_control(logger=tutor.logger)
+        _render_scaffold_control(tutor)
 
         if tutor.enabled:
             _render_mode_toggles(tutor)
@@ -1004,6 +1005,53 @@ def render_tutor_sidebar(tutor) -> None:
 
         with st.expander("Session log", expanded=False):
             _render_log_export(tutor)
+
+
+_SCAFFOLD_CONTROL_KEY = "biomni_tutor_scaffold_control"
+_SCAFFOLD_LEVEL_KEY = "biomni_tutor_scaffold_level"
+_SCAFFOLD_CONTROL_LABELS = {"students": "Students", "teacher": "Teacher"}
+
+
+def _render_scaffold_control(tutor) -> None:
+    """Question support: who sets it, and how much the chat guides.
+
+    The engine is the source of truth. Once it is locked (teacher control
+    after the first question, or an env preset) the radios are not rendered
+    at all, so nothing typed into their session-state keys can unlock it.
+    """
+    import streamlit as st
+
+    from biomentis.agent.tutor import scaffold
+
+    if tutor.scaffold_locked:
+        label = scaffold.LEVEL_LABELS[tutor.scaffold_level]
+        st.caption(f"Question support: **{label}**, set by your teacher")
+        return
+    if st.session_state.get(_SCAFFOLD_CONTROL_KEY) not in scaffold.CONTROLS:
+        st.session_state[_SCAFFOLD_CONTROL_KEY] = tutor.scaffold_control
+    if st.session_state.get(_SCAFFOLD_LEVEL_KEY) not in scaffold.LEVELS:
+        st.session_state[_SCAFFOLD_LEVEL_KEY] = tutor.scaffold_level
+    control = st.radio(
+        "Question support set by",
+        scaffold.CONTROLS,
+        format_func=_SCAFFOLD_CONTROL_LABELS.get,
+        key=_SCAFFOLD_CONTROL_KEY,
+        horizontal=True,
+        help="Teacher fixes the setting below for the rest of the session.",
+    )
+    level = st.radio(
+        "Question support",
+        scaffold.LEVELS,
+        format_func=scaffold.LEVEL_LABELS.get,
+        key=_SCAFFOLD_LEVEL_KEY,
+        help=(
+            "How much the tutor chat guides a student toward an answer "
+            "before giving it. Applies to the next question."
+        ),
+    )
+    tutor.set_scaffold(level=level, control=control)
+    if control == "teacher":
+        st.caption("Locks for this session when the first question is asked.")
 
 
 # ----- 6a0. Instructional-mode toggles ------------------------------------
@@ -1668,11 +1716,14 @@ def render_tutor_chat_panel(tutor) -> None:
                 )
                 _entries = []
                 for turn in _history:
+                    _title = None
+                    if turn.get("role") == "assistant":
+                        _title = "🧭 Guided step" if turn.get("scaffold_rung") else "💬 Tutor Q&A"
                     _entries.append(
                     ExportEntry(
                         role=turn.get("role", "assistant"),
                         kind="qa" if turn.get("role") == "assistant" else "text",
-                        title="💬 Tutor Q&A" if turn.get("role") == "assistant" else None,
+                        title=_title,
                         content=turn.get("content", ""),
                         citations=turn.get("citations") or None,
                         bloom_level=turn.get("bloom_level"),
@@ -1712,6 +1763,14 @@ def render_tutor_chat_panel(tutor) -> None:
         st.caption(f"{kb_status}  ·  {tutor_status}")
 
         for _idx, turn in enumerate(st.session_state.biomni_tutor_chat_history):
+            if turn.get("scaffold_rung"):
+                # A guided step or the student's reply to one, kept for the
+                # record once its answer was released.
+                with st.chat_message(turn["role"]):
+                    if turn["role"] == "assistant":
+                        st.caption("🧭 Guided step")
+                    st.markdown(turn["content"])
+                continue
             with st.chat_message(turn["role"]):
                 st.markdown(turn["content"])
                 _render_visuals(turn, key=f"chat-panel-{_idx}")
@@ -1765,6 +1824,11 @@ def render_tutor_chat_panel(tutor) -> None:
                 if turn.get("failed"):
                     st.caption("⚠️ tutor was unable to fully answer this question")
 
+        # An open guided exchange (question support): its steps so far, the
+        # student's replies, and the way out.
+        thread = st.session_state.get(_SCAFFOLD_THREAD_KEY)
+        action = _render_scaffold_thread(thread, "") if thread else None
+
         # Multi-line prompt input. `st.chat_input` is hard-coded to a single
         # line by Streamlit, so we replace it with a text area + Ask button
         # so users can paste long questions without truncation. Submit is
@@ -1778,16 +1842,24 @@ def render_tutor_chat_panel(tutor) -> None:
                 height=110,
                 label_visibility="collapsed",
                 placeholder=(
-                    "Ask a question about the running task. Submit with the "
+                    _SCAFFOLD_PLACEHOLDER
+                    if thread
+                    else "Ask a question about the running task. Submit with the "
                     "Ask button or Ctrl+Enter / Cmd-Enter."
                 ),
             )
             ask_clicked = st.form_submit_button("Ask", use_container_width=False)
         user_q = chat_text.strip() if ask_clicked else ""
         st.session_state.biomni_tutor_chat_draft = "" if ask_clicked else chat_text
-        if user_q:
+        if action:
             with st.spinner("🎓 Thinking..."):
-                _handle_chat_turn(tutor, user_q)
+                _handle_chat_scaffold(tutor, action)
+        elif user_q:
+            with st.spinner("🎓 Thinking..."):
+                if thread:
+                    _handle_chat_scaffold(tutor, "reply", user_q)
+                else:
+                    _handle_chat_turn(tutor, user_q)
 
 
 def _visuals_dict(turn) -> dict:
@@ -1835,6 +1907,64 @@ def _render_visuals(turn: dict, key: str) -> None:
         render_structure(turn["structure_path"], key=key)
 
 
+_SCAFFOLD_THREAD_KEY = "biomni_tutor_scaffold_thread"
+_SCAFFOLD_PLACEHOLDER = "Your thinking… (or ask something new)"
+
+
+def _render_scaffold_thread(thread: dict, key_suffix: str, show_question: bool = False) -> str | None:
+    """An open guided exchange: each step, each reply, then Hint and Show
+    me the answer. Returns "hint" or "reveal" when one was clicked.
+
+    The thread is plain data in session state, so a rerun shows it again
+    unchanged and the next reply carries on from it."""
+    import streamlit as st
+
+    rungs = thread.get("rungs") or []
+    total = max(len(thread.get("plan", {}).get("moves") or []), len(rungs))
+    if show_question:
+        st.markdown(f"**Q:** {thread.get('question', '')}")
+    for n, rung in enumerate(rungs, 1):
+        with st.chat_message("assistant"):
+            st.caption(f"🧭 Guided · step {n} of up to {total}")
+            st.markdown(rung.get("message", ""))
+        if rung.get("reply"):
+            with st.chat_message("user"):
+                st.markdown(rung["reply"])
+    sfx = f"_{key_suffix}" if key_suffix else ""
+    hint_col, reveal_col, _ = st.columns([1, 2, 4])
+    with hint_col:
+        hint = st.button("💡 Hint", key=f"biomni_tutor_scaffold_hint{sfx}")
+    with reveal_col:
+        # The student asked for the answer straight (under Challenge me):
+        # make the way out the obvious button.
+        highlight = bool(thread.get("plan", {}).get("highlight_reveal"))
+        reveal = st.button(
+            "Show me the answer",
+            key=f"biomni_tutor_scaffold_reveal{sfx}",
+            type="primary" if highlight else "secondary",
+        )
+    return "reveal" if reveal else "hint" if hint else None
+
+
+def _scaffold_action(tutor, thread: dict, action: str, text: str = ""):
+    """Run one step of an open thread through the engine."""
+    if action == "reply":
+        return tutor.reply(thread, text)
+    if action == "hint":
+        return tutor.hint(thread)
+    return tutor.reveal(thread)
+
+
+def _rung_turns(rungs: list[dict]) -> list[dict]:
+    """A released thread's steps and replies, as display-only history turns."""
+    turns: list[dict] = []
+    for rung in rungs:
+        turns.append({"role": "assistant", "content": rung.get("message", ""), "scaffold_rung": True})
+        if rung.get("reply"):
+            turns.append({"role": "user", "content": rung["reply"], "scaffold_rung": True})
+    return turns
+
+
 def _handle_chat_turn(tutor, question: str) -> None:
     """Phase-4 chat: KB retrieval + LLM call + Bloom/DOK/rubric classification."""
     import streamlit as st
@@ -1844,7 +1974,77 @@ def _handle_chat_turn(tutor, question: str) -> None:
         {"role": "user", "content": question}
     )
 
-    # 2. Build context for the LLM.
+    # 2. Ask: answered at once, or a guided exchange opens (question support).
+    ask_kwargs = _chat_ask_kwargs(tutor)
+    step_id = ask_kwargs.pop("step_id")
+    _t_chat_start = time.monotonic()
+    try:
+        step = tutor.start_question(question, surface="chat", step_id=step_id, ask_kwargs=ask_kwargs)
+    except Exception as e:
+        # Defensive: the engine is supposed to handle its own errors,
+        # but if something leaks out, don't crash the UI.
+        st.session_state.biomni_tutor_chat_history.append(
+            {
+                "role": "assistant",
+                "content": f"_(tutor crashed: {e!r})_",
+                "failed": True,
+            }
+        )
+        st.rerun()
+        return
+    _apply_chat_step(tutor, step, _t_chat_start)
+    st.rerun()
+
+
+def _handle_chat_scaffold(tutor, action: str, text: str = "") -> None:
+    """A reply, Hint or Show me the answer on the page chat's open thread."""
+    import streamlit as st
+
+    thread = st.session_state.get(_SCAFFOLD_THREAD_KEY)
+    _t_start = time.monotonic()
+    try:
+        step = _scaffold_action(tutor, thread, action, text)
+    except Exception as e:
+        st.session_state.pop(_SCAFFOLD_THREAD_KEY, None)
+        st.session_state.biomni_tutor_chat_history.append(
+            {"role": "assistant", "content": f"_(tutor crashed: {e!r})_", "failed": True}
+        )
+        st.rerun()
+        return
+    _apply_chat_step(tutor, step, _t_start)
+    st.rerun()
+
+
+def _apply_chat_step(tutor, step, started: float) -> None:
+    """Keep an open thread in session state, or put a released one in history."""
+    import streamlit as st
+
+    if step.released_turn is None:
+        st.session_state[_SCAFFOLD_THREAD_KEY] = step.thread.to_dict()
+        return
+    st.session_state.pop(_SCAFFOLD_THREAD_KEY, None)
+    history = st.session_state.biomni_tutor_chat_history
+    history.extend(_rung_turns(step.thread.rungs))
+
+    # Surface the wall-clock cost of this chat turn so users can tell
+    # whether a slow response is the LLM or downstream retrieval. We
+    # append to the stored answer so it renders inline; the chat
+    # history renderer doesn't need to know about timing.
+    from biomentis.ui_core import format_duration
+
+    turn = dict(step.released_turn)
+    turn["content"] = f"{turn['content']}  ·  (took {format_duration(time.monotonic() - started)})"
+    history.append(turn)
+    if step.reask:
+        # The student moved on mid-exchange: their new text is a new question.
+        _handle_chat_turn(tutor, step.reask)
+
+
+def _chat_ask_kwargs(tutor) -> dict:
+    """The page chat's arguments to `TutorChat.ask`, `step_id` included."""
+    import streamlit as st
+
+    # Build context for the LLM.
     #
     # The tutor's chat panel must be able to answer follow-up questions
     # about the just-completed task (e.g. "summarize the databases
@@ -1918,56 +2118,16 @@ def _handle_chat_turn(tutor, question: str) -> None:
 
     from biomentis.ui_visuals import current_plot_mode
 
-    _t_chat_start = time.monotonic()
-    try:
-        turn = tutor.chat.ask(
-            question=question,
-            context=step_context,
-            task=tutor.current_prompt or "",
-            transcript=transcript,
-            last_answer=last_answer,
-            mode="chat",  # KB + LLM hybrid; chat panel is decoupled from tutor
-            step_id=run.get("step_id") if run else None,
-            plot_mode=current_plot_mode(),
-            search_dirs=_chat_search_dirs(tutor),
-        )
-    except Exception as e:
-        # Defensive: TutorChat.ask is supposed to handle its own errors,
-        # but if something leaks out, don't crash the UI.
-        st.session_state.biomni_tutor_chat_history.append(
-            {
-                "role": "assistant",
-                "content": f"_(tutor crashed: {e!r})_",
-                "failed": True,
-            }
-        )
-        st.rerun()
-        return
-
-    # Surface the wall-clock cost of this chat turn so users can tell
-    # whether a slow response is the LLM or downstream retrieval. We
-    # append to the stored answer so it renders inline; the chat
-    # history renderer doesn't need to know about timing.
-    from biomentis.ui_core import format_duration
-    _chat_duration = time.monotonic() - _t_chat_start
-    _answer_with_duration = f"{turn.content}  ·  (took {format_duration(_chat_duration)})"
-
-    # 3. Append the assistant turn to the visible history.
-    st.session_state.biomni_tutor_chat_history.append(
-        {
-            "role": "assistant",
-            "content": _answer_with_duration,
-            "citations": list(turn.citations),
-            "bloom_level": turn.bloom_level,
-            "dok_level": turn.dok_level,
-            "rubric_hit": list(turn.rubric_hit),
-            "confidence": turn.confidence,
-            "failed": turn.failed,
-            "also_consider": list(turn.also_consider),
-            **_visuals_dict(turn),
-        }
-    )
-    st.rerun()
+    return {
+        "context": step_context,
+        "task": tutor.current_prompt or "",
+        "transcript": transcript,
+        "last_answer": last_answer,
+        "mode": "chat",  # KB + LLM hybrid; chat panel is decoupled from tutor
+        "step_id": run.get("step_id") if run else None,
+        "plot_mode": current_plot_mode(),
+        "search_dirs": _chat_search_dirs(tutor),
+    }
 
 
 # ----- 7a. Per-step inline Q&A ---------------------------------------------
@@ -1995,15 +2155,23 @@ def _render_step_qa(container: Any, step_id: int, run: dict, tutor, run_id: str 
 
     step_qa: dict = run.setdefault("step_qa", {})
     qa_list = step_qa.get(step_id, [])
+    thread = run.get("step_qa_thread", {}).get(step_id)
     _key_suffix = f"{run_id}_{step_id}"
+    action = None
 
     with container.container():
-        if qa_list:
+        if qa_list or thread:
             with st.expander(
                 f"💬 Questions about this step ({len(qa_list)})", expanded=True
             ):
                 for _qi, turn in enumerate(qa_list):
                     st.markdown(f"**Q:** {turn['question']}")
+                    if turn.get("rungs"):
+                        with st.expander(f"🧭 Guided steps ({len(turn['rungs'])})", expanded=False):
+                            for rung in turn["rungs"]:
+                                st.markdown(f"🧭 {rung.get('message', '')}")
+                                if rung.get("reply"):
+                                    st.markdown(f"**You:** {rung['reply']}")
                     st.markdown(f"**A:** {turn['answer']}")
                     _render_visuals(turn, key=f"chat-step-{_key_suffix}-{_qi}")
                     if turn.get("also_consider"):
@@ -2016,6 +2184,8 @@ def _render_step_qa(container: Any, step_id: int, run: dict, tutor, run_id: str 
                                     line += f" — {why}"
                                 st.markdown(line)
                     st.markdown("---")
+                if thread:
+                    action = _render_scaffold_thread(thread, _key_suffix, show_question=True)
 
         with st.form(
             key=f"biomni_tutor_step_ask_form_{_key_suffix}",
@@ -2025,14 +2195,22 @@ def _render_step_qa(container: Any, step_id: int, run: dict, tutor, run_id: str 
                 "Ask about this step",
                 key=f"biomni_tutor_step_ask_input_{_key_suffix}",
                 label_visibility="collapsed",
-                placeholder="Ask a question about this specific step...",
+                placeholder=(
+                    _SCAFFOLD_PLACEHOLDER if thread else "Ask a question about this specific step..."
+                ),
             )
             asked = st.form_submit_button("💬 Ask about this step")
 
-    if asked and question.strip():
+    text = question.strip() if asked else ""
+    if action or text:
         with container.container():
             with st.spinner("🎓 Thinking..."):
-                _handle_step_qa(tutor, run, step_id, question.strip())
+                if action:
+                    _apply_step_qa(tutor, run, step_id, _scaffold_action(tutor, thread, action))
+                elif thread:
+                    _apply_step_qa(tutor, run, step_id, _scaffold_action(tutor, thread, "reply", text))
+                else:
+                    _handle_step_qa(tutor, run, step_id, text)
         st.rerun()
 
 
@@ -2045,29 +2223,37 @@ def _handle_step_qa(tutor, run: dict, step_id: int, question: str) -> None:
     it re-renders attached to that step's card."""
     from biomentis.ui_visuals import current_plot_mode
 
-    turn = tutor.chat.ask(
-        question=question,
-        context=f"step_id={step_id}",
-        task=run.get("prompt", ""),
-        mode="chat",
+    step = tutor.start_question(
+        question,
+        surface="step",
         step_id=step_id,
-        plot_mode=current_plot_mode(),
-        search_dirs=_chat_search_dirs(tutor),
+        ask_kwargs={
+            "context": f"step_id={step_id}",
+            "task": run.get("prompt", ""),
+            "mode": "chat",
+            "plot_mode": current_plot_mode(),
+            "search_dirs": _chat_search_dirs(tutor),
+        },
     )
-    run.setdefault("step_qa", {}).setdefault(step_id, []).append(
-        {
-            "question": question,
-            "answer": turn.content,
-            "citations": list(turn.citations),
-            "also_consider": list(turn.also_consider),
-            "bloom_level": turn.bloom_level,
-            "dok_level": turn.dok_level,
-            "rubric_hit": list(turn.rubric_hit),
-            "confidence": turn.confidence,
-            "failed": turn.failed,
-            **_visuals_dict(turn),
-        }
-    )
+    _apply_step_qa(tutor, run, step_id, step)
+
+
+def _apply_step_qa(tutor, run: dict, step_id: int, step) -> None:
+    """Keep a step's open thread on the run, or file its released answer
+    under `run["step_qa"][step_id]` in the usual Q/A shape (plus its steps)."""
+    threads = run.setdefault("step_qa_thread", {})
+    if step.released_turn is None:
+        threads[step_id] = step.thread.to_dict()
+        return
+    threads.pop(step_id, None)
+    released = step.released_turn
+    entry = {"question": step.thread.question, "answer": released["content"]}
+    entry.update({k: v for k, v in released.items() if k not in ("role", "content")})
+    if step.thread.rungs:
+        entry["rungs"] = list(step.thread.rungs)
+    run.setdefault("step_qa", {}).setdefault(step_id, []).append(entry)
+    if step.reask:
+        _handle_step_qa(tutor, run, step_id, step.reask)
 
 
 # ----- 8. submit-handler integration --------------------------------------

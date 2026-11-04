@@ -50,6 +50,7 @@ $P -m biomentis.agent.tests.test_kb_context         # knowledge base → agent +
 $P -m biomentis.agent.tests.test_scaffold         # question support: policy, tiers, release rules, leak check, rung call
 $P -m biomentis.agent.tests.test_scaffold_chat    # question support: ask() unchanged at off, profile/key points/stretch, deferred record
 $P -m biomentis.agent.tests.test_scaffold_engine  # question support: threads end to end, teacher lock, logging
+$P -m biomentis.agent.tests.test_scaffold_ui      # question support: sidebar control + lock, page chat and step box threads
 $P -m biomentis.agent.tests.test_tutor_card_cache   # failed cards/empty chat answers retried + loop messages not shown as steps
 $P -m biomentis.agent.tests.test_card_text_length   # card text cut at a sentence, never "truncated for prompt size"; "Also worth knowing" names concepts, no calculations
 $P -m biomentis.agent.tests.test_kb_structures      # PDB/SDF/SMILES in the KB: metadata only + View

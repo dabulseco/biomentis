@@ -32,7 +32,12 @@ from biomentis.run_worker import background_runs_enabled
 from biomentis.ui_core import list_available_providers
 from biomentis.ui_repeat import render_repeat_runs
 from biomentis.ui_repl import render_repl_panel
-from biomentis.ui_settings import render_anthropic_key_field, render_ncbi_email_field, render_ollama_key_field
+from biomentis.ui_settings import (
+    render_anthropic_key_field,
+    render_code_review_model_field,
+    render_ncbi_email_field,
+    render_ollama_key_field,
+)
 from biomentis.ui_tutor import (
     install_renderers,
     render_tutor_chat_panel,
@@ -46,6 +51,18 @@ install_renderers()
 
 # --- Page setup (must be the first Streamlit call) ---
 st.set_page_config(page_title="Biomentis AI Agent", layout="wide")
+
+
+@st.cache_resource(show_spinner=False)
+def _load_saved_code_reviews() -> int:
+    """Fill the Code Review store from the saved sidecars, once per process,
+    so replayed history shows reviews from earlier sessions."""
+    from biomentis.code_review_jobs import load_saved_reviews
+
+    return load_saved_reviews()
+
+
+_load_saved_code_reviews()
 
 
 # --- Sidebar: model picker ----------------------------------------------
@@ -197,6 +214,11 @@ with st.sidebar:
     st.divider()
     st.header("Ollama Cloud")
     render_ollama_key_field()
+
+    st.divider()
+    st.header("Code review")
+    # Model that the Code review button sends code to (Ollama models only).
+    render_code_review_model_field()
 
 
 # --- Agent (rebuilt when the model changes) -----------------------------

@@ -245,16 +245,17 @@ def test_restored_entries_match_live_entries() -> None:
         UIEvent(type="complete", content="done", title="🔄 Complete"),
     ]
 
-    live_code_entries: list[dict] = []
-    live = [transcript_entry_for_event(e, live_code_entries) for e in live_events]
-    live = [e for e in live if e is not None]
-
     with tempfile.TemporaryDirectory() as tmp:
         journal = RunJournal("a task", tmp)
         for event in live_events:
             journal.append(event)
         journal.finish("complete")
         restored = entries_for_run(load_run(journal.path))
+
+    # The live path is given the same run id the journal file is named for.
+    live_code_entries: list[dict] = []
+    live = [transcript_entry_for_event(e, live_code_entries, run_id=journal.run_id) for e in live_events]
+    live = [e for e in live if e is not None]
 
     # The restore prepends the user's prompt, which the live path renders
     # separately at submit time.

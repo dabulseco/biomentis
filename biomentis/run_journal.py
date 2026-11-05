@@ -282,13 +282,20 @@ def load_run(path: str | os.PathLike[str]) -> dict[str, Any]:
     }
 
 
+# Suffix of the code-review sidecar beside a journal (see `biomentis.code_review_jobs`).
+REVIEWS_SUFFIX = ".reviews.jsonl"
+
+
 def list_runs(run_dir: str | os.PathLike[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
     """Summarize the most recent journals, newest first."""
     directory = Path(run_dir or default_run_dir())
     if not directory.is_dir():
         return []
 
-    paths = sorted(directory.glob("*.jsonl"), reverse=True)[:limit]
+    # Code-review sidecars (`<run_id>.reviews.jsonl`) live beside the journals
+    # but are not runs.
+    journals = (p for p in directory.glob("*.jsonl") if not p.name.endswith(REVIEWS_SUFFIX))
+    paths = sorted(journals, reverse=True)[:limit]
     summaries = []
     for path in paths:
         run = load_run(path)
@@ -321,10 +328,25 @@ def entries_for_run(run: dict[str, Any]) -> list[dict[str, Any]]:
     if run.get("prompt"):
         entries.append({"panel": "main", "role": "user", "content": run["prompt"]})
     for record in run.get("events", []):
-        entry = transcript_entry_for_event(event_from_record(record), code_entries)
+        entry = transcript_entry_for_event(event_from_record(record), code_entries, run_id=run.get("run_id"))
         if entry is not None:
             add_transcript_entry(entries, entry)  # a final status goes above the answer
     return entries
+
+
+def format_code_block(index: int, language: str, body: str) -> str:
+    """One block of the annotated script: a marker line, then the code.
+
+    A non-python block is preserved verbatim inside a string rather than
+    silently dropped or left to a syntax error halfway down the file, so
+    the result stays valid Python.
+    """
+    lines = [f"# ===== block {index} ({language}) ====="]
+    if language != "python":
+        lines.append(f'_BLOCK_{index}_{language.upper()} = r"""\n{body}\n"""')
+    else:
+        lines.append(body)
+    return "\n".join(lines)
 
 
 def code_script(run: dict[str, Any]) -> str:
@@ -348,13 +370,6 @@ def code_script(run: dict[str, Any]) -> str:
     for index, block in enumerate(blocks, start=1):
         language = block.get("language") or "python"
         body = block.get("content") or ""
-        parts.append(f"# ===== block {index} ({language}) =====")
-        if language != "python":
-            # Keep it valid Python: a non-python block is preserved verbatim
-            # inside a string rather than silently dropped or left to a syntax
-            # error halfway down the file.
-            parts.append(f'_BLOCK_{index}_{language.upper()} = r"""\n{body}\n"""')
-        else:
-            parts.append(body)
+        parts.append(format_code_block(index, language, body))
         parts.append("")
     return "\n".join(parts)

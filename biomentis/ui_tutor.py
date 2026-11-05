@@ -1889,12 +1889,24 @@ def _chat_search_dirs(tutor) -> list[str]:
 
 def _render_visuals(turn: dict, key: str) -> None:
     """Show a stored turn's code, figure and structure. Reads only the dict:
-    how an answer is shown never depends on the current plot setting."""
+    how an answer is shown never depends on the current plot setting.
+
+    The plot code gets a Code Review button. Its task is the one stored on the
+    turn when it was asked, so starting a new task does not change the
+    review's key (older turns without one use "")."""
     import streamlit as st
 
     code = turn.get("plot_code")
     if code:
         st.code(code, language="python")
+        from biomentis.code_review import CodeReviewRequest
+        from biomentis.ui_code_review import render_code_review
+
+        render_code_review(
+            CodeReviewRequest(code=code, output=turn.get("plot_error") or "", task=turn.get("task") or "", source="tutor"),
+            key=f"cr-tutor-{key}",
+            output_dir=st.session_state.get("biomni_output_dir"),
+        )
         if turn.get("plot_png"):
             st.image(turn["plot_png"])
         elif turn.get("plot_error"):
@@ -2034,6 +2046,7 @@ def _apply_chat_step(tutor, step, started: float) -> None:
 
     turn = dict(step.released_turn)
     turn["content"] = f"{turn['content']}  ·  (took {format_duration(time.monotonic() - started)})"
+    turn["task"] = step.thread.task  # what the code was for, for a Code Review
     history.append(turn)
     if step.reask:
         # The student moved on mid-exchange: their new text is a new question.
@@ -2249,6 +2262,7 @@ def _apply_step_qa(tutor, run: dict, step_id: int, step) -> None:
     released = step.released_turn
     entry = {"question": step.thread.question, "answer": released["content"]}
     entry.update({k: v for k, v in released.items() if k not in ("role", "content")})
+    entry["task"] = step.thread.task  # what the code was for, for a Code Review
     if step.thread.rungs:
         entry["rungs"] = list(step.thread.rungs)
     run.setdefault("step_qa", {}).setdefault(step_id, []).append(entry)

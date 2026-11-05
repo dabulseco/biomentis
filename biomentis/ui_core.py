@@ -879,8 +879,22 @@ def run_settings(agent: Any) -> str:
     return " · ".join(parts)
 
 
+def _next_block_index(code_entries: list[dict[str, Any]] | None, run_id: str | None) -> int | None:
+    """Position of the next code block within its run (0-based).
+
+    `code_entries` can span several runs (a tutor continue starts a new run
+    without a new user message), so with a run id only that run's blocks
+    count; that matches replaying the run's journal on its own.
+    """
+    if code_entries is None:
+        return None
+    if run_id is None:
+        return len(code_entries)
+    return sum(1 for e in code_entries if e.get("journal_run_id") == run_id)
+
+
 def transcript_entry_for_event(
-    event: Any, code_entries: list[dict[str, Any]] | None = None
+    event: Any, code_entries: list[dict[str, Any]] | None = None, run_id: str | None = None
 ) -> dict[str, Any] | None:
     """Map one `UIEvent` to the transcript entry that renders it.
 
@@ -894,6 +908,12 @@ def transcript_entry_for_event(
     An `observation` retro-titles the code block it belongs to (the one
     immediately before it), so the caller must pass the same list across the
     whole run for the "done in Xs" stamp to appear.
+
+    `run_id` is the id of the run (the one `runs/<run_id>.jsonl` is named
+    for). A code entry is tagged with it and with its 0-based position among
+    the run's code entries, so a later code review can find the run's other
+    code. Answer entries (`solution`, `summary`) are tagged with the run id
+    too. Live and replayed runs pass the same id and so get the same tags.
 
     The one thing this does NOT do is stamp a `complete` event with the run's
     total time: that needs the run clock, which lives in the UI's session
@@ -911,7 +931,9 @@ def transcript_entry_for_event(
     elif kind == "reasoning":
         entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "solution":
-        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title, "answer": True}
+        # Tagged with the run like code entries, so a review of a code block
+        # in the answer is tied to its run (`code_review.answer_locator`).
+        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title, "answer": True, "journal_run_id": run_id}
     elif kind == "code":
         entry = {
             "panel": "inner",
@@ -920,6 +942,10 @@ def transcript_entry_for_event(
             "content": event.content,
             "language": event.language,
             "title": event.title,
+            # Not "run_id": that key is the tutor's run id, which step grouping
+            # (`_StepBoxTracker`) reads; this one names the journal file.
+            "journal_run_id": run_id,
+            "block_index": _next_block_index(code_entries, run_id),
         }
         if code_entries is not None:
             code_entries.append(entry)
@@ -977,7 +1003,7 @@ def transcript_entry_for_event(
         if getattr(event, "caption", None):
             entry["caption"] = event.caption
     elif kind == "summary":
-        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title, "answer": True}
+        entry = {"panel": "main", "role": "assistant", "content": event.content, "title": event.title, "answer": True, "journal_run_id": run_id}
     elif kind == "gate_result":
         entry = {"panel": "inner", "role": "assistant", "content": event.content, "title": event.title}
     elif kind == "round_pause":
@@ -1182,6 +1208,16 @@ class ExportEntry:
     also_consider: list[dict] | None = None
     # A figure's titles and file name, shown under it.
     caption: str | None = None
+    # Which journal run and block an agent code entry is (the keys a code
+    # review is stored under), and its finished review as `CodeReview.to_dict()`.
+    journal_run_id: str | None = None
+    block_index: int | None = None
+    code_review: dict | None = None
+    # An answer's reviewed code blocks: [{"block": 0-based, "language", "review": dict}].
+    answer_reviews: list[dict] | None = None
+    # Set by `export_run`: the file name of each corrected script it wrote
+    # (`review_file` for a code entry, `"file"` in each answer_reviews item).
+    review_file: str | None = None
 
 
 def ui_event_to_export_entry(event: UIEvent) -> ExportEntry:
@@ -1415,10 +1451,41 @@ def _qa_extras_html(entry: ExportEntry) -> str:
     return "".join(parts)
 
 
+_REVIEW_EXTENSIONS = {"python": ".py", "bash": ".sh", "r": ".R"}
+
+
+def _code_review_html(review_dict: dict, language: str, file_name: str | None = None) -> str:
+    """The review block under a piece of code. Every model-written string is escaped.
+
+    `file_name` is the corrected script the export wrote for this review.
+    """
+    from biomentis.code_review import CodeReview
+    from biomentis.ui_code_review import VERDICT_LABELS
+
+    review = CodeReview.from_dict(review_dict)
+    label = VERDICT_LABELS.get(review.verdict, review.verdict or "Done")
+    parts = [f'<div class="border rounded p-3 mt-2 small"><div class="fw-semibold mb-1">Code review — {html.escape(label)}</div>']
+    if review.summary:
+        parts.append(f"<p>{html.escape(review.summary)}</p>")
+    for n, issue in enumerate(review.issues, 1):
+        where = f" (line {issue.line})" if issue.line is not None else ""
+        parts.append(f"<div class='mb-2'><strong>{n}. {html.escape(issue.severity.upper())} &middot; {html.escape(issue.kind)}{where}</strong>")
+        if issue.quote:
+            parts.append(f'<pre class="bg-body-secondary p-2 rounded mb-1"><code>{html.escape(issue.quote)}</code></pre>')
+        parts.append(f"<div>Problem: {html.escape(issue.problem)}</div><div>Fix: {html.escape(issue.fix)}</div></div>")
+    if review.corrected_code and file_name:
+        parts.append(f"<div class='text-muted'>The corrected script is saved beside this page as {html.escape(file_name)}.</div>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def _entry_body_html(entry: ExportEntry, assets: ExportAssets | None = None) -> str:
     if entry.kind == "code":
         language = entry.language or ""
-        return f'<pre class="bg-dark text-light p-3 rounded"><code class="language-{html.escape(language)}">{html.escape(entry.content)}</code></pre>'
+        code_html = f'<pre class="bg-dark text-light p-3 rounded"><code class="language-{html.escape(language)}">{html.escape(entry.content)}</code></pre>'
+        if entry.code_review:
+            code_html += _code_review_html(entry.code_review, language, entry.review_file)
+        return code_html
     if entry.kind == "observation":
         return f'<pre class="bg-secondary-subtle p-3 rounded small text-wrap">{html.escape(entry.content)}</pre>'
     if entry.kind in ("image", "plot_withheld") and entry.file_path:
@@ -1437,9 +1504,12 @@ def _entry_body_html(entry: ExportEntry, assets: ExportAssets | None = None) -> 
         body = _render_markdown(entry.content) if entry.content else ""
         tail = _qa_extras_html(entry) if entry.kind == "qa" else ""
         return f'<div class="d-flex align-items-start gap-2"><span class="badge {badge_class} flex-shrink-0">{badge}</span><div class="flex-grow-1">{body}{tail}</div></div>'
-    if entry.content:
-        return _render_markdown(entry.content)
-    return ""
+    body = _render_markdown(entry.content) if entry.content else ""
+    for item in entry.answer_reviews or []:
+        language = item.get("language") or "python"
+        body += f"<div class='small text-muted mt-2'>Code block {item['block'] + 1} of this answer ({html.escape(language)})</div>"
+        body += _code_review_html(item.get("review") or {}, language, item.get("file"))
+    return body
 
 
 def _render_entry_card(entry: ExportEntry, assets: ExportAssets | None = None) -> str:
@@ -1548,6 +1618,36 @@ def render_transcript_html(
 """
 
 
+def _write_corrected_scripts(export_dir: str, entries: list[ExportEntry]) -> None:
+    """Save each reviewed block's corrected script as code_review_<n>.<ext>, n from 1 in export order.
+
+    Code entries and the code blocks of answers both count. Each written file's
+    name is recorded on its entry (`review_file`) or answer item (`"file"`), so
+    the page names it.
+    """
+    for old in os.listdir(export_dir):  # an earlier export of this folder may have had more
+        if re.fullmatch(r"code_review_\d+\.(py|sh|R)", old):
+            os.remove(os.path.join(export_dir, old))
+    n = 0
+
+    def write(review: dict | None, language: str | None) -> str | None:
+        nonlocal n
+        corrected = (review or {}).get("corrected_code")
+        if not corrected:
+            return None
+        n += 1
+        name = f"code_review_{n}{_REVIEW_EXTENSIONS.get((language or 'python').lower(), '.py')}"
+        with open(os.path.join(export_dir, name), "w", encoding="utf-8") as f:
+            f.write(corrected)
+        return name
+
+    for entry in entries:
+        if entry.kind == "code":
+            entry.review_file = write(entry.code_review, entry.language)
+        for item in entry.answer_reviews or []:
+            item["file"] = write(item.get("review"), item.get("language"))
+
+
 MAIN_EXPORT_TITLE = "Biomentis A1 Agent — Main Output"
 INNER_EXPORT_TITLE = "Biomentis Executor — Reasoning Log"
 
@@ -1580,6 +1680,7 @@ def export_run(
     stamp = output_stamp(export_dir)
     os.makedirs(export_dir, exist_ok=True)
     shutil.rmtree(os.path.join(export_dir, "figures"), ignore_errors=True)
+    _write_corrected_scripts(export_dir, [*main_entries, *inner_entries])
     assets = ExportAssets(export_dir)
     # The main page begins with the run's status: the latest one, if any.
     statuses = [i for i, e in enumerate(main_entries) if e.kind == "final_status"]

@@ -1,4 +1,5 @@
 import glob
+import hashlib
 import inspect
 import os
 import re
@@ -2498,6 +2499,10 @@ Each library is listed with its description to help you understand its functiona
                 code in this run and whether its units are right. List the ones that were only
                 stated, or look wrong, and tell the agent to recompute them in code.
                 Name design choices or limits that no source consulted in this run supports.
+                For each script, compare its printed values with the comments and labels that
+                describe them, check its units and conversions, and
+                recompute one key value by hand. Name any script whose output contradicts its own
+                labels.
                 No question asked, just feedbacks.
                 """
             # Divergent by design ("think hard what are missing"), so this is
@@ -4421,6 +4426,31 @@ Each library is listed with its description to help you understand its functiona
             run = st.session_state.get("biomni_tutor_run") if panel == "inner" else None
             step_qa = (run or {}).get("step_qa") or {}
 
+            from biomentis.code_review import answer_locator, extract_code_blocks
+            from biomentis.code_review_jobs import review_for_answer, review_for_block
+
+            def _review_dict(e):
+                # Only agent code entries carry a locator; old runs simply have no review.
+                rid, idx = e.get("journal_run_id"), e.get("block_index")
+                if e.get("kind") != "code" or rid is None or idx is None:
+                    return None
+                review = review_for_block(rid, idx)
+                return review.to_dict() if review else None
+
+            def _answer_reviews(e):
+                # Reviews of the code blocks inside an answer, found by each
+                # block's answer locator within the answer's run.
+                rid = e.get("journal_run_id")
+                if rid is None or e.get("kind") or e.get("panel") != "main" or e.get("role") != "assistant":
+                    return None
+                content = e.get("content") or ""
+                found = []
+                for i, (language, _code) in enumerate(extract_code_blocks(content)):
+                    review = review_for_answer(rid, answer_locator(content, i))
+                    if review:
+                        found.append({"block": i, "language": language, "review": review.to_dict()})
+                return found or None
+
             out: list[ExportEntry] = []
             for e in st.session_state.biomni_transcript:
                 if e["panel"] != panel:
@@ -4439,6 +4469,10 @@ Each library is listed with its description to help you understand its functiona
                         step_id=step_id,
                         run_id=run_id,
                         caption=e.get("caption"),
+                        journal_run_id=e.get("journal_run_id"),
+                        block_index=e.get("block_index"),
+                        code_review=_review_dict(e),
+                        answer_reviews=_answer_reviews(e),
                     )
                 )
                 # "paused" is the last transcript entry generated for a
@@ -4498,6 +4532,55 @@ Each library is listed with its description to help you understand its functiona
 
         # Counts structure viewers drawn in this script run, for unique keys.
         _structure_keys = {"n": 0}
+        # Code Review widget keys used in this script run. The same entry, or
+        # the same code, can be drawn twice in one run (two identical answers,
+        # old untagged blocks), so a repeat gets a numeric suffix rather than
+        # raising DuplicateWidgetID.
+        _review_keys: set[str] = set()
+
+        def _code_review(req, key, output_dir=None, saved=None):
+            from biomentis.ui_code_review import render_code_review
+
+            unique, n = key, 1
+            while unique in _review_keys:
+                n += 1
+                unique = f"{key}-{n}"
+            _review_keys.add(unique)
+            render_code_review(req, key=unique, output_dir=output_dir, saved=saved)
+
+        def _render_step_review(entry):
+            from biomentis.code_review import request_for_entry, task_for_entry
+            from biomentis.code_review_jobs import review_for_block
+
+            transcript = st.session_state.get("biomni_transcript") or []
+            run_id, block_index = entry.get("journal_run_id"), entry.get("block_index")
+            saved = None
+            if run_id is not None and block_index is not None:
+                key = f"cr-{run_id}-{block_index}"
+                # A restored run's earlier code differs from the session that
+                # reviewed it, so its review is found by locator instead.
+                saved = review_for_block(run_id, block_index)
+            else:  # entries replayed from before code entries were tagged
+                key = f"cr-{hashlib.sha1((entry.get('content') or '').encode('utf-8')).hexdigest()[:12]}"
+            _code_review(request_for_entry(transcript, entry, task_for_entry(transcript, entry)), key, saved=saved)
+
+        def _render_answer_reviews(entry):
+            # Code blocks inside an answer each get a review, below the answer,
+            # keyed by the block's answer locator (the answer's content hash and
+            # the block's position). With self_critic on, every revised answer
+            # gets its own buttons. The request carries the answer's journal run
+            # id, so the review is saved in <run_dir>/<run_id>.reviews.jsonl
+            # (no-run.reviews.jsonl for an answer without one), which
+            # load_saved_reviews reloads.
+            from biomentis.code_review import requests_for_answer, task_for_entry
+            from biomentis.code_review_jobs import review_for_answer
+
+            transcript = st.session_state.get("biomni_transcript") or []
+            requests = requests_for_answer(transcript, entry, task_for_entry(transcript, entry))
+            for i, req in enumerate(requests):
+                st.caption(f"Code block {i + 1} of this answer ({req.language})")
+                saved = review_for_answer(req.run_id, req.answer_locator) if req.run_id else None
+                _code_review(req, f"cr-{req.answer_locator}", saved=saved)
 
         def render_entry(container, entry):
             with container.chat_message(entry.get("role", "assistant")):
@@ -4505,6 +4588,7 @@ Each library is listed with its description to help you understand its functiona
                     st.markdown(f"**{entry['title']}**")
                 if entry.get("kind") == "code":
                     st.code(entry["content"], language=entry.get("language") or "python")
+                    _render_step_review(entry)
                 elif entry.get("kind") in ("image", "plot"):
                     # A missing file (run dir deleted) shows a caption
                     # instead of raising and breaking transcript replay.
@@ -4580,6 +4664,8 @@ Each library is listed with its description to help you understand its functiona
                         st.warning(status)
                 elif entry.get("content"):
                     st.markdown(entry["content"])
+                    if entry.get("panel") == "main" and entry.get("role") == "assistant":
+                        _render_answer_reviews(entry)
 
         class _StepBoxTracker:
             """Groups consecutive inner-panel entries that share the same
@@ -4900,7 +4986,11 @@ Each library is listed with its description to help you understand its functiona
                     # One shared mapping with `biomentis.ui_core`, so a run
                     # restored from a journal renders exactly like the live
                     # one that produced it.
-                    entry = transcript_entry_for_event(event, code_execution_entries)
+                    entry = transcript_entry_for_event(
+                        event,
+                        code_execution_entries,
+                        run_id=_runner.run_id if _runner is not None else getattr(self, "current_run_id", None),
+                    )
 
                     if event.type in ("solution", "summary"):
                         self.main_history_copy += [{"role": "assistant", "content": event.content}]

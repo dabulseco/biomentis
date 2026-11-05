@@ -432,6 +432,9 @@ def verify_anthropic_key(key: str | None) -> tuple[bool, str]:
 # Qwen, GLM, ...) at ollama.com directly, without a local daemon signed in
 # via `ollama signin`. Same tiers and placeholder handling as the Anthropic key.
 
+# Winner of the code-review model comparison (spec "Model comparison results").
+DEFAULT_CODE_REVIEW_MODEL = "gpt-oss:120b-cloud"
+
 OLLAMA_CLOUD_HOST_DEFAULT = "https://ollama.com"
 
 

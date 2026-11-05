@@ -81,6 +81,8 @@ $P -m biomentis.agent.tests.test_round_pause_ui     # pause panel (accept as is,
 $P -m biomentis.agent.tests.test_repeat_runs        # repeat runs: K runs, one rubric, paused run parked while the next runs, partial + final report (rubric table, summary, disagreements marked variation/contradiction, runs with no quantities), CLI pause prompt, CLI reviewer (stub builder, same-family warning), batch allows pauses, BIOMNI_REPEAT_RUNS=false
 $P -m biomentis.agent.tests.test_repeat_runs_ui     # repeat-run sidebar tool: hidden with BIOMNI_REPEAT_RUNS=false, toggle, button gating (empty prompt, batch or interactive run active, Send off during a batch), per-run pause panels, progress table, report download, repeat agents always gated, take over a batch whose tab is gone
 $P -m biomentis.agent.tests.test_robustness_regressions  # regressions replayed from the real run exports (false sum, NaCl i, n per solute, missing/stale figures, unsourced verified, budget x4, unlabelled sample data, revision labels)
+$P -m biomentis.agent.tests.test_code_review       # code review core, jobs + sidecars, context, setting, export
+$P -m biomentis.agent.tests.test_code_review_ui    # Code Review button + report panel wherever code is shown, app smoke
 $P biomentis/agent/tutor/tests/test_smoke_e2e.py    # tutor end-to-end
 $P biomentis/agent/tutor/tests/test_critic.py       # critic + memory
 ```

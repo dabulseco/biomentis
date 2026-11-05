@@ -17,6 +17,7 @@ import hashlib
 import streamlit as st
 
 from biomentis.config import (
+    DEFAULT_CODE_REVIEW_MODEL,
     apply_anthropic_key,
     apply_ncbi_email,
     apply_ollama_key,
@@ -214,3 +215,75 @@ def render_ollama_key_field(verify: bool = True) -> None:
             st.rerun()  # list the hosted models in the picker above
     _, ok, message = st.session_state[_OLLAMA_VERDICT_KEY]
     st.caption(("✓ " if ok else "⚠️ ") + message)
+
+
+CODE_REVIEW_MODEL_KEY = "biomentis_code_review_model"
+CODE_REVIEW_TIMEOUT_S = 300  # a hung call must not hold one of the two review workers
+CODE_REVIEW_TEMPERATURE = 0.2  # the temperature the model comparison ran at
+
+_CODE_REVIEW_HELP = (
+    "The model the Code review button sends a code block to. Ollama models only "
+    "(local, signed-in cloud and Ollama Cloud). Pick a different model from the "
+    "one running the analysis to get an independent read."
+)
+
+
+def _ollama_review_models() -> list[str]:
+    """Ollama model names for the review picker, local ones first, no duplicates."""
+    from biomentis.ui_core import list_available_providers
+
+    providers = list_available_providers()
+    names: list[str] = []
+    for source in ("Ollama", "OllamaCloud"):
+        for m in providers.get(source, []):
+            if m not in names:
+                names.append(m)
+    return names
+
+
+def _default_review_model(models: list[str]) -> str:
+    """The default review model as listed: hosted Ollama Cloud models carry no
+    "-cloud" suffix, so accept the bare name too (the exact name wins)."""
+    for name in (DEFAULT_CODE_REVIEW_MODEL, DEFAULT_CODE_REVIEW_MODEL.removesuffix("-cloud")):
+        if name in models:
+            return name
+    return models[0]
+
+
+def render_code_review_model_field() -> None:
+    """Render the Code review model picker (Ollama models only, no "off" entry)."""
+    models = _ollama_review_models()
+    if not models:
+        st.caption("No Ollama models found — start Ollama or set an Ollama API key to use Code review.")
+        return
+    current = st.session_state.get(CODE_REVIEW_MODEL_KEY)
+    if current not in models:
+        st.session_state[CODE_REVIEW_MODEL_KEY] = _default_review_model(models)
+    st.selectbox("Code review model", options=models, key=CODE_REVIEW_MODEL_KEY, help=_CODE_REVIEW_HELP)
+
+
+def code_review_model() -> str:
+    """The selected review model (UI thread only: reads session state)."""
+    return st.session_state.get(CODE_REVIEW_MODEL_KEY) or DEFAULT_CODE_REVIEW_MODEL
+
+
+def code_review_llm(model: str):
+    """Build the review client for `model`; safe on a worker thread (no session state).
+
+    Temperature is fixed at 0.2. The 300 s timeout is set on the HTTP client itself. Thinking for cloud
+    models follows `_ollama_reasoning` inside `get_llm`.
+    """
+    from biomentis.llm import get_llm
+    from biomentis.ollama_utils import list_ollama_models
+
+    try:
+        local = model in list_ollama_models()
+    except Exception:
+        local = False
+    return get_llm(
+        model,
+        temperature=CODE_REVIEW_TEMPERATURE,
+        source="Ollama" if local or not resolve_ollama_key() else "OllamaCloud",
+        config=default_config,
+        timeout=CODE_REVIEW_TIMEOUT_S,
+    )

@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import streamlit as st
 
+from biomentis.code_review import CodeReviewRequest
 from biomentis.tool.support_tools import run_python_repl
+from biomentis.ui_code_review import render_code_review
 
 _HISTORY_LIMIT = 20
 BATCH_BUSY_CAPTION = "Disabled while a repeat-run batch is running: its runs use this namespace."
+_CLEARED_MARKER = "# (namespace cleared)"
 
 
 def _ensure_repl_state() -> None:
@@ -152,7 +155,7 @@ def render_repl_panel(agent) -> None:
 
                 importlib.reload(support_tools)
                 st.session_state.biomni_repl_history.append(
-                    {"code": "# (namespace cleared)", "output": ""}
+                    {"code": _CLEARED_MARKER, "output": ""}
                 )
                 _trim_history()
                 st.toast("REPL namespace cleared.", icon="🧹")
@@ -180,6 +183,12 @@ def render_repl_panel(agent) -> None:
                         st.code(entry["code"], language="python")
                     st.markdown("**Output:**")
                     st.code(entry["output"] or "(no output)", language="text")
+                    if entry["code"].strip() and entry["code"] != _CLEARED_MARKER:
+                        render_code_review(
+                            CodeReviewRequest(code=entry["code"], output=entry["output"] or "", source="repl"),
+                            key=f"cr-repl-{len(history) - i}",
+                            output_dir=st.session_state.get("biomni_output_dir"),
+                        )
 
     # --- Auto-run hook (runs even when not rendering the panel,
     # so toggling the switch takes effect on the next agent turn) ----------

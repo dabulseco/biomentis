@@ -791,6 +791,20 @@ def test_gate_reviewer() -> None:
         a1_module.time.sleep = sleep
 
 
+def test_code_window() -> None:
+    print("\n[code window] reviewer sees head and tail of each step's code")
+    from biomentis.independent_review import _STEP_CODE_CHARS, _clip
+
+    _check("code window is 4000", _STEP_CODE_CHARS == 4000)
+    text = "HEAD\n" + "x" * 10_000 + "\nTAIL_TOTALS"
+    out = _clip(text, 4000)
+    _check("keeps head", out.startswith("HEAD"))
+    _check("keeps tail", out.endswith("TAIL_TOTALS"))
+    _check("says what was omitted", "characters omitted" in out)
+    _check("within limit + marker", len(out) <= 4000 + 60)
+    _check("short text untouched", _clip("abc", 4000) == "abc")
+
+
 def run_all() -> int:
     print("=" * 60)
     print("Independent review tests")
@@ -809,6 +823,7 @@ def run_all() -> int:
         test_compare_reported,
         test_rubric_coverage,
         test_gate_reviewer,
+        test_code_window,
     ):
         try:
             test()
